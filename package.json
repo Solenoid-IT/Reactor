@@ -1,6 +1,6 @@
 {
   "name": "reactor",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "Electron runtime to execute TypeScript automation scripts with @schedule and @on metadata",
   "author": "Solenoid-IT",
   "main": "boot.js",
