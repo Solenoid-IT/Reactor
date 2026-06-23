@@ -1,0 +1,17 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('reactor', {
+	openScriptsFolder: () => ipcRenderer.invoke('open-scripts-folder'),
+	openScriptFile: (filePath) => ipcRenderer.invoke('open-script-file', filePath),
+	runScriptNow: (filePath) => ipcRenderer.invoke('run-script-now', filePath),
+	createScriptFile: (templateKey) => ipcRenderer.invoke('create-script-file', templateKey),
+	deleteScriptFile: (filePath) => ipcRenderer.invoke('delete-script-file', filePath),
+	renameScriptFile: (filePath, nextName) => ipcRenderer.invoke('rename-script-file', filePath, nextName),
+	confirmDeleteScript: (scriptName) => ipcRenderer.invoke('confirm-delete-script', scriptName),
+	toggleScriptDirective: (filePath, directive) => ipcRenderer.invoke('toggle-script-directive', filePath, directive),
+	getScriptsInfo: () => ipcRenderer.invoke('get-scripts-info'),
+	getUiSettings: () => ipcRenderer.invoke('get-ui-settings'),
+	pickDefaultProgram: () => ipcRenderer.invoke('pick-default-program'),
+	openEventLog: (filePath) => ipcRenderer.invoke('open-event-log', filePath),
+	clearEventLog: (filePath) => ipcRenderer.invoke('clear-event-log', filePath),
+});

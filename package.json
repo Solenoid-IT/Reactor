@@ -1,0 +1,63 @@
+{
+  "name": "reactor",
+  "version": "0.1.0",
+  "description": "Electron runtime to execute TypeScript automation scripts with @schedule and @on metadata",
+  "author": "Solenoid-IT",
+  "main": "boot.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron .",
+    "start:bg": "electron .",
+    "start:debug-ui": "REACTOR_SHOW_WINDOW=1 electron .",
+    "start:daemon": "node daemon.js",
+    "start:daemon:linux": "REACTOR_DATA_DIR=$HOME/.config/Reactor node daemon.js",
+    "daemon:list": "node daemonctl.js list",
+    "daemon:status": "node daemonctl.js status",
+    "daemon:run": "node daemonctl.js run",
+    "daemon:stop": "node daemonctl.js stop",
+    "pack": "electron-builder --dir",
+    "build": "electron-builder",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "electron": "^41.7.1",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.reactor.app",
+    "productName": "Reactor",
+    "files": [
+      "boot.js",
+      "daemon.js",
+      "daemonctl.js",
+      "preload.js",
+      "src/**/*",
+      "assets/**/*",
+      "reactor.service",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility"
+    }
+  }
+}

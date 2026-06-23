@@ -1,0 +1,23 @@
+[Unit]
+Description=Reactor Automation Daemon (headless)
+After=network.target
+
+[Service]
+Type=simple
+User=reactor
+Group=reactor
+WorkingDirectory=/opt/reactor
+Environment=NODE_ENV=production
+Environment=REACTOR_DATA_DIR=/var/lib/reactor
+ExecStart=/usr/bin/node /opt/reactor/daemon.js
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# Journald logs:
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

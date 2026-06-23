@@ -1,0 +1,117 @@
+# Module Architecture
+
+Refactor of boot.js based on the **Single Responsibility Principle (SRP)**.
+
+## Structure
+
+```
+Reactor/
+├── boot.js                    # Entry point (35 lines)
+├── preload.js                 # IPC bridge
+├── src/
+│   ├── scheduleParser.js      # @schedule expression parsing
+│   ├── metadata.js            # Script metadata parsing (@state, @on, @schedule)
+│   ├── scriptLoader.js        # TypeScript transpilation
+│   ├── networkMonitor.js      # Connectivity monitoring
+│   ├── runtime.js             # Main ReactorRuntime class
+│   └── ui.js                  # UI, IPC handlers, HTML
+└── [other files]
+```
+
+## Modules
+
+### `boot.js` (Entry Point)
+- ✅ App lifecycle orchestration
+- ✅ Directory resolution (external/bundled)
+- ✅ Background mode setup
+- ✅ IPC handler setup
+
+### `scheduleParser.js`
+- Parses expressions: `EVERY N SECOND|MINUTE|HOUR`
+- Returns: interval in milliseconds or null
+
+### `metadata.js`
+- Extracts metadata from TypeScript comments
+- Supports: `@state`, `@schedule`, `@on`, `@watch`, `@mutex`
+
+### Available Script Directives
+
+#### `@state ENABLED|DISABLED`
+Controls script execution. Default: `DISABLED`
+```typescript
+// @state ENABLED
+```
+
+#### `@schedule EXPRESSION`
+Periodic execution. Supports: `EVERY N SECOND|MINUTE|HOUR`
+```typescript
+// @schedule EVERY 30 SECOND
+```
+
+#### `@on EVENT_NAME[,EVENT2,...]`
+Event-driven execution. Built-in events: BOOT, WIFI_ON/OFF, NET_ON/OFF
+```typescript
+// @on BOOT, NET_ON, CUSTOM_EVENT
+```
+
+#### `@watch /path/to/folder` (multiple supported)
+File system monitoring. Paths can be absolute or relative to the script directory.
+Triggers `run()` on file/directory changes with `ctx.watchPath` and `ctx.watchType`.
+```typescript
+// @watch ~/Desktop/monitor
+// @watch ./relative/path
+```
+
+**watchType values:**
+- `file:created` | `file:deleted` | `file:moved` | `file:changed`
+- `dir:created` | `dir:deleted` | `dir:moved`
+
+#### `@mutex ON|OFF`
+Prevents concurrent executions. Default: `OFF`
+```typescript
+// @mutex ON
+```
+
+**Context example:**
+```typescript
+export async function run(ctx: Context) {
+	if (ctx.trigger === 'WATCH') {
+		await ctx.log(`File event: ${ctx.watchPath} (${ctx.watchType})`, 'I');
+	}
+}
+```
+
+### `scriptLoader.js`
+- Transpiles TypeScript → CommonJS
+- Creates an isolated module via Function constructor
+- Loads exports
+
+### `networkMonitor.js`
+- `NetworkMonitor` class handles polling
+- DNS lookup every 5 seconds
+- Emits events: WIFI_ON/OFF, NET_ON/OFF
+- Methods: `start()` / `stop()`
+
+### `runtime.js`
+- Main `ReactorRuntime` class
+- Responsibilities:
+  - Script discovery
+  - Schedule setup
+  - Event emission
+  - Script execution
+  - Event logging
+- Uses all the other modules
+
+### `ui.js`
+- Builds HTML UI
+- Creates main window
+- Sets up IPC handlers
+- Contains no runtime logic
+
+## Benefits
+
+✅ **Testability**: Each module is isolated
+✅ **Maintainability**: Single clear responsibility per module
+✅ **Reusability**: Modules can be used standalone
+✅ **Clarity**: boot.js is highly readable (35 lines)
+✅ **Scalability**: Easy to add new features
