@@ -15,6 +15,19 @@ Each script also supports:
 - @state for enable/disable
 - @mutex for concurrency control
 
+## Requirements
+
+Before running Reactor, make sure your system has:
+- Node.js 20 or newer
+- npm (usually included with Node.js)
+
+You can verify your installed versions with:
+
+```bash
+node -v
+npm -v
+```
+
 ## Quick Start
 
 For local development:
