@@ -40,6 +40,7 @@ function parseDirectiveHeader(source) {
 		on: null,
 		mutex: null,
 		watch: [],
+		route: [],
 	};
 
 	for (; index < lines.length; index += 1) {
@@ -74,6 +75,12 @@ function parseDirectiveHeader(source) {
 			continue;
 		}
 
+		const routeMatch = line.match(/^\s*\/\/\s*@route\s+(.+)$/i);
+		if (routeMatch) {
+			values.route.push(routeMatch[1].trim());
+			continue;
+		}
+
 		if (line.trim() === '') {
 			continue;
 		}
@@ -97,7 +104,7 @@ function rebuildDirectiveHeader(source, overrides = {}) {
 	let bodyStart = index;
 	for (; bodyStart < lines.length; bodyStart += 1) {
 		const line = lines[bodyStart];
-		if (/^\s*\/\/\s*@(state|mutex|on|schedule|watch)\b/i.test(line) || line.trim() === '') {
+		if (/^\s*\/\/\s*@(state|mutex|on|schedule|watch|route)\b/i.test(line) || line.trim() === '') {
 			continue;
 		}
 		break;
@@ -116,6 +123,14 @@ function rebuildDirectiveHeader(source, overrides = {}) {
 
 	if (nextValues.on) {
 		headerLines.push(`// @on ${nextValues.on}`);
+	}
+
+	if (Array.isArray(nextValues.route)) {
+		for (const routeEntry of nextValues.route) {
+			if (routeEntry) {
+				headerLines.push(`// @route ${routeEntry}`);
+			}
+		}
 	}
 
 	if (nextValues.schedule) {
@@ -1840,6 +1855,35 @@ function setupIpcHandlers(runtime) {
 		return readUiSettings();
 	});
 
+	ipcMain.handle('get-http-server-config', async () => {
+		if (!runtime || !runtime.getHttpServerConfig) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		return { ok: true, config: runtime.getHttpServerConfig() };
+	});
+
+	ipcMain.handle('set-http-server-port', async (_, port) => {
+		if (!runtime || !runtime.setHttpServerPort) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		try {
+			const config = await runtime.setHttpServerPort(port);
+			return { ok: true, config };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('get-http-server-logs', async (_, limit) => {
+		if (!runtime || !runtime.getHttpServerLogs) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		return { ok: true, logs: runtime.getHttpServerLogs(limit) };
+	});
+
 	ipcMain.handle('pick-default-program', async () => {
 		const result = await dialog.showOpenDialog({
 			title: 'Select default program for scripts',
@@ -2016,6 +2060,23 @@ function setupIpcHandlers(runtime) {
 				'}',
 				'',
 			],
+			route: [
+				'// @state DISABLED',
+				'// @mutex ON',
+				'// @route POST /run-script-x',
+				'',
+				'',
+				'',
+				"import type { Context } from './context.ts';",
+				'',
+				'',
+				'',
+				'export async function run (ctx : Context)',
+				'{',
+				"\tawait ctx.log('route trigger: ' + (ctx.routeMethod || '') + ' ' + (ctx.routePath || ''));",
+				'}',
+				'',
+			],
 		};
 
 		const safeTemplateKey = templateKey && templateMap[templateKey] ? templateKey : 'schedule';
@@ -2027,6 +2088,16 @@ function setupIpcHandlers(runtime) {
 			'\texpression?: string | null;',
 			'\twatchPath?: string;',
 			'\twatchType?: \'file:created\' | \'file:deleted\' | \'file:moved\' | \'dir:created\' | \'dir:deleted\' | \'dir:moved\' | \'file:changed\';',
+			'\trouteMethod?: string;',
+			'\troutePath?: string;',
+			'\trouteQuery?: string;',
+			'\trouteBody?: string;',
+			'\trouteHeaders?: Record<string, string | string[] | undefined>;',
+			'\tapi?: any;',
+			'\tFileSystem?: any;',
+			'\tHttpClient?: any;',
+			'\tDevice?: any;',
+			'\tSystem?: any;',
 			'\tlog: (message: string, type?: \'E\' | \'W\' | \'I\' | \'D\') => Promise<void> | void;',
 			'}',
 			'',
@@ -2325,6 +2396,7 @@ function setupIpcHandlers(runtime) {
 		if (runtime) {
 			return {
 				path: runtime.scriptsDir,
+				httpServer: runtime.getHttpServerConfig ? runtime.getHttpServerConfig() : null,
 				scripts: runtime.scripts.map((s) => ({
 					name: s.name,
 					path: s.path,
@@ -2333,6 +2405,7 @@ function setupIpcHandlers(runtime) {
 					enabled: s.enabled,
 					schedule: s.schedule,
 					events: s.events,
+					routes: s.routes || [],
 					mutex: s.mutex,
 					watch: s.watch || [],
 				})),

@@ -1,11 +1,13 @@
 const fs = require('fs/promises');
 const fsNative = require('fs');
+const http = require('http');
 const path = require('path');
 const { parseScheduleExpression } = require('./scheduleParser');
 const { parseScriptMetadata } = require('./metadata');
 const { loadScriptModule } = require('./scriptLoader');
 const { NetworkMonitor } = require('./networkMonitor');
 const { createNodePlatformServices } = require('./platform/nodePlatformServices');
+const { createNodeRuntimeApi } = require('./platform/nodeRuntimeApi');
 
 const ALL_WATCH_LISTENERS = new Set([
 	'file:created',
@@ -101,12 +103,209 @@ class ReactorRuntime {
 		this.scriptsDir = scriptsDir;
 		this.eventLogPath = eventLogPath;
 		this.platformServices = options.platformServices || createNodePlatformServices();
+		this.runtimeApi = options.runtimeApi || createNodeRuntimeApi();
 		this.networkMonitor = null;
 		this.scriptsWatcher = null;
 		this.reloadDebounceTimer = null;
 		this.isReloading = false;
 		this.pendingReloadReason = null;
 		this.watchers = [];
+		this.routeMap = new Map();
+		this.httpServer = null;
+		this.httpServerPort = Number(options.httpServerPort || process.env.REACTOR_HTTP_PORT || 7000);
+		this.httpServerLogs = [];
+	}
+
+	addHttpServerLog(message) {
+		const entry = {
+			timestamp: new Date().toISOString(),
+			message,
+		};
+		this.httpServerLogs.push(entry);
+		if (this.httpServerLogs.length > 300) {
+			this.httpServerLogs.shift();
+		}
+		this.log(`[HTTP] ${message}`);
+	}
+
+	getHttpServerConfig() {
+		return {
+			port: this.httpServerPort,
+			active: Boolean(this.httpServer),
+			routes: Array.from(this.routeMap.entries()).map(([routeKey, scripts]) => ({
+				route: routeKey,
+				scripts: scripts.map((script) => script.name),
+			})),
+		};
+	}
+
+	getHttpServerLogs(limit = 100) {
+		const safeLimit = Number(limit) > 0 ? Number(limit) : 100;
+		return this.httpServerLogs.slice(-safeLimit);
+	}
+
+	async setHttpServerPort(port) {
+		const nextPort = Number(port);
+		if (!Number.isInteger(nextPort) || nextPort < 1 || nextPort > 65535) {
+			throw new Error('invalid HTTP server port');
+		}
+
+		if (nextPort === this.httpServerPort) {
+			return this.getHttpServerConfig();
+		}
+
+		this.httpServerPort = nextPort;
+		await this.restartHttpRouteServer();
+		return this.getHttpServerConfig();
+	}
+
+	registerScriptRoutes(script) {
+		if (!script.enabled || !Array.isArray(script.routes) || script.routes.length === 0) {
+			return;
+		}
+
+		for (const route of script.routes) {
+			if (!route || !route.method || !route.path) {
+				continue;
+			}
+
+			const routeKey = `${String(route.method).toUpperCase()} ${route.path}`;
+			const listeners = this.routeMap.get(routeKey) || [];
+			listeners.push(script);
+			this.routeMap.set(routeKey, listeners);
+		}
+	}
+
+	findRouteListeners(method, routePath) {
+		const methodKey = `${String(method || '').toUpperCase()} ${routePath}`;
+		const wildcardKey = `* ${routePath}`;
+		const listeners = [];
+
+		for (const script of this.routeMap.get(methodKey) || []) {
+			listeners.push(script);
+		}
+
+		for (const script of this.routeMap.get(wildcardKey) || []) {
+			if (!listeners.includes(script)) {
+				listeners.push(script);
+			}
+		}
+
+		return listeners;
+	}
+
+	async handleRouteRequest(req, res) {
+		const method = String(req.method || 'GET').toUpperCase();
+		let pathname = '/';
+		let query = '';
+
+		try {
+			const parsedUrl = new URL(req.url || '/', 'http://127.0.0.1');
+			pathname = parsedUrl.pathname || '/';
+			query = parsedUrl.search || '';
+		} catch {
+			pathname = '/';
+			query = '';
+		}
+
+		if (method === 'GET' && pathname === '/health') {
+			this.addHttpServerLog('GET /health -> 200');
+			res.writeHead(200, { 'content-type': 'application/json' });
+			res.end(
+				JSON.stringify({
+					ok: true,
+					service: 'reactor',
+					status: 'healthy',
+					timestamp: new Date().toISOString(),
+					uptimeSec: Math.floor(process.uptime()),
+					httpPort: this.httpServerPort,
+					scriptsCount: this.scripts.length,
+					routesCount: this.routeMap.size,
+				}),
+			);
+			return;
+		}
+
+		const listeners = this.findRouteListeners(method, pathname);
+		if (listeners.length === 0) {
+			this.addHttpServerLog(`${method} ${pathname} -> 404 (no matching @route)`);
+			res.writeHead(404, { 'content-type': 'application/json' });
+			res.end(JSON.stringify({ ok: false, error: 'route not found', method, path: pathname }));
+			return;
+		}
+
+		const bodyChunks = [];
+		for await (const chunk of req) {
+			bodyChunks.push(chunk);
+		}
+
+		const body = Buffer.concat(bodyChunks).toString('utf8');
+		this.addHttpServerLog(`${method} ${pathname} -> ${listeners.length} script(s)`);
+
+		await Promise.allSettled(
+			listeners.map((script) =>
+				this.runScript(script, {
+					trigger: 'ROUTE',
+					event: 'HTTP_ROUTE',
+					routeMethod: method,
+					routePath: pathname,
+					routeQuery: query,
+					routeBody: body,
+					routeHeaders: req.headers || {},
+				}),
+			),
+		);
+
+		res.writeHead(200, { 'content-type': 'application/json' });
+		res.end(
+			JSON.stringify({
+				ok: true,
+				trigger: 'ROUTE',
+				method,
+				path: pathname,
+				scripts: listeners.map((script) => script.name),
+			}),
+		);
+	}
+
+	async startHttpRouteServer() {
+		if (this.httpServer) {
+			return;
+		}
+
+		await new Promise((resolve, reject) => {
+			const server = http.createServer((req, res) => {
+				this.handleRouteRequest(req, res).catch((error) => {
+					this.addHttpServerLog(`request handling failed: ${error.message}`);
+					res.writeHead(500, { 'content-type': 'application/json' });
+					res.end(JSON.stringify({ ok: false, error: 'internal server error' }));
+				});
+			});
+
+			server.once('error', reject);
+			server.listen(this.httpServerPort, () => {
+				server.off('error', reject);
+				this.httpServer = server;
+				this.addHttpServerLog(`listening on port ${this.httpServerPort}`);
+				resolve();
+			});
+		});
+	}
+
+	async stopHttpRouteServer() {
+		if (!this.httpServer) {
+			return;
+		}
+
+		const server = this.httpServer;
+		this.httpServer = null;
+		await new Promise((resolve) => server.close(() => resolve()));
+		this.addHttpServerLog('stopped');
+	}
+
+	async restartHttpRouteServer() {
+		await this.stopHttpRouteServer();
+		await this.startHttpRouteServer();
 	}
 
 	findScriptByPath(filePath) {
@@ -163,6 +362,8 @@ class ReactorRuntime {
 			expression: context.expression || null,
 			watchPath: context.watchPath || null,
 			watchType: context.watchType || null,
+			routeMethod: context.routeMethod || null,
+			routePath: context.routePath || null,
 			durationMs,
 			output,
 			error,
@@ -174,6 +375,7 @@ class ReactorRuntime {
 		await this.discoverScripts();
 		this.setupSchedules();
 		this.setupWatchers();
+		await this.startHttpRouteServer();
 		this.setupScriptsWatcher();
 		this.setupNetworkWatcher();
 		await this.emitEvent('BOOT');
@@ -290,6 +492,7 @@ class ReactorRuntime {
 	async discoverScripts() {
 		this.scripts = [];
 		this.eventMap.clear();
+		this.routeMap.clear();
 
 		try {
 			await fs.mkdir(this.scriptsDir, { recursive: true });
@@ -329,6 +532,7 @@ class ReactorRuntime {
 					mutex: metadata.mutex,
 					watch: metadata.watch || [], // Existing watch property
 					watchRules: metadata.watchRules || [], // New watchRules property
+					routes: metadata.routes || [],
 					isRunning: false,
 				};
 
@@ -336,7 +540,9 @@ class ReactorRuntime {
 				this.log(
 					`Loaded ${script.name} @state=${script.state} @schedule=${script.schedule || 'none'} @on=${
 						script.events.join(', ') || 'none'
-					} @watch=${script.watch.length > 0 ? script.watch.join(', ') : 'none'} @mutex=${script.mutex ? 'on' : 'off'} (from ${this.scriptsDir})`,
+					} @watch=${script.watch.length > 0 ? script.watch.join(', ') : 'none'} @route=${
+						script.routes.length > 0 ? script.routes.map((route) => route.raw).join(', ') : 'none'
+					} @mutex=${script.mutex ? 'on' : 'off'} (from ${this.scriptsDir})`,
 				);
 
 				if (!script.enabled) {
@@ -349,6 +555,8 @@ class ReactorRuntime {
 					scriptsForEvent.push(script);
 					this.eventMap.set(eventName, scriptsForEvent);
 				}
+
+				this.registerScriptRoutes(script);
 			} catch (error) {
 				this.log(`Failed to load script ${scriptPath}: ${error.message}`);
 			}
@@ -446,6 +654,8 @@ class ReactorRuntime {
 				trigger: context.trigger,
 				event: context.event || null,
 				expression: context.expression || null,
+				routeMethod: context.routeMethod || null,
+				routePath: context.routePath || null,
 			});
 		}
 		await this.recordExecutionEvent({
@@ -459,6 +669,11 @@ class ReactorRuntime {
 			await Promise.resolve(
 				script.run({
 					...context,
+					api: this.runtimeApi,
+					FileSystem: this.runtimeApi.FileSystem,
+					HttpClient: this.runtimeApi.HttpClient,
+					Device: this.runtimeApi.Device,
+					System: this.runtimeApi.System,
 					log: async (message) => {
 						this.log(`${script.name}: ${message}`);
 					},
@@ -566,6 +781,11 @@ class ReactorRuntime {
 
 		if (this.networkMonitor) {
 			this.networkMonitor.stop();
+		}
+
+		if (this.httpServer) {
+			this.httpServer.close();
+			this.httpServer = null;
 		}
 
 		for (const watcher of this.watchers) {

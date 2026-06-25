@@ -14,4 +14,7 @@ contextBridge.exposeInMainWorld('reactor', {
 	pickDefaultProgram: () => ipcRenderer.invoke('pick-default-program'),
 	openEventLog: (filePath) => ipcRenderer.invoke('open-event-log', filePath),
 	clearEventLog: (filePath) => ipcRenderer.invoke('clear-event-log', filePath),
+	getHttpServerConfig: () => ipcRenderer.invoke('get-http-server-config'),
+	setHttpServerPort: (port) => ipcRenderer.invoke('set-http-server-port', port),
+	getHttpServerLogs: (limit) => ipcRenderer.invoke('get-http-server-logs', limit),
 });

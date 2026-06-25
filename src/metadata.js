@@ -1,6 +1,6 @@
 /**
  * Parses TypeScript script metadata from source code comments
- * Extracts: @state, @schedule, @on, @watch
+ * Extracts: @state, @schedule, @on, @watch, @route
  */
 
 const VALID_WATCH_LISTENERS = new Set([
@@ -46,6 +46,21 @@ function parseWatchDirective(rawValue) {
 	};
 }
 
+function parseRouteDirective(rawMethod, rawPath) {
+	const method = String(rawMethod || '').trim().toUpperCase();
+	const routePath = String(rawPath || '').trim();
+
+	if (!method || !routePath) {
+		return null;
+	}
+
+	return {
+		method,
+		path: routePath.startsWith('/') ? routePath : `/${routePath}`,
+		raw: `${method} ${routePath.startsWith('/') ? routePath : `/${routePath}`}`,
+	};
+}
+
 function parseScriptMetadata(sourceCode) {
 	const metadata = {
 		schedule: null,
@@ -54,6 +69,7 @@ function parseScriptMetadata(sourceCode) {
 		mutex: false,
 		watch: [],
 		watchRules: [],
+		routes: [],
 	};
 
 	const scheduleMatch = sourceCode.match(/@schedule\s+(.+)/i);
@@ -99,6 +115,26 @@ function parseScriptMetadata(sourceCode) {
 		metadata.watchRules.push({
 			path: parsedWatch.path,
 			listeners: parsedWatch.listeners,
+		});
+
+		continue;
+	}
+
+	for (const line of lines) {
+		const routeMatch = line.match(/^\s*\/\/\s*@route\s+([^\s]+)\s+(.+)$/i);
+		if (!routeMatch) {
+			continue;
+		}
+
+		const parsedRoute = parseRouteDirective(routeMatch[1], routeMatch[2]);
+		if (!parsedRoute) {
+			continue;
+		}
+
+		metadata.routes.push({
+			method: parsedRoute.method,
+			path: parsedRoute.path,
+			raw: parsedRoute.raw,
 		});
 	}
 

@@ -18,7 +18,10 @@ Reactor/
 │   └── platform/
 │       ├── contracts.js                 # Cross-platform service contracts
 │       ├── nodePlatformServices.js      # Node/Electron implementations
-│       └── capacitorPlatformServices.js # Capacitor/mobile implementations
+│       ├── capacitorPlatformServices.js # Capacitor/mobile implementations
+│       ├── runtimeApiContracts.js       # FileSystem/HttpClient/Device/System contracts
+│       ├── nodeRuntimeApi.js            # Node runtime API mapping
+│       └── androidRuntimeApi.js         # Android/Capacitor runtime API mapping
 └── [other files]
 ```
 
@@ -76,6 +79,14 @@ Prevents concurrent executions. Default: `OFF`
 // @mutex ON
 ```
 
+#### `@route METHOD /path`
+Triggers script execution when Reactor internal HTTP server receives a matching HTTP request.
+
+Example:
+```typescript
+// @route POST /run-script-x
+```
+
 **Context example:**
 ```typescript
 export async function run(ctx: Context) {
@@ -102,9 +113,11 @@ export async function run(ctx: Context) {
   - Script discovery
   - Schedule setup
   - Event emission
+  - HTTP route server and @route dispatch
   - Script execution
   - Event logging
 - Supports platform service injection (filesystem/http/permissions)
+- Exposes mapped runtime APIs (FileSystem, HttpClient, Device, System) in script context
 - Uses all the other modules
 
 ### `platform/contracts.js`

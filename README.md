@@ -16,6 +16,7 @@ Scripts are loaded from an external, user-specific folder and can be triggered b
 - schedules using @schedule
 - runtime events using @on
 - file system changes using @watch
+- HTTP requests using @route
 
 Each script also supports:
 - @state for enable/disable
@@ -185,6 +186,7 @@ Canonical header order:
 3. @on
 4. @schedule
 5. @watch
+6. @route
 
 Note: you do not need all directives. When UI rewrites headers (ENABLED/MUTEX toggles), it preserves this order.
 
@@ -270,7 +272,27 @@ Complete header example:
 // @on BOOT
 // @schedule EVERY 30 SECOND
 // @watch /tmp/inbox [file:created, file:moved]
+// @route POST /run-script-x
 ```
+
+### @route
+
+Supported syntax:
+- @route METHOD /path
+
+Examples:
+- @route POST /run-script-x
+- @route CUSTOM_METHOD /sync-job
+
+Rules:
+- METHOD is case-insensitive and normalized to uppercase
+- path must start with /
+- route matching is exact by METHOD + path
+
+HTTP server notes:
+- Reactor starts an internal HTTP server for @route triggers
+- Default port: 7000
+- Port can be configured at runtime (UI bridge) or with environment variable REACTOR_HTTP_PORT
 
 ## Script Contract
 
@@ -294,6 +316,13 @@ Available ctx fields:
 - expression: schedule expression when trigger is SCHEDULE
 - watchPath: path that generated WATCH event
 - watchType: watch event type
+- routeMethod: HTTP method when trigger is ROUTE
+- routePath: HTTP path when trigger is ROUTE
+- routeQuery: HTTP query string
+- routeBody: request body as string
+- routeHeaders: request headers map
+- api: mapped platform runtime API object
+- FileSystem / HttpClient / Device / System: shorthand mapped APIs
 - log(message, type): script-prefixed logging helper, where type is E, W, I, or D
 
 WATCH example with listener filter:
@@ -306,6 +335,20 @@ WATCH example with listener filter:
 export async function run(ctx) {
   if (ctx.trigger === 'WATCH') {
     await ctx.log('watch event: ' + ctx.watchPath + ' (' + ctx.watchType + ')', 'I');
+  }
+}
+```
+
+ROUTE example:
+
+```ts
+// @state ENABLED
+// @mutex ON
+// @route POST /run-script-x
+
+export async function run(ctx) {
+  if (ctx.trigger === 'ROUTE') {
+    await ctx.log('route trigger: ' + ctx.routeMethod + ' ' + ctx.routePath, 'I');
   }
 }
 ```
