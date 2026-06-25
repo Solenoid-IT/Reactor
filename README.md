@@ -4,15 +4,13 @@
   <img src="https://www.solenoid.it/cdn/logo/Reactor.jpg" alt="Reactor Logo" height="400" />
 </p>
 
-Reactor is an agnostic platform runtime for TypeScript scripts.
+Reactor is an agnostic platform runtime for script execution (manager and runner).
 
 Slogan: Same code everywhere.
 
 Core value:
 - one language (TypeScript) for script automation across desktop, mobile, and server
 - one trigger model (@schedule, @on, @watch) across all platforms
-
-Reactor = Agnostic Platform Runtime.
 
 Scripts are loaded from an external, user-specific folder and can be triggered by:
 - schedules using @schedule
