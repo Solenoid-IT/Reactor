@@ -49,9 +49,9 @@ Periodic execution. Supports: `EVERY N SECOND|MINUTE|HOUR`
 ```
 
 #### `@on EVENT_NAME[,EVENT2,...]`
-Event-driven execution. Built-in events: BOOT, WIFI_ON/OFF, NET_ON/OFF
+Event-driven execution. Built-in events: BOOT, WIFI_ON/OFF, NET_UP/DOWN
 ```typescript
-// @on BOOT, NET_ON, CUSTOM_EVENT
+// @on BOOT, NET_UP, CUSTOM_EVENT
 ```
 
 #### `@watch /path/to/folder` (multiple supported)
@@ -89,7 +89,7 @@ export async function run(ctx: Context) {
 ### `networkMonitor.js`
 - `NetworkMonitor` class handles polling
 - DNS lookup every 5 seconds
-- Emits events: WIFI_ON/OFF, NET_ON/OFF
+- Emits events: WIFI_ON/OFF, NET_UP/DOWN
 - Methods: `start()` / `stop()`
 
 ### `runtime.js`

@@ -29,10 +29,10 @@ class NetworkMonitor {
 				this.lastConnectivity = isOnline;
 				if (isOnline) {
 					await this.onEventEmit('WIFI_ON');
-					await this.onEventEmit('NET_ON');
+					await this.onEventEmit('NET_UP');
 				} else {
 					await this.onEventEmit('WIFI_OFF');
-					await this.onEventEmit('NET_OFF');
+					await this.onEventEmit('NET_DOWN');
 				}
 				return;
 			}
@@ -41,10 +41,10 @@ class NetworkMonitor {
 				this.lastConnectivity = isOnline;
 				if (isOnline) {
 					await this.onEventEmit('WIFI_ON');
-					await this.onEventEmit('NET_ON');
+					await this.onEventEmit('NET_UP');
 				} else {
 					await this.onEventEmit('WIFI_OFF');
-					await this.onEventEmit('NET_OFF');
+					await this.onEventEmit('NET_DOWN');
 				}
 			}
 		}, intervalMs);

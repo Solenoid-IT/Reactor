@@ -220,13 +220,13 @@ Supported events:
 - BOOT
 - WIFI_ON
 - WIFI_OFF
-- NET_ON
-- NET_OFF
+- NET_UP
+- NET_DOWN
 
 Boot/network behavior:
 - On bootstrap, a coherent initial connectivity pair is emitted immediately
-- Online: WIFI_ON and NET_ON
-- Offline: WIFI_OFF and NET_OFF
+- Online: WIFI_ON and NET_UP
+- Offline: WIFI_OFF and NET_DOWN
 
 ### @watch
 

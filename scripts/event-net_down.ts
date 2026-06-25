@@ -1,5 +1,5 @@
 // @state DISABLED
-// @on NET_OFF
+// @on NET_DOWN
 
 
 
