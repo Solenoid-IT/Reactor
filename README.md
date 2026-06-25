@@ -323,7 +323,7 @@ npm run build:linux
 ### macOS Build Notes
 
 - Reactor uses `assets/logo.icns` as app icon for macOS builds.
-- If you update the logo image, regenerate the icon with:
+- If you update `assets/logo.png`, regenerate the icon with:
 
 ```bash
 npm run icon:mac
