@@ -198,14 +198,17 @@ class ReactorRuntime {
 		const method = String(req.method || 'GET').toUpperCase();
 		let pathname = '/';
 		let query = '';
+		let queryParams = {};
 
 		try {
 			const parsedUrl = new URL(req.url || '/', 'http://127.0.0.1');
 			pathname = parsedUrl.pathname || '/';
 			query = parsedUrl.search || '';
+			queryParams = Object.fromEntries(parsedUrl.searchParams.entries());
 		} catch {
 			pathname = '/';
 			query = '';
+			queryParams = {};
 		}
 
 		if (method === 'GET' && pathname === '/') {
@@ -240,6 +243,26 @@ class ReactorRuntime {
 		}
 
 		const body = Buffer.concat(bodyChunks).toString('utf8');
+		const headers = req.headers || {};
+		const contentType = String(headers['content-type'] || '').toLowerCase();
+		let bodyJson = null;
+		if (body && contentType.includes('application/json')) {
+			try {
+				bodyJson = JSON.parse(body);
+			} catch {
+				bodyJson = null;
+			}
+		}
+
+		const request = {
+			method,
+			path: pathname,
+			query,
+			queryParams,
+			headers,
+			body,
+			bodyJson,
+		};
 		this.addHttpServerLog(`${method} ${pathname} -> ${listeners.length} script(s)`);
 
 		await Promise.allSettled(
@@ -247,11 +270,12 @@ class ReactorRuntime {
 				this.runScript(script, {
 					trigger: 'ROUTE',
 					event: 'HTTP_ROUTE',
+					request,
 					routeMethod: method,
 					routePath: pathname,
 					routeQuery: query,
 					routeBody: body,
-					routeHeaders: req.headers || {},
+					routeHeaders: headers,
 				}),
 			),
 		);

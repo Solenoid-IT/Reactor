@@ -1102,6 +1102,7 @@ function buildHtmlContent() {
 						<button class="template-menu-item" onclick="createNewScript('schedule')"><i class="fa-solid fa-clock-rotate-left"></i><span>Schedule</span></button>
 						<button class="template-menu-item" onclick="createNewScript('event')"><i class="fa-solid fa-bolt"></i><span>Event</span></button>
 						<button class="template-menu-item" onclick="createNewScript('watch')"><i class="fa-solid fa-eye"></i><span>Watch</span></button>
+						<button class="template-menu-item" onclick="createNewScript('route')"><i class="fa-solid fa-route"></i><span>Route</span></button>
 					</div>
 				</div>
 				<button class="btn-secondary icon-button" onclick="refreshScripts()" title="refresh scripts" aria-label="Refresh scripts"><i class="fa-solid fa-rotate-right"></i></button>
@@ -2139,7 +2140,21 @@ function setupIpcHandlers(runtime) {
 				'',
 				'export async function run (ctx : Context)',
 				'{',
-				"\tawait ctx.log('route trigger: ' + (ctx.routeMethod || '') + ' ' + (ctx.routePath || ''));",
+				"\tconst req = ctx.request;",
+				"\tconst method = req?.method || ctx.routeMethod || '';",
+				"\tconst routePath = req?.path || ctx.routePath || '';",
+				"\tconst headers = req?.headers || {};",
+				"\tconst body = req?.body || '';",
+				"\tconst bodyJson = req?.bodyJson;",
+				"\tconst queryParams = req?.queryParams || {};",
+				'',
+				"\tawait ctx.log('route trigger: ' + method + ' ' + routePath);",
+				"\tawait ctx.log('headers.authorization: ' + String(headers['authorization'] || 'none'));",
+				"\tawait ctx.log('query p: ' + String(queryParams.p || ''));",
+				"\tawait ctx.log('body: ' + body);",
+				"\tif (bodyJson) {",
+				"\t\tawait ctx.log('bodyJson: ' + JSON.stringify(bodyJson));",
+				"\t}",
 				'}',
 				'',
 			],
@@ -2159,6 +2174,15 @@ function setupIpcHandlers(runtime) {
 			'\trouteQuery?: string;',
 			'\trouteBody?: string;',
 			'\trouteHeaders?: Record<string, string | string[] | undefined>;',
+			'\trequest?: {',
+			'\t\tmethod: string;',
+			'\t\tpath: string;',
+			'\t\tquery: string;',
+			'\t\tqueryParams: Record<string, string>;',
+			'\t\theaders: Record<string, string | string[] | undefined>;',
+			'\t\tbody: string;',
+			'\t\tbodyJson: unknown;',
+			'\t};',
 			'\tapi?: any;',
 			'\tFileSystem?: any;',
 			'\tHttpClient?: any;',

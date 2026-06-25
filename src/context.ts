@@ -10,6 +10,15 @@ export interface Context
 	routeQuery?: string;
 	routeBody?: string;
 	routeHeaders?: Record<string, string | string[] | undefined>;
+	request?: {
+		method: string;
+		path: string;
+		query: string;
+		queryParams: Record<string, string>;
+		headers: Record<string, string | string[] | undefined>;
+		body: string;
+		bodyJson: unknown;
+	};
 	api?: any;
 	FileSystem?: any;
 	HttpClient?: any;
