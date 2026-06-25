@@ -15,6 +15,7 @@
     "daemon:status": "node daemonctl.js status",
     "daemon:run": "node daemonctl.js run",
     "daemon:stop": "node daemonctl.js stop",
+    "icon:mac": "bash ./scripts/make-mac-icon.sh",
     "pack": "electron-builder --dir",
     "build": "electron-builder",
     "build:mac": "electron-builder --mac",
@@ -43,6 +44,7 @@
       "package.json"
     ],
     "mac": {
+      "icon": "assets/logo.icns",
       "target": [
         "dmg",
         "zip"

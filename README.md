@@ -312,12 +312,39 @@ UI log mapping:
 Packaging scripts:
 
 ```bash
+npm run icon:mac
 npm run pack
 npm run build
 npm run build:mac
 npm run build:win
 npm run build:linux
 ```
+
+### macOS Build Notes
+
+- Reactor uses `assets/logo.icns` as app icon for macOS builds.
+- If you update the logo image, regenerate the icon with:
+
+```bash
+npm run icon:mac
+```
+
+- Then build for macOS:
+
+```bash
+npm run build:mac
+```
+
+Build output is generated in `dist/` (DMG + ZIP).
+
+### Startup Behavior (macOS)
+
+- Reactor registers itself at login and starts hidden in background.
+- If started by login items, the window stays hidden.
+- If opened manually from Finder/Applications, the UI opens normally.
+- You can force behavior during tests:
+  - Show window: `REACTOR_SHOW_WINDOW=1 npm start`
+  - Hide window: `REACTOR_SHOW_WINDOW=0 npm start`
 
 Build outputs:
 - macOS: dmg, zip

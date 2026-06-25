@@ -6,7 +6,26 @@ const { createMainWindow, setupIpcHandlers } = require('./src/ui');
 // Constants
 const EXTERNAL_SCRIPTS_DIR = path.join(app.getPath('userData'), 'projects');
 const EVENT_LOG_PATH = path.join(__dirname, 'activity.log');
-const SHOW_WINDOW = process.env.REACTOR_SHOW_WINDOW === '1';
+
+function shouldShowWindowOnLaunch() {
+	if (process.env.REACTOR_SHOW_WINDOW === '1') {
+		return true;
+	}
+
+	if (process.env.REACTOR_SHOW_WINDOW === '0') {
+		return false;
+	}
+
+	if (process.platform === 'darwin') {
+		const loginItemSettings = app.getLoginItemSettings();
+		const openedAtLogin = Boolean(loginItemSettings.wasOpenedAtLogin || loginItemSettings.wasOpenedAsHidden);
+		return !openedAtLogin;
+	}
+
+	return true;
+}
+
+const SHOW_WINDOW = shouldShowWindowOnLaunch();
 
 // Globals
 let mainWindow;
@@ -70,7 +89,7 @@ if (!gotSingleInstanceLock) {
 	});
 
 	app.on('activate', () => {
-		if (SHOW_WINDOW && BrowserWindow.getAllWindows().length === 0) {
+		if (BrowserWindow.getAllWindows().length === 0) {
 			mainWindow = createMainWindow();
 		}
 	});
