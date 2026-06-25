@@ -291,7 +291,7 @@ Rules:
 
 HTTP server notes:
 - Reactor starts an internal HTTP server for @route triggers
-- Default port: 7000
+- Default port: 7070
 - Port can be configured at runtime (UI bridge) or with environment variable REACTOR_HTTP_PORT
 
 ## Script Contract

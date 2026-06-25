@@ -16,14 +16,20 @@ async function readUiSettings() {
 		const parsed = JSON.parse(raw);
 		return {
 			defaultProgramPath: parsed.defaultProgramPath || '',
+			httpServerPort: Number(parsed.httpServerPort) || 7070,
 		};
 	} catch (error) {
-		return { defaultProgramPath: '' };
+		return { defaultProgramPath: '', httpServerPort: 7070 };
 	}
 }
 
 async function writeUiSettings(nextSettings) {
-	await fs.writeFile(getUiSettingsPath(), JSON.stringify(nextSettings, null, 2), 'utf8');
+	const current = await readUiSettings();
+	const merged = {
+		...current,
+		...nextSettings,
+	};
+	await fs.writeFile(getUiSettingsPath(), JSON.stringify(merged, null, 2), 'utf8');
 }
 
 function parseDirectiveHeader(source) {
@@ -1122,6 +1128,14 @@ function buildHtmlContent() {
 					<div class="detail-value" id="defaultProgramPath">System default (not set)</div>
 				</div>
 				<div class="detail-card">
+					<h3>HTTP Server Port</h3>
+					<div class="detail-value" id="httpServerPortValue">7070</div>
+					<div style="margin-top:10px; display:flex; gap:8px; align-items:center;">
+						<input id="httpServerPortInput" type="number" min="1" max="65535" placeholder="7070" style="width:120px; background:#12161c; color:#eef2fb; border:1px solid #313a46; border-radius:8px; padding:8px;" />
+						<button class="btn-secondary" onclick="saveHttpServerPort()" title="save HTTP port">Save Port</button>
+					</div>
+				</div>
+				<div class="detail-card">
 					<h3>Selected Script</h3>
 					<div class="detail-value" id="selectedName">None</div>
 				</div>
@@ -1721,6 +1735,46 @@ function buildHtmlContent() {
 			document.getElementById('defaultProgramPath').textContent = value;
 		}
 
+		async function refreshHttpServerPort() {
+			const result = await window.reactor.getHttpServerConfig();
+			if (!result || !result.ok || !result.config) {
+				document.getElementById('httpServerPortValue').textContent = 'Unavailable';
+				return;
+			}
+
+			const port = Number(result.config.port) || 7070;
+			document.getElementById('httpServerPortValue').textContent = String(port);
+			const input = document.getElementById('httpServerPortInput');
+			if (input && !input.value) {
+				input.value = String(port);
+			}
+		}
+
+		async function saveHttpServerPort() {
+			const input = document.getElementById('httpServerPortInput');
+			if (!input) {
+				return;
+			}
+
+			const port = Number(input.value);
+			if (!Number.isInteger(port) || port < 1 || port > 65535) {
+				document.getElementById('statusBox').textContent = 'Invalid HTTP port';
+				showToast('Invalid HTTP port', 'error');
+				return;
+			}
+
+			const result = await window.reactor.setHttpServerPort(port);
+			if (!result || !result.ok) {
+				document.getElementById('statusBox').textContent = 'HTTP port update failed: ' + ((result && result.error) || 'unknown error');
+				showToast('HTTP port update failed', 'error');
+				return;
+			}
+
+			document.getElementById('httpServerPortValue').textContent = String(result.config.port);
+			document.getElementById('statusBox').textContent = 'HTTP server port set to ' + result.config.port;
+			showToast('HTTP server port updated');
+		}
+
 		async function openScriptsFolder() {
 			await window.reactor.openScriptsFolder();
 			document.getElementById('statusBox').textContent = 'Opened scripts folder';
@@ -1816,6 +1870,7 @@ function buildHtmlContent() {
 
 		async function initialLoad() {
 			await refreshDefaultProgram();
+			await refreshHttpServerPort();
 			await refreshScripts();
 		}
 
@@ -1851,6 +1906,16 @@ function createMainWindow() {
  * Sets up IPC handlers for UI communication
  */
 function setupIpcHandlers(runtime) {
+	readUiSettings()
+		.then(async (settings) => {
+			if (runtime && runtime.setHttpServerPort && Number(settings.httpServerPort)) {
+				await runtime.setHttpServerPort(Number(settings.httpServerPort));
+			}
+		})
+		.catch(() => {
+			// Ignore settings bootstrap failures.
+		});
+
 	ipcMain.handle('get-ui-settings', async () => {
 		return readUiSettings();
 	});
@@ -1870,6 +1935,7 @@ function setupIpcHandlers(runtime) {
 
 		try {
 			const config = await runtime.setHttpServerPort(port);
+			await writeUiSettings({ httpServerPort: config.port });
 			return { ok: true, config };
 		} catch (error) {
 			return { ok: false, error: error.message };

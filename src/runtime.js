@@ -112,7 +112,7 @@ class ReactorRuntime {
 		this.watchers = [];
 		this.routeMap = new Map();
 		this.httpServer = null;
-		this.httpServerPort = Number(options.httpServerPort || process.env.REACTOR_HTTP_PORT || 7000);
+		this.httpServerPort = Number(options.httpServerPort || process.env.REACTOR_HTTP_PORT || 7070);
 		this.httpServerLogs = [];
 	}
 
@@ -208,8 +208,8 @@ class ReactorRuntime {
 			query = '';
 		}
 
-		if (method === 'GET' && pathname === '/health') {
-			this.addHttpServerLog('GET /health -> 200');
+		if (method === 'GET' && pathname === '/') {
+			this.addHttpServerLog('GET / -> 200');
 			res.writeHead(200, { 'content-type': 'application/json' });
 			res.end(
 				JSON.stringify({
