@@ -27,6 +27,10 @@ Before running Reactor, make sure your system has:
 - Node.js 20 or newer
 - npm (usually included with Node.js)
 
+Development note:
+- Node.js is required for development workflows (install, run, test, and build commands)
+- Reactor can produce build artifacts for each target platform (desktop and mobile)
+
 You can verify your installed versions with:
 
 ```bash
@@ -318,6 +322,10 @@ UI log mapping:
 - Item LOG menu uses per-project activity log
 
 ## Build and Distribution
+
+Reactor supports platform-specific builds from a single codebase:
+- desktop targets: macOS, Windows, Linux
+- mobile target: Capacitor-based build pipeline
 
 Packaging scripts:
 
