@@ -424,22 +424,23 @@ class ReactorRuntime {
 			script.isRunning = true;
 		}
 
-		const startedAt = Date.now();
-		const loggerOutput = [];
-		await this.writeEventLog(this.eventLogPath, {
-			timestamp: new Date().toISOString(),
-			type: 'SCRIPT_EXECUTION',
-			scope: 'GLOBAL',
-			phase: 'START',
-			script: {
-				name: script.name,
-				path: script.path,
-				state: script.state,
-			},
-			trigger: context.trigger,
-			event: context.event || null,
-			expression: context.expression || null,
-		});
+		const scriptLogPath = script.eventLogPath || this.eventLogPath;
+		if (path.resolve(this.eventLogPath) !== path.resolve(scriptLogPath)) {
+			await this.writeEventLog(this.eventLogPath, {
+				timestamp: new Date().toISOString(),
+				type: 'SCRIPT_EXECUTION',
+				scope: 'GLOBAL',
+				phase: 'START',
+				script: {
+					name: script.name,
+					path: script.path,
+					state: script.state,
+				},
+				trigger: context.trigger,
+				event: context.event || null,
+				expression: context.expression || null,
+			});
+		}
 		await this.recordExecutionEvent({
 			script,
 			context,
@@ -451,39 +452,14 @@ class ReactorRuntime {
 			await Promise.resolve(
 				script.run({
 					...context,
-					log: async (message, type = 'I') => {
+					log: async (message) => {
 						this.log(`${script.name}: ${message}`);
-						loggerOutput.push(message);
 					},
 				}),
 			);
-			const durationMs = Date.now() - startedAt;
 			this.log(`Completed ${script.name}`);
-			const output = loggerOutput.length === 0 ? null : loggerOutput.length === 1 ? loggerOutput[0] : loggerOutput;
-			await this.recordExecutionEvent({
-				script,
-				context,
-				scope: 'PROJECT',
-				phase: 'END',
-				durationMs,
-				output,
-			});
 		} catch (error) {
 			this.log(`Error in ${script.name}: ${error.stack || error.message}`);
-			const durationMs = Date.now() - startedAt;
-			const output = loggerOutput.length === 0 ? null : loggerOutput.length === 1 ? loggerOutput[0] : loggerOutput;
-			await this.recordExecutionEvent({
-				script,
-				context,
-				scope: 'PROJECT',
-				phase: 'END',
-				durationMs,
-				output,
-				error: {
-					message: error.message,
-					stack: error.stack || null,
-				},
-			});
 		} finally {
 			if (script.mutex) {
 				script.isRunning = false;
