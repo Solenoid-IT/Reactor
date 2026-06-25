@@ -2130,7 +2130,7 @@ function setupIpcHandlers(runtime) {
 			route: [
 				'// @state DISABLED',
 				'// @mutex ON',
-				'// @route POST /run-script-x',
+				'// @route RUN /api?p=Script.run',
 				'',
 				'',
 				'',
