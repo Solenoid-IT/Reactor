@@ -4,7 +4,15 @@
   <img src="https://www.solenoid.it/cdn/logo/Reactor.jpg" alt="Reactor Logo" height="400" />
 </p>
 
-Reactor is an Electron-based automation runtime for TypeScript scripts.
+Reactor is an agnostic platform runtime for TypeScript scripts.
+
+Slogan: Same code everywhere.
+
+Core value:
+- one language (TypeScript) for script automation across desktop, mobile, and server
+- one trigger model (@schedule, @on, @watch) across all platforms
+
+Reactor = Agnostic Platform Runtime.
 
 Scripts are loaded from an external, user-specific folder and can be triggered by:
 - schedules using @schedule
@@ -54,6 +62,10 @@ npm run start:daemon
 Reactor supports both:
 - Desktop mode (Electron GUI/background)
 - Headless mode (Node daemon)
+
+Target architecture also includes:
+- Mobile mode (Capacitor host + QuickJS execution plugin)
+- Unified web UI in Electron WebView, Capacitor WebView, and daemon HTTP webapp
 
 You can use either mode depending on deployment.
 
@@ -301,7 +313,7 @@ export async function run(ctx) {
 Reactor writes two log levels:
 
 - Global activity.log: START entries for runs triggered by @schedule, @on, @watch, and manual test/CLI execution
-- Project activity.log: START and END entries next to each project package.json, including output and error details
+- Project activity.log: START entries next to each project package.json
 
 UI log mapping:
 - Top LOG menu uses global activity log
@@ -318,6 +330,17 @@ npm run build
 npm run build:mac
 npm run build:win
 npm run build:linux
+npm run build:desktop
+npm run build:mobile
+npm run build:all
+```
+
+CLI:
+
+```bash
+npm run cli -- build desktop
+npm run cli -- build mobile
+npm run cli -- build all
 ```
 
 ### macOS Build Notes
@@ -335,7 +358,9 @@ npm run icon:mac
 npm run build:mac
 ```
 
-Build output is generated in `dist/` (DMG + ZIP).
+Build output is generated in:
+- dist/desktop -> Electron artifacts
+- dist/mobile -> Capacitor/mobile scaffold and artifacts
 
 ### Startup Behavior (macOS)
 
@@ -350,6 +375,37 @@ Build outputs:
 - macOS: dmg, zip
 - Windows: nsis
 - Linux: AppImage
+
+## Mobile Runtime Notes (Capacitor + QuickJS)
+
+Mobile support is designed with two separate layers:
+- UI layer: shared web UI rendered in Capacitor WebView
+- Script execution layer: native mobile execution via a Capacitor plugin (for example capacitor-quickjs), not via browser eval/webview execution
+
+This keeps script behavior aligned with desktop/server while reducing environment drift.
+
+## Permissions Strategy (Mobile)
+
+Reactor should support both strategies:
+- one-time permission bootstrap at first launch
+- per-script permission check when enabling scripts (based on @schedule, @on, @watch and plugin requirements)
+
+A dedicated Settings section should expose global permissions state (for example storage and location).
+
+Important: automatic script runs must never block waiting for runtime permission dialogs.
+
+## Plugins and Packages
+
+Reactor supports external packages on desktop/server using npm install.
+
+For mobile, package support should be delivered through Reactor plugins:
+- plugin manifests declare native/mobile capabilities and permissions
+- plugin build output can be consumed by reactor-cli for desktop and mobile targets
+- runtime uses platform adapters (filesystem/http/permissions) to keep script logic portable
+
+## Multiplatform Goal
+
+The strongest Reactor benefit is the convenience of a single, multiplatform script manager in one language, with script execution triggered by many runtime events.
 
 Cross-platform recommendation: build each target on its native OS (or with a CI matrix).
 

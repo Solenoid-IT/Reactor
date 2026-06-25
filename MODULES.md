@@ -14,7 +14,11 @@ Reactor/
 │   ├── scriptLoader.js        # TypeScript transpilation
 │   ├── networkMonitor.js      # Connectivity monitoring
 │   ├── runtime.js             # Main ReactorRuntime class
-│   └── ui.js                  # UI, IPC handlers, HTML
+│   ├── ui.js                  # UI, IPC handlers, HTML
+│   └── platform/
+│       ├── contracts.js                 # Cross-platform service contracts
+│       ├── nodePlatformServices.js      # Node/Electron implementations
+│       └── capacitorPlatformServices.js # Capacitor/mobile implementations
 └── [other files]
 ```
 
@@ -100,7 +104,22 @@ export async function run(ctx: Context) {
   - Event emission
   - Script execution
   - Event logging
+- Supports platform service injection (filesystem/http/permissions)
 - Uses all the other modules
+
+### `platform/contracts.js`
+- Defines platform-agnostic interfaces:
+  - `FileWriter`
+  - `HttpClient`
+  - `PermissionManager`
+
+### `platform/nodePlatformServices.js`
+- Node/Electron runtime implementations
+- Used as default in current desktop/daemon runtime
+
+### `platform/capacitorPlatformServices.js`
+- Capacitor runtime implementations for mobile
+- Designed to integrate with Capacitor plugins and native permission flows
 
 ### `ui.js`
 - Builds HTML UI

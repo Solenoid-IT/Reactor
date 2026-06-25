@@ -1,10 +1,13 @@
 {
   "name": "reactor",
   "version": "0.0.0",
-  "description": "Electron runtime to execute TypeScript automation scripts with @schedule and @on metadata",
+  "description": "Reactor - Same code everywhere. Agnostic platform runtime for TypeScript scripts",
   "author": "Solenoid-IT",
   "main": "boot.js",
   "type": "commonjs",
+  "bin": {
+    "reactor-cli": "bin/reactor-cli.js"
+  },
   "scripts": {
     "start": "electron .",
     "start:bg": "electron .",
@@ -18,9 +21,13 @@
     "icon:mac": "bash ./scripts/make-mac-icon.sh",
     "pack": "electron-builder --dir",
     "build": "electron-builder",
+    "build:desktop": "electron-builder",
+    "build:mobile": "node scripts/build-mobile.js",
+    "build:all": "node bin/reactor-cli.js build all",
     "build:mac": "electron-builder --mac",
     "build:win": "electron-builder --win",
-    "build:linux": "electron-builder --linux"
+    "build:linux": "electron-builder --linux",
+    "cli": "node bin/reactor-cli.js"
   },
   "dependencies": {
     "typescript": "^5.9.3"
@@ -33,6 +40,9 @@
   "build": {
     "appId": "com.reactor.app",
     "productName": "Reactor",
+    "directories": {
+      "output": "dist/desktop"
+    },
     "files": [
       "boot.js",
       "daemon.js",

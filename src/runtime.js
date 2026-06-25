@@ -5,6 +5,7 @@ const { parseScheduleExpression } = require('./scheduleParser');
 const { parseScriptMetadata } = require('./metadata');
 const { loadScriptModule } = require('./scriptLoader');
 const { NetworkMonitor } = require('./networkMonitor');
+const { createNodePlatformServices } = require('./platform/nodePlatformServices');
 
 const ALL_WATCH_LISTENERS = new Set([
 	'file:created',
@@ -93,12 +94,13 @@ function getDelayToNextMidnightBoundary(intervalMs, nowMs = Date.now()) {
 }
 
 class ReactorRuntime {
-	constructor(scriptsDir, eventLogPath) {
+	constructor(scriptsDir, eventLogPath, options = {}) {
 		this.scripts = [];
 		this.scheduledTasks = [];
 		this.eventMap = new Map();
 		this.scriptsDir = scriptsDir;
 		this.eventLogPath = eventLogPath;
+		this.platformServices = options.platformServices || createNodePlatformServices();
 		this.networkMonitor = null;
 		this.scriptsWatcher = null;
 		this.reloadDebounceTimer = null;
@@ -133,6 +135,11 @@ class ReactorRuntime {
 	async writeEventLog(logPath, entry) {
 		const logLine = `${JSON.stringify(entry)}\n`;
 		try {
+			if (this.platformServices && this.platformServices.fileWriter && this.platformServices.fileWriter.appendText) {
+				await this.platformServices.fileWriter.appendText(logPath, logLine, 'utf8');
+				return;
+			}
+
 			await fs.appendFile(logPath, logLine, 'utf8');
 		} catch (error) {
 			this.log(`Failed to write activity.log: ${error.message}`);
