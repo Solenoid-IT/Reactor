@@ -17,4 +17,7 @@ contextBridge.exposeInMainWorld('reactor', {
 	getHttpServerConfig: () => ipcRenderer.invoke('get-http-server-config'),
 	setHttpServerPort: (port) => ipcRenderer.invoke('set-http-server-port', port),
 	getHttpServerLogs: (limit) => ipcRenderer.invoke('get-http-server-logs', limit),
+	openServerStatus: () => ipcRenderer.invoke('open-server-status'),
+	getReactorName: () => ipcRenderer.invoke('get-reactor-name'),
+	setReactorName: (name) => ipcRenderer.invoke('set-reactor-name', name),
 });

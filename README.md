@@ -16,7 +16,7 @@ Scripts are loaded from an external, user-specific folder and can be triggered b
 - schedules using @schedule
 - runtime events using @on
 - file system changes using @watch
-- HTTP requests using @route
+- node-to-node messages using @on MESSAGE(...)
 
 Each script also supports:
 - @state for enable/disable
@@ -231,6 +231,10 @@ Example:
 Supported formats:
 - @on EVENT_A, EVENT_B, EVENT_C
 - @on EVENT_A EVENT_B EVENT_C
+- @on MESSAGE
+- @on MESSAGE(sender_1)
+- @on MESSAGE(10.20.43.20)
+- @on MESSAGE(10.20.43.20:7071, sender_2)
 
 Supported events:
 - BOOT
@@ -238,6 +242,19 @@ Supported events:
 - WIFI_OFF
 - NET_UP
 - NET_DOWN
+- MESSAGE
+
+MESSAGE sender filter rules:
+- @on MESSAGE receives messages from all senders
+- @on MESSAGE(R1) receives only from sender R1
+- @on MESSAGE(R1,R2) receives only from listed senders
+- sender can be reactor name or host[:port]
+- host without port uses default 7070
+
+Message transport notes:
+- Node.sendMessage(target, content) sends POST /message to target
+- request header Reactor-Name contains current node name
+- content supports string, JSON object, and binary payloads
 
 Boot/network behavior:
 - On bootstrap, a coherent initial connectivity pair is emitted immediately
@@ -314,6 +331,13 @@ Available ctx fields:
 - trigger: EVENT, SCHEDULE, or WATCH
 - event: event name when trigger is EVENT
 - expression: schedule expression when trigger is SCHEDULE
+- messageSender: normalized sender identifier for MESSAGE trigger
+- messageSenderName: sender name from Reactor-Name header (if present)
+- messageContent: UTF-8 message body text
+- messageContentType: incoming content-type
+- messageBodyBase64: raw body payload encoded as base64
+- messageJson: parsed JSON body when content-type is application/json
+- messageHeaders: incoming request headers for MESSAGE trigger
 - watchPath: path that generated WATCH event
 - watchType: watch event type
 - routeMethod: HTTP method when trigger is ROUTE
@@ -323,6 +347,7 @@ Available ctx fields:
 - routeHeaders: request headers map
 - api: mapped platform runtime API object
 - FileSystem / HttpClient / Device / System: shorthand mapped APIs
+- Node.sendMessage(target, content): sends a node message to target host/name
 - log(message, type): script-prefixed logging helper, where type is E, W, I, or D
 
 WATCH example with listener filter:

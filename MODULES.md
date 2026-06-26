@@ -39,7 +39,7 @@ Reactor/
 
 ### `metadata.js`
 - Extracts metadata from TypeScript comments
-- Supports: `@state`, `@schedule`, `@on`, `@watch`, `@mutex`
+- Supports: `@state`, `@schedule`, `@on` (including `@on MESSAGE(...)`), `@watch`, `@mutex`
 
 ### Available Script Directives
 
@@ -60,6 +60,14 @@ Event-driven execution. Built-in events: BOOT, WIFI_ON/OFF, NET_UP/DOWN
 ```typescript
 // @on BOOT, NET_UP, CUSTOM_EVENT
 ```
+
+Node message trigger:
+```typescript
+// @on MESSAGE
+// @on MESSAGE(sender_1)
+// @on MESSAGE(10.20.43.20:7070,sender_2)
+```
+`Node.sendMessage(target, content)` dispatches POST `/message` and triggers matching MESSAGE listeners.
 
 #### `@watch /path/to/folder` (multiple supported)
 File system monitoring. Paths can be absolute or relative to the script directory.

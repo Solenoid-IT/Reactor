@@ -139,30 +139,29 @@ class AndroidDirectory extends DirectoryAdapter {
 }
 
 class AndroidHttpRequest extends HttpRequestAdapter {
-	constructor(method = 'GET', body = null, headers = {}, url = '') {
-		super(method, body, headers);
-		this.method = String(method || 'GET').toUpperCase();
-		this.body = body;
-		this.headers = headers || {};
-		this.url = url;
-	}
+	constructor(arg1 = 'GET', arg2 = null, arg3 = {}, arg4 = '') {
+		let method = 'GET';
+		let body = null;
+		let headers = {};
+		let url = '';
 
-	async send(_timeout = 30000) {
-		const plugins = getCapacitorPlugins();
-		if (!plugins || !plugins.Http) {
-			throw new Error('Capacitor Http plugin unavailable');
+		if (arg1 && typeof arg1 === 'object' && !Array.isArray(arg1)) {
+			method = String(arg1.method || 'GET').toUpperCase();
+			body = arg1.body ?? null;
+			headers = arg1.headers || {};
+			url = String(arg1.url || '');
+		} else {
+			method = String(arg1 || 'GET').toUpperCase();
+			body = arg2;
+			headers = arg3 || {};
+			url = String(arg4 || '');
 		}
-		const response = await plugins.Http.request({
-			url: this.url,
-			method: this.method,
-			headers: this.headers,
-			data: this.body,
-		});
-		return {
-			status: response.status,
-			headers: response.headers || {},
-			body: typeof response.data === 'string' ? response.data : JSON.stringify(response.data || {}),
-		};
+
+		super(method, body, headers);
+		this.method = method;
+		this.body = body;
+		this.headers = headers;
+		this.url = url;
 	}
 }
 
@@ -270,6 +269,31 @@ function createAndroidRuntimeApi() {
 		},
 		HttpClient: {
 			Request: AndroidHttpRequest,
+			sendRequest: async (request, timeout = 30000) => {
+			if (!request || typeof request !== 'object') {
+				throw new Error('HttpClient.sendRequest requires a request object');
+				}
+
+			const plugins = getCapacitorPlugins();
+			if (!plugins || !plugins.Http) {
+				throw new Error('Capacitor Http plugin unavailable');
+			}
+
+			const response = await plugins.Http.request({
+				url: String(request.url || ''),
+				method: String(request.method || 'GET').toUpperCase(),
+				headers: request.headers || {},
+				data: request.body ?? null,
+				connectTimeout: timeout,
+				readTimeout: timeout,
+			});
+
+			return {
+				status: response.status,
+				headers: response.headers || {},
+				body: typeof response.data === 'string' ? response.data : JSON.stringify(response.data || {}),
+			};
+			},
 		},
 		Device: {
 			Network: AndroidNetwork,

@@ -1,6 +1,7 @@
 const fs = require('fs/promises');
 const fsNative = require('fs');
 const http = require('http');
+const os = require('os');
 const path = require('path');
 const { parseScheduleExpression } = require('./scheduleParser');
 const { parseScriptMetadata } = require('./metadata');
@@ -95,6 +96,75 @@ function getDelayToNextMidnightBoundary(intervalMs, nowMs = Date.now()) {
 	return intervalMs - remainder;
 }
 
+function normalizeHostPort(value, defaultPort = 7070) {
+	const raw = String(value || '').trim().toLowerCase();
+	if (!raw) {
+		return null;
+	}
+
+	if (/^https?:\/\//i.test(raw)) {
+		try {
+			const parsed = new URL(raw);
+			const host = String(parsed.hostname || '').toLowerCase();
+			const port = parsed.port ? Number(parsed.port) : defaultPort;
+			if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+				return null;
+			}
+			return `${host}:${port}`;
+		} catch {
+			return null;
+		}
+	}
+
+	const hostPortMatch = raw.match(/^([^:]+):(\d{1,5})$/);
+	if (hostPortMatch) {
+		const host = hostPortMatch[1].trim();
+		const port = Number(hostPortMatch[2]);
+		if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+			return null;
+		}
+		return `${host}:${port}`;
+	}
+
+	if (raw.includes(':')) {
+		return null;
+	}
+
+	return `${raw}:${defaultPort}`;
+}
+
+function extractRemoteHost(remoteAddress) {
+	const raw = String(remoteAddress || '').trim();
+	if (!raw) {
+		return null;
+	}
+
+	if (raw.startsWith('::ffff:')) {
+		return raw.slice('::ffff:'.length).toLowerCase();
+	}
+
+	if (raw === '::1') {
+		return '127.0.0.1';
+	}
+
+	return raw.toLowerCase();
+}
+
+function pickPrimaryLocalHost() {
+	const interfaces = os.networkInterfaces();
+	for (const group of Object.values(interfaces)) {
+		for (const candidate of group || []) {
+			if (!candidate || candidate.internal) {
+				continue;
+			}
+			if (candidate.family === 'IPv4' && candidate.address) {
+				return String(candidate.address).toLowerCase();
+			}
+		}
+	}
+	return '127.0.0.1';
+}
+
 class ReactorRuntime {
 	constructor(scriptsDir, eventLogPath, options = {}) {
 		this.scripts = [];
@@ -111,9 +181,13 @@ class ReactorRuntime {
 		this.pendingReloadReason = null;
 		this.watchers = [];
 		this.routeMap = new Map();
+		this.messageListenerMap = new Map();
 		this.httpServer = null;
 		this.httpServerPort = Number(options.httpServerPort || process.env.REACTOR_HTTP_PORT || 7070);
 		this.httpServerLogs = [];
+		this.reactorRootDir = options.reactorRootDir || path.dirname(this.scriptsDir);
+		this.reactorNamePath = path.join(this.reactorRootDir, 'name');
+		this.cachedReactorName = null;
 	}
 
 	addHttpServerLog(message) {
@@ -132,11 +206,49 @@ class ReactorRuntime {
 		return {
 			port: this.httpServerPort,
 			active: Boolean(this.httpServer),
+			reactorName: this.cachedReactorName || null,
 			routes: Array.from(this.routeMap.entries()).map(([routeKey, scripts]) => ({
 				route: routeKey,
 				scripts: scripts.map((script) => script.name),
 			})),
+			messageListeners: Array.from(this.messageListenerMap.entries()).map(([sender, scripts]) => ({
+				sender,
+				scripts: scripts.map((script) => script.name),
+			})),
 		};
+	}
+
+	async getReactorName() {
+		if (this.cachedReactorName) {
+			return this.cachedReactorName;
+		}
+
+		try {
+			const raw = await fs.readFile(this.reactorNamePath, 'utf8');
+			const value = String(raw || '').trim();
+			if (!value) {
+				return '';
+			}
+			this.cachedReactorName = value;
+			return value;
+		} catch {
+			return '';
+		}
+	}
+
+	async setReactorName(nextName) {
+		const sanitized = String(nextName || '').trim();
+		await fs.mkdir(path.dirname(this.reactorNamePath), { recursive: true });
+
+		if (!sanitized) {
+			await fs.writeFile(this.reactorNamePath, '', 'utf8');
+			this.cachedReactorName = '';
+			return '';
+		}
+
+		await fs.writeFile(this.reactorNamePath, `${sanitized}\n`, 'utf8');
+		this.cachedReactorName = sanitized;
+		return sanitized;
 	}
 
 	getHttpServerLogs(limit = 100) {
@@ -194,6 +306,145 @@ class ReactorRuntime {
 		return listeners;
 	}
 
+	registerScriptMessageListeners(script) {
+		if (!script.enabled || !Array.isArray(script.events) || !script.events.includes('MESSAGE')) {
+			return;
+		}
+
+		if (script.messageFromAnySender || !Array.isArray(script.messageSenders) || script.messageSenders.length === 0) {
+			const wildcardListeners = this.messageListenerMap.get('*') || [];
+			wildcardListeners.push(script);
+			this.messageListenerMap.set('*', wildcardListeners);
+			return;
+		}
+
+		for (const sender of script.messageSenders) {
+			const key = String(sender || '').trim().toLowerCase();
+			if (!key) {
+				continue;
+			}
+
+			const listeners = this.messageListenerMap.get(key) || [];
+			listeners.push(script);
+			this.messageListenerMap.set(key, listeners);
+		}
+	}
+
+	findMessageListeners(senderCandidates) {
+		const listeners = [];
+		for (const script of this.messageListenerMap.get('*') || []) {
+			listeners.push(script);
+		}
+
+		for (const sender of senderCandidates || []) {
+			for (const script of this.messageListenerMap.get(sender) || []) {
+				if (!listeners.includes(script)) {
+					listeners.push(script);
+				}
+			}
+		}
+
+		return listeners;
+	}
+
+	parseMessageBody(req, rawBuffer) {
+		const headers = req.headers || {};
+		const contentType = String(headers['content-type'] || '').toLowerCase();
+		const bodyText = rawBuffer.toString('utf8');
+		let bodyJson = null;
+		if (rawBuffer.length > 0 && contentType.includes('application/json')) {
+			try {
+				bodyJson = JSON.parse(bodyText);
+			} catch {
+				bodyJson = null;
+			}
+		}
+
+		return {
+			contentType,
+			text: bodyText,
+			json: bodyJson,
+			base64: rawBuffer.toString('base64'),
+		};
+	}
+
+	resolveSenderCandidates(req) {
+		const headers = req.headers || {};
+		const rawName = String(headers['reactor-name'] || '').trim();
+		const rawSender = String(headers['reactor-sender'] || '').trim();
+		const remoteHost = extractRemoteHost(req.socket && req.socket.remoteAddress);
+		const candidates = new Set();
+
+		const normalizedSender = normalizeHostPort(rawSender, 7070);
+		if (normalizedSender) {
+			candidates.add(normalizedSender);
+		}
+
+		if (rawName) {
+			candidates.add(rawName.toLowerCase());
+		}
+
+		if (remoteHost) {
+			candidates.add(normalizeHostPort(remoteHost, 7070));
+		}
+
+		return {
+			rawName,
+			rawSender,
+			remoteHost,
+			candidates: Array.from(candidates).filter(Boolean),
+		};
+	}
+
+	async sendNodeMessage(target, content, extraHeaders = {}) {
+		const targetId = String(target || '').trim();
+		const normalizedTarget = normalizeHostPort(targetId, 7070);
+		if (!normalizedTarget) {
+			throw new Error('invalid target. expected host or host:port');
+		}
+
+		const [host, portString] = normalizedTarget.split(':');
+		const port = Number(portString || 7070);
+		const endpoint = `http://${host}:${port}/message`;
+
+		let payload = content;
+		let contentType = 'text/plain; charset=utf-8';
+		if (Buffer.isBuffer(content) || content instanceof Uint8Array) {
+			payload = Buffer.from(content);
+			contentType = 'application/octet-stream';
+		} else if (typeof content === 'string') {
+			payload = content;
+		} else if (content === null || content === undefined) {
+			payload = '';
+		} else {
+			payload = JSON.stringify(content);
+			contentType = 'application/json; charset=utf-8';
+		}
+
+		const reactorName = await this.getReactorName();
+		const senderId = `${pickPrimaryLocalHost()}:${this.httpServerPort}`;
+		const request = new this.runtimeApi.HttpClient.Request({
+			url: endpoint,
+			method: 'POST',
+			headers: {
+				'content-type': contentType,
+				'Reactor-Name': reactorName || '',
+				'Reactor-Sender': senderId,
+				...extraHeaders,
+			},
+			body: payload,
+		});
+
+		const response = await this.runtimeApi.HttpClient.sendRequest(request);
+		return {
+			target: normalizedTarget,
+			endpoint,
+			status: response.status,
+			headers: response.headers,
+			body: response.body,
+		};
+	}
+
 	async handleRouteRequest(req, res) {
 		const method = String(req.method || 'GET').toUpperCase();
 		let pathname = '/';
@@ -224,6 +475,63 @@ class ReactorRuntime {
 					httpPort: this.httpServerPort,
 					scriptsCount: this.scripts.length,
 					routesCount: this.routeMap.size,
+				}),
+			);
+			return;
+		}
+
+		if (method === 'POST' && pathname === '/message') {
+			const bodyChunks = [];
+			for await (const chunk of req) {
+				bodyChunks.push(chunk);
+			}
+			const rawBuffer = Buffer.concat(bodyChunks);
+			const body = this.parseMessageBody(req, rawBuffer);
+			const senderMeta = this.resolveSenderCandidates(req);
+			const listeners = this.findMessageListeners(senderMeta.candidates);
+
+			this.addHttpServerLog(
+				`POST /message sender=${senderMeta.rawSender || senderMeta.rawName || senderMeta.remoteHost || 'unknown'} -> ${listeners.length} script(s)`,
+			);
+
+			if (listeners.length === 0) {
+				res.writeHead(202, { 'content-type': 'application/json' });
+				res.end(
+					JSON.stringify({
+						ok: true,
+						trigger: 'MESSAGE',
+						delivered: false,
+						reason: 'no listeners',
+						senderCandidates: senderMeta.candidates,
+					}),
+				);
+				return;
+			}
+
+			await Promise.allSettled(
+				listeners.map((script) =>
+					this.runScript(script, {
+						trigger: 'MESSAGE',
+						event: 'MESSAGE',
+						messageSender: senderMeta.rawSender || senderMeta.remoteHost || null,
+						messageSenderName: senderMeta.rawName || null,
+						messageContent: body.text,
+						messageContentType: body.contentType,
+						messageBodyBase64: body.base64,
+						messageJson: body.json,
+						messageHeaders: req.headers || {},
+					}),
+				),
+			);
+
+			res.writeHead(200, { 'content-type': 'application/json' });
+			res.end(
+				JSON.stringify({
+					ok: true,
+					trigger: 'MESSAGE',
+					delivered: true,
+					scripts: listeners.map((script) => script.name),
+					senderCandidates: senderMeta.candidates,
 				}),
 			);
 			return;
@@ -396,6 +704,7 @@ class ReactorRuntime {
 
 	async init() {
 		await fs.mkdir(this.scriptsDir, { recursive: true });
+		await this.getReactorName();
 		await this.discoverScripts();
 		this.setupSchedules();
 		this.setupWatchers();
@@ -517,6 +826,7 @@ class ReactorRuntime {
 		this.scripts = [];
 		this.eventMap.clear();
 		this.routeMap.clear();
+		this.messageListenerMap.clear();
 
 		try {
 			await fs.mkdir(this.scriptsDir, { recursive: true });
@@ -551,6 +861,8 @@ class ReactorRuntime {
 					run: runner,
 					schedule: metadata.schedule,
 					events: metadata.events,
+					messageSenders: metadata.messageSenders || [],
+					messageFromAnySender: Boolean(metadata.messageFromAnySender),
 					state: metadata.state,
 					enabled: metadata.state !== 'DISABLED',
 					mutex: metadata.mutex,
@@ -564,6 +876,12 @@ class ReactorRuntime {
 				this.log(
 					`Loaded ${script.name} @state=${script.state} @schedule=${script.schedule || 'none'} @on=${
 						script.events.join(', ') || 'none'
+					} @messageFrom=${
+						script.events.includes('MESSAGE')
+							? script.messageFromAnySender || script.messageSenders.length === 0
+								? '*'
+								: script.messageSenders.join(', ')
+							: 'none'
 					} @watch=${script.watch.length > 0 ? script.watch.join(', ') : 'none'} @route=${
 						script.routes.length > 0 ? script.routes.map((route) => route.raw).join(', ') : 'none'
 					} @mutex=${script.mutex ? 'on' : 'off'} (from ${this.scriptsDir})`,
@@ -581,6 +899,7 @@ class ReactorRuntime {
 				}
 
 				this.registerScriptRoutes(script);
+				this.registerScriptMessageListeners(script);
 			} catch (error) {
 				this.log(`Failed to load script ${scriptPath}: ${error.message}`);
 			}
@@ -690,12 +1009,31 @@ class ReactorRuntime {
 		});
 
 		try {
+			const requestCtor = this.runtimeApi.HttpClient && this.runtimeApi.HttpClient.Request;
+			const sendRequest = this.runtimeApi.HttpClient && this.runtimeApi.HttpClient.sendRequest;
+			function RequestFactory(...args) {
+				return new requestCtor(...args);
+			}
+
+			const scriptHttpClient = {
+				...(this.runtimeApi.HttpClient || {}),
+				Request: RequestFactory,
+				sendRequest: (request, timeout) => sendRequest(request, timeout),
+			};
+
 			await Promise.resolve(
 				script.run({
 					...context,
+					Node: {
+						sendMessage: async (target, content, options = {}) => {
+							const normalizedOptions = options && typeof options === 'object' ? options : {};
+							const headers = normalizedOptions.headers || {};
+							return this.sendNodeMessage(target, content, headers);
+						},
+					},
 					api: this.runtimeApi,
 					FileSystem: this.runtimeApi.FileSystem,
-					HttpClient: this.runtimeApi.HttpClient,
+					HttpClient: scriptHttpClient,
 					Device: this.runtimeApi.Device,
 					System: this.runtimeApi.System,
 					log: async (message) => {

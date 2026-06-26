@@ -5,7 +5,7 @@ const { createMainWindow, setupIpcHandlers } = require('./src/ui');
 
 // Constants
 const EXTERNAL_SCRIPTS_DIR = path.join(app.getPath('userData'), 'projects');
-const EVENT_LOG_PATH = path.join(__dirname, 'activity.log');
+const EVENT_LOG_PATH = path.join(app.getPath('userData'), 'activity.log');
 
 function shouldShowWindowOnLaunch() {
 	if (process.env.REACTOR_SHOW_WINDOW === '1') {

@@ -129,33 +129,29 @@ class NodeDirectory extends DirectoryAdapter {
 }
 
 class NodeHttpRequest extends HttpRequestAdapter {
-	constructor(method = 'GET', body = null, headers = {}, url = '') {
-		super(method, body, headers);
-		this.method = String(method || 'GET').toUpperCase();
-		this.body = body;
-		this.headers = headers || {};
-		this.url = url;
-	}
+	constructor(arg1 = 'GET', arg2 = null, arg3 = {}, arg4 = '') {
+		let method = 'GET';
+		let body = null;
+		let headers = {};
+		let url = '';
 
-	async send(timeout = 30000) {
-		const controller = new AbortController();
-		const timer = setTimeout(() => controller.abort(), timeout);
-		try {
-			const response = await fetch(this.url, {
-				method: this.method,
-				headers: this.headers,
-				body: this.body,
-				signal: controller.signal,
-			});
-			const body = await response.text();
-			return {
-				status: response.status,
-				headers: Object.fromEntries(response.headers.entries()),
-				body,
-			};
-		} finally {
-			clearTimeout(timer);
+		if (arg1 && typeof arg1 === 'object' && !Array.isArray(arg1)) {
+			method = String(arg1.method || 'GET').toUpperCase();
+			body = arg1.body ?? null;
+			headers = arg1.headers || {};
+			url = String(arg1.url || '');
+		} else {
+			method = String(arg1 || 'GET').toUpperCase();
+			body = arg2;
+			headers = arg3 || {};
+			url = String(arg4 || '');
 		}
+
+		super(method, body, headers);
+		this.method = method;
+		this.body = body;
+		this.headers = headers;
+		this.url = url;
 	}
 }
 
@@ -237,6 +233,30 @@ function createNodeRuntimeApi() {
 		},
 		HttpClient: {
 			Request: NodeHttpRequest,
+			sendRequest: async (request, timeout = 30000) => {
+				if (!request || typeof request !== 'object') {
+					throw new Error('HttpClient.sendRequest requires a request object');
+				}
+
+				const controller = new AbortController();
+				const timer = setTimeout(() => controller.abort(), timeout);
+				try {
+					const response = await fetch(String(request.url || ''), {
+						method: String(request.method || 'GET').toUpperCase(),
+						headers: request.headers || {},
+						body: request.body ?? null,
+						signal: controller.signal,
+					});
+					const body = await response.text();
+					return {
+						status: response.status,
+						headers: Object.fromEntries(response.headers.entries()),
+						body,
+					};
+				} finally {
+					clearTimeout(timer);
+				}
+			},
 		},
 		Device: {
 			Network: NodeNetwork,

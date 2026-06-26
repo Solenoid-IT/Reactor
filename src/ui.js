@@ -1108,6 +1108,7 @@ function buildHtmlContent() {
 				<button class="btn-secondary icon-button" onclick="refreshScripts()" title="refresh scripts" aria-label="Refresh scripts"><i class="fa-solid fa-rotate-right"></i></button>
 				<button class="btn-secondary icon-button" onclick="openScriptsFolder()" title="open project folder" aria-label="Open project folder"><i class="fa-regular fa-folder-open"></i></button>
 				<button class="btn-secondary" onclick="chooseDefaultProgram()" title="set default program"><i class="fa-solid fa-cog" style="margin-right: 8px;"></i>Set Default Program</button>
+				<button class="btn-secondary" onclick="openServerStatus()" title="open server status"><i class="fa-solid fa-heart-pulse" style="margin-right: 8px;"></i>Server Status</button>
 				<div class="log-picker" id="logPicker">
 					<button class="btn-secondary" onclick="toggleLogMenu(event)" title="log actions"><i class="fa-solid fa-list" style="margin-right: 8px;"></i>LOG</button>
 					<div class="log-menu" id="logMenu" aria-hidden="true">
@@ -1134,6 +1135,14 @@ function buildHtmlContent() {
 					<div style="margin-top:10px; display:flex; gap:8px; align-items:center;">
 						<input id="httpServerPortInput" type="number" min="1" max="65535" placeholder="7070" style="width:120px; background:#12161c; color:#eef2fb; border:1px solid #313a46; border-radius:8px; padding:8px;" />
 						<button class="btn-secondary" onclick="saveHttpServerPort()" title="save HTTP port">Save Port</button>
+					</div>
+				</div>
+				<div class="detail-card">
+					<h3>Reactor Name</h3>
+					<div class="detail-value" id="reactorNameValue">(not set)</div>
+					<div style="margin-top:10px; display:flex; gap:8px; align-items:center;">
+						<input id="reactorNameInput" type="text" maxlength="120" placeholder="sender_1" style="width:220px; background:#12161c; color:#eef2fb; border:1px solid #313a46; border-radius:8px; padding:8px;" />
+						<button class="btn-secondary" onclick="saveReactorName()" title="save Reactor name">Save Name</button>
 					</div>
 				</div>
 				<div class="detail-card">
@@ -1522,12 +1531,16 @@ function buildHtmlContent() {
 			}
 
 			const script = scriptsState[selectedIndex];
+			const messageMeta = script.events && script.events.includes('MESSAGE')
+				? (script.messageFromAnySender ? '*' : ((script.messageSenders || []).join(', ') || '*'))
+				: 'none';
 			document.getElementById('selectedName').textContent = script.name;
 			document.getElementById('selectedPath').textContent = script.path;
 			document.getElementById('selectedMeta').textContent =
 				'State: ' + script.state +
 				' | Schedule: ' + (script.schedule || 'none') +
 				' | Events: ' + (script.events.join(', ') || 'none') +
+				' | Message From: ' + messageMeta +
 				' | Watch: ' + (script.watch && script.watch.length > 0 ? script.watch.join(', ') : 'none') +
 				' | Mutex: ' + (script.mutex ? 'on' : 'off');
 		}
@@ -1751,6 +1764,21 @@ function buildHtmlContent() {
 			}
 		}
 
+		async function refreshReactorName() {
+			const result = await window.reactor.getReactorName();
+			if (!result || !result.ok) {
+				document.getElementById('reactorNameValue').textContent = '(unavailable)';
+				return;
+			}
+
+			const value = String(result.name || '').trim();
+			document.getElementById('reactorNameValue').textContent = value || '(not set)';
+			const input = document.getElementById('reactorNameInput');
+			if (input && !input.value) {
+				input.value = value;
+			}
+		}
+
 		async function saveHttpServerPort() {
 			const input = document.getElementById('httpServerPortInput');
 			if (!input) {
@@ -1774,6 +1802,37 @@ function buildHtmlContent() {
 			document.getElementById('httpServerPortValue').textContent = String(result.config.port);
 			document.getElementById('statusBox').textContent = 'HTTP server port set to ' + result.config.port;
 			showToast('HTTP server port updated');
+		}
+
+		async function saveReactorName() {
+			const input = document.getElementById('reactorNameInput');
+			if (!input) {
+				return;
+			}
+
+			const nextName = String(input.value || '').trim();
+			const result = await window.reactor.setReactorName(nextName);
+			if (!result || !result.ok) {
+				document.getElementById('statusBox').textContent = 'Reactor name update failed: ' + ((result && result.error) || 'unknown error');
+				showToast('Reactor name update failed', 'error');
+				return;
+			}
+
+			document.getElementById('reactorNameValue').textContent = result.name || '(not set)';
+			document.getElementById('statusBox').textContent = result.name ? ('Reactor name set to ' + result.name) : 'Reactor name cleared';
+			showToast('Reactor name saved');
+		}
+
+		async function openServerStatus() {
+			const result = await window.reactor.openServerStatus();
+			if (!result || !result.ok) {
+				document.getElementById('statusBox').textContent = 'Open server status failed: ' + ((result && result.error) || 'unknown error');
+				showToast('Failed to open server status', 'error');
+				return;
+			}
+
+			document.getElementById('statusBox').textContent = 'Opened server status: ' + result.url;
+			showToast('Server status opened');
 		}
 
 		async function openScriptsFolder() {
@@ -1872,6 +1931,7 @@ function buildHtmlContent() {
 		async function initialLoad() {
 			await refreshDefaultProgram();
 			await refreshHttpServerPort();
+			await refreshReactorName();
 			await refreshScripts();
 		}
 
@@ -1949,6 +2009,48 @@ function setupIpcHandlers(runtime) {
 		}
 
 		return { ok: true, logs: runtime.getHttpServerLogs(limit) };
+	});
+
+	ipcMain.handle('get-reactor-name', async () => {
+		if (!runtime || !runtime.getReactorName) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		try {
+			const name = await runtime.getReactorName();
+			return { ok: true, name };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('set-reactor-name', async (_, name) => {
+		if (!runtime || !runtime.setReactorName) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		try {
+			const nextName = await runtime.setReactorName(name);
+			return { ok: true, name: nextName };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('open-server-status', async () => {
+		if (!runtime || !runtime.getHttpServerConfig) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		try {
+			const config = runtime.getHttpServerConfig();
+			const port = Number(config.port) || 7070;
+			const targetUrl = `http://localhost:${port}`;
+			await shell.openExternal(targetUrl);
+			return { ok: true, url: targetUrl };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
 	});
 
 	ipcMain.handle('pick-default-program', async () => {
@@ -2095,7 +2197,7 @@ function setupIpcHandlers(runtime) {
 			event: [
 				'// @state DISABLED',
 				'// @mutex ON',
-				'// @on BOOT',
+				'// @on MESSAGE(sender_1)',
 				'',
 				'',
 				'',
@@ -2105,7 +2207,7 @@ function setupIpcHandlers(runtime) {
 				'',
 				'export async function run (ctx : Context)',
 				'{',
-				"\tawait ctx.log('event script: ' + (ctx.event || ctx.trigger));",
+				"\tawait ctx.log('message from ' + (ctx.messageSenderName || ctx.messageSender || 'unknown') + ': ' + (ctx.messageContent || ''));",
 				'}',
 				'',
 			],
@@ -2167,6 +2269,13 @@ function setupIpcHandlers(runtime) {
 			'\ttrigger?: string;',
 			'\tevent?: string | null;',
 			'\texpression?: string | null;',
+			'\tmessageSender?: string | null;',
+			'\tmessageSenderName?: string | null;',
+			'\tmessageContent?: string;',
+			'\tmessageContentType?: string;',
+			'\tmessageBodyBase64?: string;',
+			'\tmessageJson?: unknown;',
+			'\tmessageHeaders?: Record<string, string | string[] | undefined>;',
 			'\twatchPath?: string;',
 			'\twatchType?: \'file:created\' | \'file:deleted\' | \'file:moved\' | \'dir:created\' | \'dir:deleted\' | \'dir:moved\' | \'file:changed\';',
 			'\trouteMethod?: string;',
@@ -2185,9 +2294,30 @@ function setupIpcHandlers(runtime) {
 			'\t};',
 			'\tapi?: any;',
 			'\tFileSystem?: any;',
-			'\tHttpClient?: any;',
+			'\tHttpClient?: {',
+			'\t\tRequest: new (request: { method?: string; body?: unknown; headers?: Record<string, string>; url?: string } | string, body?: unknown, headers?: Record<string, string>, url?: string) => {',
+			'\t\t\tmethod: string;',
+			'\t\t\tbody: unknown;',
+			'\t\t\theaders: Record<string, string>;',
+			'\t\t\turl: string;',
+			'\t\t};',
+			'\t\tsendRequest: (request: { method: string; body: unknown; headers: Record<string, string>; url: string; }, timeout?: number) => Promise<{',
+			'\t\t\tstatus: number;',
+			'\t\t\theaders: Record<string, string>;',
+			'\t\t\tbody: string;',
+			'\t\t}>;',
+			'\t};',
 			'\tDevice?: any;',
 			'\tSystem?: any;',
+			'\tNode?: {',
+			'\t\tsendMessage: (target: string, content: string | Uint8Array | Record<string, unknown>, options?: { headers?: Record<string, string> }) => Promise<{',
+			'\t\t\ttarget: string;',
+			'\t\t\tendpoint: string;',
+			'\t\t\tstatus: number;',
+			'\t\t\theaders: Record<string, string>;',
+			'\t\t\tbody: string;',
+			'\t\t}>;',
+			'\t};',
 			'\tlog: (message: string, type?: \'E\' | \'W\' | \'I\' | \'D\') => Promise<void> | void;',
 			'}',
 			'',
@@ -2495,6 +2625,8 @@ function setupIpcHandlers(runtime) {
 					enabled: s.enabled,
 					schedule: s.schedule,
 					events: s.events,
+					messageSenders: s.messageSenders || [],
+					messageFromAnySender: Boolean(s.messageFromAnySender),
 					routes: s.routes || [],
 					mutex: s.mutex,
 					watch: s.watch || [],
