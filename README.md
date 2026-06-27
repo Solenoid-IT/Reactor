@@ -425,6 +425,34 @@ npm run cli -- build mobile
 npm run cli -- build all
 ```
 
+### Mobile npm shortcuts (Android)
+
+Common mobile workflow commands:
+
+```bash
+npm run mobile:sync
+npm run mobile:build
+npm run mobile:open
+```
+
+What they do:
+- `npm run mobile:sync`: builds UI and runs `npx cap sync android`.
+- `npm run mobile:build`: runs `mobile:sync` and builds debug APK with Gradle.
+- `npm run mobile:open`: opens the Android project in Android Studio.
+
+Android project path:
+- `dist/mobile/android`
+
+Debug APK output path:
+- `dist/mobile/android/app/build/outputs/apk/debug/app-debug.apk`
+
+If Gradle fails due to Java version, use Java 11+ (recommended Java 17).
+On macOS with Android Studio installed:
+
+```bash
+JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" npm run mobile:build
+```
+
 ### macOS Build Notes
 
 - Reactor uses `assets/logo.icns` as app icon for macOS builds.
