@@ -524,4 +524,77 @@
 		:global(.list-pane) { border-right: 0; border-bottom: 1px solid var(--border); }
 		:global(.http-server-actions) { grid-template-columns: 1fr; }
 	}
+
+	@media (max-width: 760px) {
+		:global(body) {
+			padding: 8px;
+		}
+		:global(.header) {
+			padding: 12px;
+			gap: 10px;
+		}
+		:global(.title h1) {
+			font-size: 18px;
+		}
+		:global(.title p) {
+			display: none;
+		}
+		:global(.actions) {
+			flex-wrap: wrap;
+			overflow: visible;
+			gap: 6px;
+		}
+		:global(.actions button) {
+			white-space: nowrap;
+		}
+		:global(.btn-secondary),
+		:global(.btn-primary) {
+			padding: 8px 10px;
+		}
+		:global(.template-menu) {
+			position: fixed;
+			top: 76px;
+			left: 50%;
+			right: auto;
+			min-width: min(320px, calc(100vw - 24px));
+			max-width: min(320px, calc(100vw - 24px));
+			transform: translate(-50%, -6px) scale(0.98);
+			z-index: 90;
+		}
+		:global(.template-picker.open .template-menu) {
+			transform: translate(-50%, 0) scale(1);
+		}
+		:global(.log-menu) {
+			left: 0;
+			right: auto;
+			min-width: 170px;
+			max-width: min(260px, calc(100vw - 24px));
+		}
+		:global(.list-pane),
+		:global(.detail-pane) {
+			padding: 12px;
+		}
+		:global(.file-header) {
+			flex-direction: column;
+			align-items: stretch;
+		}
+		:global(.toggle-stack) {
+			flex-direction: row;
+			flex-wrap: wrap;
+			align-items: flex-start;
+		}
+		:global(.switch-toggle) {
+			min-width: 108px;
+		}
+		:global(.item-actions) {
+			gap: 5px;
+		}
+		:global(.item-action-btn) {
+			height: 28px;
+			padding: 0 7px;
+		}
+		:global(.item-action-label) {
+			font-size: 9px;
+		}
+	}
 </style>
