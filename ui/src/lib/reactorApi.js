@@ -174,10 +174,21 @@ export async function pickDefaultProgram() {
 
 export async function runScriptNow(filePath) {
 	const bridge = getBridge();
-	if (!bridge || !bridge.runScriptNow) {
-		return { ok: false, error: 'bridge unavailable' };
+	if (bridge && bridge.runScriptNow) {
+		return bridge.runScriptNow(filePath);
 	}
-	return bridge.runScriptNow(filePath);
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.runScriptNow) {
+		return mobile.runScriptNow({ filePath });
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'runScriptNow', { filePath });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
 }
 
 export async function createScriptFile(templateKey, scriptName = '') {
