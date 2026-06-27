@@ -340,10 +340,21 @@ export async function getHttpServerConfig() {
 
 export async function setHttpServerPort(port) {
 	const bridge = getBridge();
-	if (!bridge || !bridge.setHttpServerPort) {
-		return { ok: false, error: 'bridge unavailable' };
+	if (bridge && bridge.setHttpServerPort) {
+		return bridge.setHttpServerPort(port);
 	}
-	return bridge.setHttpServerPort(port);
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.setHttpServerPort) {
+		return mobile.setHttpServerPort({ port });
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'setHttpServerPort', { port });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
 }
 
 export async function getReactorName() {
@@ -386,10 +397,21 @@ export async function setReactorName(name) {
 
 export async function openServerStatus() {
 	const bridge = getBridge();
-	if (!bridge || !bridge.openServerStatus) {
-		return { ok: false, error: 'bridge unavailable' };
+	if (bridge && bridge.openServerStatus) {
+		return bridge.openServerStatus();
 	}
-	return bridge.openServerStatus();
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.openServerStatus) {
+		return mobile.openServerStatus();
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'openServerStatus');
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
 }
 
 export async function getWorkflow() {
