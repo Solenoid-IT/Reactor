@@ -23,6 +23,9 @@
     "ui:install": "npm --prefix ui install",
     "ui:dev": "npm --prefix ui run dev",
     "ui:build": "npm --prefix ui run build && node scripts/patch-svelte-file-protocol.js",
+    "mobile:sync": "npm run ui:build && npx cap sync android",
+    "mobile:build": "npm run mobile:sync && cd dist/mobile/android && ./gradlew assembleDebug",
+    "mobile:open": "npx cap open android",
     "pack": "npm run ui:build && electron-builder --dir",
     "build": "npm run ui:build && electron-builder",
     "build:desktop": "npm run ui:build && electron-builder",
@@ -34,9 +37,12 @@
     "cli": "node bin/reactor-cli.js"
   },
   "dependencies": {
+    "@capacitor/core": "^8.4.1",
     "typescript": "^5.9.3"
   },
   "devDependencies": {
+    "@capacitor/android": "^8.4.1",
+    "@capacitor/cli": "^7.6.7",
     "@types/node": "^26.0.0",
     "electron": "^41.7.1",
     "electron-builder": "^26.0.12"
