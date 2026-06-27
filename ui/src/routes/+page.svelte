@@ -4,6 +4,7 @@
 	import ScriptList from '$lib/components/ScriptList.svelte';
 	import DetailPane from '$lib/components/DetailPane.svelte';
 	import WorkflowEditor from '$lib/components/WorkflowEditor.svelte';
+	import Modal from '$lib/components/Modal.svelte';
 	import {
 		getScriptsInfo,
 		getUiSettings,
@@ -460,54 +461,31 @@
 		/>
 	{/if}
 
-	{#if renameOpen}
-		<div
-			class="modal-backdrop"
-			role="button"
-			tabindex="0"
-			on:click={closeRenameDialog}
+	<Modal
+		open={renameOpen}
+		title="Rename Script"
+		subtitle={renameOriginalName}
+		ariaLabel="Rename script"
+		onClose={closeRenameDialog}
+	>
+		<input
+			bind:this={renameInput}
+			bind:value={renameValue}
+			class="modal-input"
+			type="text"
+			autocomplete="off"
 			on:keydown={(event) => {
-				if (event.key === 'Escape' || event.key === 'Enter' || event.key === ' ') {
+				if (event.key === 'Enter') {
 					event.preventDefault();
-					closeRenameDialog();
+					confirmRenameDialog();
 				}
 			}}
-		>
-			<div
-				class="modal-card"
-				role="dialog"
-				aria-modal="true"
-				aria-label="Rename script"
-				tabindex="-1"
-				on:click|stopPropagation
-				on:keydown={(event) => {
-					if (event.key === 'Escape') {
-						closeRenameDialog();
-					}
-				}}
-			>
-				<h3>Rename Script</h3>
-				<p class="modal-subtitle">{renameOriginalName}</p>
-				<input
-					bind:this={renameInput}
-					bind:value={renameValue}
-					class="modal-input"
-					type="text"
-					autocomplete="off"
-					on:keydown={(event) => {
-						if (event.key === 'Enter') {
-							event.preventDefault();
-							confirmRenameDialog();
-						}
-					}}
-				/>
-				<div class="modal-actions">
-					<button type="button" class="btn-secondary" on:click={closeRenameDialog}>Cancel</button>
-					<button type="button" class="btn-primary" on:click={confirmRenameDialog}>Save</button>
-				</div>
-			</div>
-		</div>
-	{/if}
+		/>
+		<svelte:fragment slot="actions">
+			<button type="button" class="btn-secondary" on:click={closeRenameDialog}>Cancel</button>
+			<button type="button" class="btn-primary" on:click={confirmRenameDialog}>Save</button>
+		</svelte:fragment>
+	</Modal>
 </div>
 
 <style>

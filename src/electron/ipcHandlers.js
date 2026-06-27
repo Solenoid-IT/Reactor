@@ -453,7 +453,7 @@ function setupIpcHandlers(runtime) {
 		const response = await dialog.showMessageBox({
 			type: 'warning',
 			title: 'Confirm script deletion',
-			message: `Are you sure to delete ${scriptName || 'this script'}?`,
+			message: `Are you sure to delete script '${scriptName || 'this script'}'?`,
 			detail: 'This action is not reversible',
 			buttons: ['Delete', 'Cancel'],
 			defaultId: 1,

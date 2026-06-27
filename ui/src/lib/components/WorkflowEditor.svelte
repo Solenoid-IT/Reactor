@@ -1,4 +1,6 @@
 <script>
+	import Modal from '$lib/components/Modal.svelte';
+
 	export let open = false;
 	export let scripts = [];
 	export let workflow = { version: 1, nodes: [], links: [] };
@@ -162,87 +164,95 @@
 	}
 </script>
 
-{#if open}
-	<div class="workflow-overlay" role="presentation" on:mousemove={onMouseMove} on:mouseup={endDrag} on:mouseleave={endDrag}>
-		<div class="workflow-shell">
-			<div class="workflow-header">
-				<h2><i class="fa-solid fa-diagram-project me-2"></i>Workflow Editor</h2>
-				<div class="workflow-header-actions">
-					<button class="btn-secondary" on:click={onClose}>Close</button>
-					<button class="btn-primary" on:click={saveNow}>Save</button>
-				</div>
-			</div>
-			<div class="workflow-body">
-				<aside class="workflow-sidebar">
-					<h3>Scripts</h3>
-					{#if scripts.length === 0}
-						<div class="workflow-empty">No scripts loaded</div>
-					{:else}
-						{#each scripts as script}
-							<button class="workflow-script-btn" on:click={() => addNode(script.path)}>
-								<i class="fa-regular fa-square-plus me-2"></i>{scriptNameForPath(script.path)}
-							</button>
-						{/each}
-					{/if}
-				</aside>
-				<div class="workflow-canvas-wrap">
-					<svg class="workflow-links" viewBox="0 0 1600 900" preserveAspectRatio="none">
-						<defs>
-							<marker id="arrow-head" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-								<polygon points="0 0, 10 3.5, 0 7" fill="#8db5ff"></polygon>
-							</marker>
-						</defs>
-						{#each links as link}
-							<path d={pathForLink(link)} class="workflow-link" marker-end="url(#arrow-head)"></path>
-						{/each}
-					</svg>
-					<div class="workflow-canvas">
-						{#each nodes as node}
-							<div class="workflow-node" style={`left:${node.x}px; top:${node.y}px;`}>
-								<button type="button" class="workflow-node-title" on:mousedown={(event) => beginDrag(event, node.id)}>
-									<i class="fa-solid fa-file-code me-2"></i>{node.name}
-								</button>
-								<div class="workflow-node-meta">{node.scriptPath}</div>
-								<label class="workflow-node-label" for={`node-trigger-${node.id}`}>Trigger</label>
-								<select id={`node-trigger-${node.id}`} value={node.trigger} on:change={(event) => updateNodeTrigger(node.id, event.currentTarget.value)}>
-									<option value="manual">manual</option>
-									<option value="schedule">schedule</option>
-									<option value="event">event</option>
-									<option value="watch">watch</option>
-								</select>
-								<div class="workflow-node-actions">
-									<button class="btn-secondary" on:click={() => startConnect(node.id)}>
-										{selectedSource === node.id ? 'Connecting...' : 'Connect from'}
-									</button>
-									<button class="btn-secondary" on:click={() => connectTo(node.id)}>Connect to</button>
-									<button class="btn-secondary" on:click={() => removeNode(node.id)}>Delete</button>
-								</div>
-							</div>
-						{/each}
-					</div>
-				</div>
-				<aside class="workflow-sidebar">
-					<h3>Links</h3>
-					{#if links.length === 0}
-						<div class="workflow-empty">No links yet</div>
-					{:else}
-						{#each links as link}
-							<div class="workflow-link-item">
-								<div>{(nodes.find((n) => n.id === link.from)?.name || link.from)} → {(nodes.find((n) => n.id === link.to)?.name || link.to)}</div>
-								<select value={link.trigger} on:change={(event) => updateLinkTrigger(link.id, event.currentTarget.value)}>
-									<option value="on-success">on-success</option>
-									<option value="on-failure">on-failure</option>
-									<option value="always">always</option>
-								</select>
-								<button class="btn-secondary" on:click={() => removeLink(link.id)}>Remove</button>
-							</div>
-						{/each}
-					{/if}
-				</aside>
-			</div>
+<Modal
+	open={open}
+	ariaLabel="Workflow editor"
+	closeOnBackdrop={false}
+	closeOnEscape={false}
+	showActions={false}
+	backdropClass="workflow-overlay"
+	cardClass="workflow-shell"
+	onClose={onClose}
+	onBackdropMouseMove={onMouseMove}
+	onBackdropMouseUp={endDrag}
+	onBackdropMouseLeave={endDrag}
+>
+	<div class="workflow-header">
+		<h2><i class="fa-solid fa-diagram-project me-2"></i>Workflow Editor</h2>
+		<div class="workflow-header-actions">
+			<button class="btn-secondary" on:click={onClose}>Close</button>
+			<button class="btn-primary" on:click={saveNow}>Save</button>
 		</div>
 	</div>
-{/if}
+	<div class="workflow-body">
+		<aside class="workflow-sidebar">
+			<h3>Scripts</h3>
+			{#if scripts.length === 0}
+				<div class="workflow-empty">No scripts loaded</div>
+			{:else}
+				{#each scripts as script}
+					<button class="workflow-script-btn" on:click={() => addNode(script.path)}>
+						<i class="fa-regular fa-square-plus me-2"></i>{scriptNameForPath(script.path)}
+					</button>
+				{/each}
+			{/if}
+		</aside>
+		<div class="workflow-canvas-wrap">
+			<svg class="workflow-links" viewBox="0 0 1600 900" preserveAspectRatio="none">
+				<defs>
+					<marker id="arrow-head" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+						<polygon points="0 0, 10 3.5, 0 7" fill="#8db5ff"></polygon>
+					</marker>
+				</defs>
+				{#each links as link}
+					<path d={pathForLink(link)} class="workflow-link" marker-end="url(#arrow-head)"></path>
+				{/each}
+			</svg>
+			<div class="workflow-canvas">
+				{#each nodes as node}
+					<div class="workflow-node" style={`left:${node.x}px; top:${node.y}px;`}>
+						<button type="button" class="workflow-node-title" on:mousedown={(event) => beginDrag(event, node.id)}>
+							<i class="fa-solid fa-file-code me-2"></i>{node.name}
+						</button>
+						<div class="workflow-node-meta">{node.scriptPath}</div>
+						<label class="workflow-node-label" for={`node-trigger-${node.id}`}>Trigger</label>
+						<select id={`node-trigger-${node.id}`} value={node.trigger} on:change={(event) => updateNodeTrigger(node.id, event.currentTarget.value)}>
+							<option value="manual">manual</option>
+							<option value="schedule">schedule</option>
+							<option value="event">event</option>
+							<option value="watch">watch</option>
+						</select>
+						<div class="workflow-node-actions">
+							<button class="btn-secondary" on:click={() => startConnect(node.id)}>
+								{selectedSource === node.id ? 'Connecting...' : 'Connect from'}
+							</button>
+							<button class="btn-secondary" on:click={() => connectTo(node.id)}>Connect to</button>
+							<button class="btn-secondary" on:click={() => removeNode(node.id)}>Delete</button>
+						</div>
+					</div>
+				{/each}
+			</div>
+		</div>
+		<aside class="workflow-sidebar">
+			<h3>Links</h3>
+			{#if links.length === 0}
+				<div class="workflow-empty">No links yet</div>
+			{:else}
+				{#each links as link}
+					<div class="workflow-link-item">
+						<div>{(nodes.find((n) => n.id === link.from)?.name || link.from)} → {(nodes.find((n) => n.id === link.to)?.name || link.to)}</div>
+						<select value={link.trigger} on:change={(event) => updateLinkTrigger(link.id, event.currentTarget.value)}>
+							<option value="on-success">on-success</option>
+							<option value="on-failure">on-failure</option>
+							<option value="always">always</option>
+						</select>
+						<button class="btn-secondary" on:click={() => removeLink(link.id)}>Remove</button>
+					</div>
+				{/each}
+			{/if}
+		</aside>
+	</div>
+</Modal>
 
 <style>
 	.workflow-overlay {
