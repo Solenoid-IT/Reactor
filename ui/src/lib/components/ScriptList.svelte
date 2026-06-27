@@ -6,6 +6,8 @@
 	export let onToggleMutex = () => {};
 	export let onRun = () => {};
 	export let onOpen = () => {};
+	export let onQuickOpen = () => {};
+	export let onQuickOpenHover = () => {};
 	export let onRename = () => {};
 	export let onDelete = () => {};
 	export let onOpenLog = () => {};
@@ -61,6 +63,14 @@
 				</div>
 				<div class="item-actions">
 					<button class="item-action-btn" on:click|stopPropagation={() => onOpen(index)}><i class="fa-solid fa-code"></i><span class="item-action-label">Open</span></button>
+					<button
+						class="item-action-btn"
+						on:mouseenter|stopPropagation={() => onQuickOpenHover(index)}
+						on:focus|stopPropagation={() => onQuickOpenHover(index)}
+						on:click|stopPropagation={() => onQuickOpen(index)}
+					>
+						<i class="fa-solid fa-laptop-code"></i><span class="item-action-label">Quick Open</span>
+					</button>
 					<button class="item-action-btn" on:click|stopPropagation={() => onRename(index)}><i class="fa-solid fa-pen"></i><span class="item-action-label">Rename</span></button>
 					<button class="item-action-btn delete" on:click|stopPropagation={() => onDelete(index)}><i class="fa-solid fa-trash"></i><span class="item-action-label">Delete</span></button>
 					<button class="item-action-btn test" on:click|stopPropagation={() => onRun(index)}><i class="fa-solid fa-play"></i><span class="item-action-label">Test</span></button>

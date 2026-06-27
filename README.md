@@ -117,6 +117,10 @@ npm run daemon:list
 npm run daemon:status
 npm run daemon:run -- "script-name"
 npm run daemon:stop
+node daemonctl.js test "script-name"
+node daemonctl.js delete "script-name"
+node daemonctl.js set-name "my-reactor"
+node daemonctl.js set-port 7071
 ```
 
 Examples:

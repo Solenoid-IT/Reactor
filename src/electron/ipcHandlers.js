@@ -156,6 +156,53 @@ function setupIpcHandlers(runtime) {
 		return openWithConfiguredProgramOrDefault(normalizedFilePath);
 	});
 
+	ipcMain.handle('read-script-content', async (_, filePath) => {
+		if (!runtime || !filePath) {
+			return { ok: false, error: 'invalid request' };
+		}
+
+		const allowedPath = path.resolve(runtime.scriptsDir);
+		const normalizedFilePath = path.resolve(filePath);
+		if (!normalizedFilePath.startsWith(allowedPath + path.sep)) {
+			return { ok: false, error: 'path not allowed' };
+		}
+
+		if (!/\.(ts|js)$/i.test(normalizedFilePath)) {
+			return { ok: false, error: 'unsupported file type' };
+		}
+
+		try {
+			const content = await fs.readFile(normalizedFilePath, 'utf8');
+			return { ok: true, path: normalizedFilePath, content };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('save-script-content', async (_, filePath, content) => {
+		if (!runtime || !filePath || typeof content !== 'string') {
+			return { ok: false, error: 'invalid request' };
+		}
+
+		const allowedPath = path.resolve(runtime.scriptsDir);
+		const normalizedFilePath = path.resolve(filePath);
+		if (!normalizedFilePath.startsWith(allowedPath + path.sep)) {
+			return { ok: false, error: 'path not allowed' };
+		}
+
+		if (!/\.(ts|js)$/i.test(normalizedFilePath)) {
+			return { ok: false, error: 'unsupported file type' };
+		}
+
+		try {
+			await fs.writeFile(normalizedFilePath, content, 'utf8');
+			await runtime.reloadScripts('ui-save-script-content');
+			return { ok: true, path: normalizedFilePath };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
 	ipcMain.handle('run-script-now', async (_, filePath) => {
 		if (!runtime || !filePath) {
 			return { ok: false, error: 'invalid request' };
@@ -595,6 +642,58 @@ function setupIpcHandlers(runtime) {
 		try {
 			await fs.writeFile(logPath, '', 'utf8');
 			return { ok: true };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('get-workflow', async () => {
+		if (!runtime) {
+			return { ok: false, error: 'runtime not ready', workflow: { version: 1, nodes: [], links: [] } };
+		}
+
+		const workflowPath = path.join(runtime.reactorRootDir || path.dirname(runtime.scriptsDir), 'workflow.json');
+		try {
+			const raw = await fs.readFile(workflowPath, 'utf8');
+			const parsed = JSON.parse(raw);
+			const workflow = {
+				version: Number(parsed?.version || 1),
+				nodes: Array.isArray(parsed?.nodes) ? parsed.nodes : [],
+				links: Array.isArray(parsed?.links) ? parsed.links : [],
+				updatedAt: parsed?.updatedAt || null,
+			};
+			return { ok: true, workflow, path: workflowPath };
+		} catch (error) {
+			if (error.code === 'ENOENT') {
+				const workflow = {
+					version: 1,
+					nodes: [],
+					links: [],
+					updatedAt: new Date().toISOString(),
+				};
+				return { ok: true, workflow, path: workflowPath };
+			}
+			return { ok: false, error: error.message, workflow: { version: 1, nodes: [], links: [] } };
+		}
+	});
+
+	ipcMain.handle('save-workflow', async (_, workflow) => {
+		if (!runtime) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		const workflowPath = path.join(runtime.reactorRootDir || path.dirname(runtime.scriptsDir), 'workflow.json');
+		const safeWorkflow = {
+			version: Number(workflow?.version || 1),
+			nodes: Array.isArray(workflow?.nodes) ? workflow.nodes : [],
+			links: Array.isArray(workflow?.links) ? workflow.links : [],
+			updatedAt: new Date().toISOString(),
+		};
+
+		try {
+			await fs.mkdir(path.dirname(workflowPath), { recursive: true });
+			await fs.writeFile(workflowPath, `${JSON.stringify(safeWorkflow, null, 2)}\n`, 'utf8');
+			return { ok: true, workflow: safeWorkflow, path: workflowPath };
 		} catch (error) {
 			return { ok: false, error: error.message };
 		}

@@ -36,6 +36,22 @@ export async function openScriptFile(filePath) {
 	return bridge.openScriptFile(filePath);
 }
 
+export async function readScriptContent(filePath) {
+	const bridge = getBridge();
+	if (!bridge || !bridge.readScriptContent) {
+		return { ok: false, error: 'bridge unavailable' };
+	}
+	return bridge.readScriptContent(filePath);
+}
+
+export async function saveScriptContent(filePath, content) {
+	const bridge = getBridge();
+	if (!bridge || !bridge.saveScriptContent) {
+		return { ok: false, error: 'bridge unavailable' };
+	}
+	return bridge.saveScriptContent(filePath, content);
+}
+
 export async function pickDefaultProgram() {
 	const bridge = getBridge();
 	if (!bridge || !bridge.pickDefaultProgram) {
@@ -146,4 +162,20 @@ export async function openServerStatus() {
 		return { ok: false, error: 'bridge unavailable' };
 	}
 	return bridge.openServerStatus();
+}
+
+export async function getWorkflow() {
+	const bridge = getBridge();
+	if (!bridge || !bridge.getWorkflow) {
+		return { ok: false, error: 'bridge unavailable', workflow: { version: 1, nodes: [], links: [] } };
+	}
+	return bridge.getWorkflow();
+}
+
+export async function saveWorkflow(workflow) {
+	const bridge = getBridge();
+	if (!bridge || !bridge.saveWorkflow) {
+		return { ok: false, error: 'bridge unavailable' };
+	}
+	return bridge.saveWorkflow(workflow);
 }

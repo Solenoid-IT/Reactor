@@ -7,6 +7,7 @@
 	export let onSaveReactorName = () => {};
 	export let onSaveHttpServerData = () => {};
 	export let onOpenServerStatus = () => {};
+	export let onOpenWorkflow = () => {};
 	export let status = 'Ready';
 </script>
 
@@ -14,6 +15,7 @@
 	<section class="detail-card">
 		<h3><i class="fa-solid fa-folder-tree me-2"></i>Scripts Path</h3>
 		<div class="detail-value">{scriptsPath || '-'}</div>
+		<button class="btn-secondary mt-2" on:click={onOpenWorkflow}><i class="fa-solid fa-diagram-project me-2"></i>Open Workflow</button>
 	</section>
 	<section class="detail-card">
 		<h3><i class="fa-solid fa-desktop me-2"></i>Default Program</h3>
@@ -25,7 +27,7 @@
 		<button class="btn-primary" on:click={() => onSaveReactorName(reactorName)}><i class="fa-solid fa-floppy-disk me-2"></i>Save Name</button>
 	</section>
 	<section class="detail-card http-server-card">
-		<h3><i class="fa-solid fa-network-wired me-2"></i>HTTP Server</h3>
+		<h3><i class="fa-solid fa-network-wired me-2"></i>Server</h3>
         <button class="btn-secondary mt-2" on:click={onOpenServerStatus}><i class="fa-solid fa-heart-pulse me-2"></i>View Status</button>
 		<div class="http-port-group mt-2">
 			<label class="detail-label" for="httpServerPortInput">Port</label>

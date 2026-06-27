@@ -187,6 +187,13 @@
 		background: rgba(255, 255, 255, 0.06);
 		border-color: #4a5668;
 	}
+	:global(.template-menu-item i) {
+		width: 14px;
+		text-align: center;
+		font-size: 13px;
+		color: #c8d4e6;
+		flex-shrink: 0;
+	}
 
 	:global(.log-menu) {
 		position: absolute;

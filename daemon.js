@@ -59,6 +59,41 @@ function findScriptByName(runtime, requestedName) {
 	return null;
 }
 
+async function deleteScriptFromRuntime(runtime, script) {
+	const allowedPath = path.resolve(runtime.scriptsDir);
+	const normalizedFilePath = path.resolve(script.path);
+	if (!normalizedFilePath.startsWith(allowedPath + path.sep)) {
+		throw new Error('path not allowed');
+	}
+
+	const scriptDir = path.dirname(normalizedFilePath);
+	const isBootProjectScript = path.basename(normalizedFilePath).toLowerCase() === 'boot.ts' && scriptDir !== allowedPath;
+
+	let isProjectFolder = false;
+	if (isBootProjectScript && path.resolve(scriptDir).startsWith(allowedPath + path.sep)) {
+		try {
+			await fs.access(path.join(scriptDir, 'package.json'));
+			isProjectFolder = true;
+		} catch {
+			isProjectFolder = false;
+		}
+	}
+
+	if (isProjectFolder) {
+		const packageJsonPath = path.join(scriptDir, 'package.json');
+		try {
+			await fs.access(packageJsonPath);
+			await fs.rm(scriptDir, { recursive: true, force: true });
+		} catch {
+			await fs.unlink(normalizedFilePath);
+		}
+	} else {
+		await fs.unlink(normalizedFilePath);
+	}
+
+	await runtime.reloadScripts('daemonctl-delete-script');
+}
+
 async function createControlServer(runtime, socketPath, onStopRequested) {
 	if (process.platform !== 'win32') {
 		try {
@@ -77,9 +112,9 @@ async function createControlServer(runtime, socketPath, onStopRequested) {
 			buffer += chunk.toString('utf8');
 		});
 
-			socket.on('end', async () => {
+		socket.on('end', async () => {
 			let response;
-				let shouldStop = false;
+			let shouldStop = false;
 			try {
 				const payload = JSON.parse(buffer || '{}');
 				const command = String(payload.command || '').toLowerCase();
@@ -120,7 +155,39 @@ async function createControlServer(runtime, socketPath, onStopRequested) {
 							path: script.path,
 						};
 					}
-					} else if (command === 'stop') {
+				} else if (command === 'set-name') {
+					const nextName = String(payload.name || '').trim();
+					if (!nextName) {
+						response = { ok: false, error: 'name is required' };
+					} else {
+						const savedName = await runtime.setReactorName(nextName);
+						response = { ok: true, name: savedName };
+					}
+				} else if (command === 'set-port') {
+					const numericPort = Number(payload.port);
+					if (!Number.isFinite(numericPort) || numericPort < 1 || numericPort > 65535) {
+						response = { ok: false, error: 'invalid port' };
+					} else {
+						const config = await runtime.setHttpServerPort(numericPort);
+						response = { ok: true, port: config.port };
+					}
+				} else if (command === 'delete') {
+					await runtime.reloadScripts('daemonctl-delete-script-preload');
+					const script = findScriptByName(runtime, payload.name);
+					if (!script) {
+						response = {
+							ok: false,
+							error: `script not found: ${payload.name || ''}`,
+						};
+					} else {
+						await deleteScriptFromRuntime(runtime, script);
+						response = {
+							ok: true,
+							script: script.name,
+							path: script.path,
+						};
+					}
+				} else if (command === 'stop') {
 						response = { ok: true, message: 'shutdown requested' };
 						shouldStop = true;
 					} else {

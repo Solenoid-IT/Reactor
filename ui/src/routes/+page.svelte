@@ -3,11 +3,14 @@
 	import HeaderActions from '$lib/components/HeaderActions.svelte';
 	import ScriptList from '$lib/components/ScriptList.svelte';
 	import DetailPane from '$lib/components/DetailPane.svelte';
+	import WorkflowEditor from '$lib/components/WorkflowEditor.svelte';
 	import {
 		getScriptsInfo,
 		getUiSettings,
 		openScriptsFolder,
 		openScriptFile,
+		readScriptContent,
+		saveScriptContent,
 		pickDefaultProgram,
 		runScriptNow,
 		createScriptFile,
@@ -22,6 +25,8 @@
 		openServerStatus,
 		getReactorName,
 		setReactorName,
+		getWorkflow,
+		saveWorkflow,
 	} from '$lib/reactorApi';
 
 	let scripts = [];
@@ -36,6 +41,34 @@
 	let renameOriginalName = '';
 	let renameValue = '';
 	let renameInput;
+	let workflowOpen = false;
+	let workflowData = { version: 1, nodes: [], links: [] };
+	let editorOpen = false;
+	let editorScriptPath = '';
+	let editorScriptName = '';
+	let editorContent = '';
+	let MonacoScriptEditorComponent = null;
+
+	async function ensureMonacoEditorComponent(silent = false) {
+		if (MonacoScriptEditorComponent) {
+			return true;
+		}
+
+		try {
+			const module = await import('$lib/components/MonacoScriptEditor.svelte');
+			MonacoScriptEditorComponent = module.default;
+			return true;
+		} catch {
+			if (!silent) {
+				status = 'Error: unable to load editor';
+			}
+			return false;
+		}
+	}
+
+	async function preloadMonacoEditor() {
+		await ensureMonacoEditorComponent(true);
+	}
 
 	$: selectedScript = selectedIndex >= 0 ? scripts[selectedIndex] : null;
 
@@ -70,6 +103,47 @@
 		}
 		const result = await openScriptFile(script.path);
 		status = result?.ok ? `Script opened: ${script.name}` : `Error: ${result?.error || 'unknown'}`;
+	}
+
+	async function editScript(index) {
+		const script = scripts[index];
+		if (!script) {
+			return;
+		}
+
+		status = `Loading editor: ${script.name}`;
+		const ready = await ensureMonacoEditorComponent();
+		if (!ready) {
+			return;
+		}
+
+		const result = await readScriptContent(script.path);
+		if (!result?.ok) {
+			status = `Error: ${result?.error || 'unable to load script'}`;
+			return;
+		}
+
+		editorScriptPath = script.path;
+		editorScriptName = script.name;
+		editorContent = result.content || '';
+		editorOpen = true;
+		status = `Editing: ${script.name}`;
+	}
+
+	function closeMonacoEditor() {
+		editorOpen = false;
+	}
+
+	async function saveMonacoEditor(nextContent) {
+		const result = await saveScriptContent(editorScriptPath, nextContent);
+		if (!result?.ok) {
+			status = `Error: ${result?.error || 'unable to save script'}`;
+			return;
+		}
+
+		editorContent = nextContent;
+		status = `Saved: ${editorScriptName}`;
+		await refreshAll();
 	}
 
 	async function renameScript(index) {
@@ -208,6 +282,31 @@
 		const result = await clearEventLog();
 		status = result?.ok ? 'Cleared project activity.log' : `Error: ${result?.error || 'unknown'}`;
 	}
+
+	async function openWorkflowEditor() {
+		const result = await getWorkflow();
+		if (result?.ok) {
+			workflowData = result.workflow || { version: 1, nodes: [], links: [] };
+			workflowOpen = true;
+			status = 'Workflow loaded';
+			return;
+		}
+		status = `Error: ${result?.error || 'unable to load workflow'}`;
+	}
+
+	function closeWorkflowEditor() {
+		workflowOpen = false;
+	}
+
+	async function saveWorkflowGraph(nextWorkflow) {
+		const result = await saveWorkflow(nextWorkflow);
+		if (result?.ok) {
+			workflowData = result.workflow || nextWorkflow;
+			status = 'workflow.json saved';
+			return;
+		}
+		status = `Error: ${result?.error || 'unable to save workflow'}`;
+	}
 </script>
 
 <svelte:head>
@@ -218,6 +317,7 @@
 	<HeaderActions
 		onRefresh={refreshAll}
 		onOpenFolder={openScriptsFolder}
+		onOpenWorkflow={openWorkflowEditor}
 		onPickProgram={pickProgram}
 		onOpenGlobalLog={openGlobalLog}
 		onClearGlobalLog={clearGlobalLog}
@@ -234,6 +334,8 @@
 				selectedIndex={selectedIndex}
 				onSelect={(index) => (selectedIndex = index)}
 				onOpen={openScript}
+				onQuickOpen={editScript}
+				onQuickOpenHover={preloadMonacoEditor}
 				onRename={renameScript}
 				onDelete={deleteScript}
 				onToggleState={(index) => toggleDirective(index, 'state')}
@@ -250,11 +352,32 @@
 			{reactorName}
 			{httpPort}
 			onSaveReactorName={saveReactorNameValue}
-			onSaveHttpPort={saveHttpPortValue}
+			onSaveHttpServerData={saveHttpPortValue}
 			onOpenServerStatus={openServerStatusPage}
+			onOpenWorkflow={openWorkflowEditor}
 			{status}
 		/>
 	</main>
+
+	<WorkflowEditor
+		open={workflowOpen}
+		scripts={scripts}
+		workflow={workflowData}
+		onClose={closeWorkflowEditor}
+		onSave={saveWorkflowGraph}
+	/>
+
+	{#if editorOpen && MonacoScriptEditorComponent}
+		<svelte:component
+			this={MonacoScriptEditorComponent}
+			open={editorOpen}
+			filePath={editorScriptPath}
+			fileName={editorScriptName}
+			initialContent={editorContent}
+			onClose={closeMonacoEditor}
+			onSave={saveMonacoEditor}
+		/>
+	{/if}
 
 	{#if renameOpen}
 		<div

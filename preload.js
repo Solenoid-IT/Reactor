@@ -3,6 +3,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('reactor', {
 	openScriptsFolder: () => ipcRenderer.invoke('open-scripts-folder'),
 	openScriptFile: (filePath) => ipcRenderer.invoke('open-script-file', filePath),
+	readScriptContent: (filePath) => ipcRenderer.invoke('read-script-content', filePath),
+	saveScriptContent: (filePath, content) => ipcRenderer.invoke('save-script-content', filePath, content),
 	runScriptNow: (filePath) => ipcRenderer.invoke('run-script-now', filePath),
 	createScriptFile: (templateKey) => ipcRenderer.invoke('create-script-file', templateKey),
 	deleteScriptFile: (filePath) => ipcRenderer.invoke('delete-script-file', filePath),
@@ -20,4 +22,6 @@ contextBridge.exposeInMainWorld('reactor', {
 	openServerStatus: () => ipcRenderer.invoke('open-server-status'),
 	getReactorName: () => ipcRenderer.invoke('get-reactor-name'),
 	setReactorName: (name) => ipcRenderer.invoke('set-reactor-name', name),
+	getWorkflow: () => ipcRenderer.invoke('get-workflow'),
+	saveWorkflow: (workflow) => ipcRenderer.invoke('save-workflow', workflow),
 });

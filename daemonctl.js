@@ -23,6 +23,10 @@ function usage() {
 	console.log('  node daemonctl.js list');
 	console.log('  node daemonctl.js status');
 	console.log('  node daemonctl.js run <script-name>');
+	console.log('  node daemonctl.js test <script-name>');
+	console.log('  node daemonctl.js delete <script-name>');
+	console.log('  node daemonctl.js set-name <reactor-name>');
+	console.log('  node daemonctl.js set-port <1-65535>');
 	console.log('  node daemonctl.js stop');
 	process.exit(1);
 }
@@ -88,7 +92,7 @@ async function main() {
 		return;
 	}
 
-	if (command === 'run') {
+	if (command === 'run' || command === 'test') {
 		const name = rest.join(' ').trim();
 		if (!name) {
 			usage();
@@ -101,6 +105,55 @@ async function main() {
 		}
 
 		console.log(`Executed: ${response.script} (${response.path})`);
+		return;
+	}
+
+	if (command === 'delete') {
+		const name = rest.join(' ').trim();
+		if (!name) {
+			usage();
+		}
+
+		const response = await sendCommand({ command: 'delete', name });
+		if (!response.ok) {
+			console.error(`[daemonctl] ${response.error || 'delete failed'}`);
+			process.exit(1);
+		}
+
+		console.log(`Deleted: ${response.script} (${response.path})`);
+		return;
+	}
+
+	if (command === 'set-name') {
+		const name = rest.join(' ').trim();
+		if (!name) {
+			usage();
+		}
+
+		const response = await sendCommand({ command: 'set-name', name });
+		if (!response.ok) {
+			console.error(`[daemonctl] ${response.error || 'set-name failed'}`);
+			process.exit(1);
+		}
+
+		console.log(`Reactor name set: ${response.name}`);
+		return;
+	}
+
+	if (command === 'set-port') {
+		const rawPort = String(rest[0] || '').trim();
+		const port = Number(rawPort);
+		if (!rawPort || !Number.isFinite(port) || port < 1 || port > 65535) {
+			usage();
+		}
+
+		const response = await sendCommand({ command: 'set-port', port });
+		if (!response.ok) {
+			console.error(`[daemonctl] ${response.error || 'set-port failed'}`);
+			process.exit(1);
+		}
+
+		console.log(`HTTP port set: ${response.port}`);
 		return;
 	}
 
