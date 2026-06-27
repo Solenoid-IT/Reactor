@@ -44,19 +44,20 @@
 	let workflowOpen = false;
 	let workflowData = { version: 1, nodes: [], links: [] };
 	let editorOpen = false;
-	let editorScriptPath = '';
-	let editorScriptName = '';
+	let editorFilePath = '';
+	let editorFileName = '';
+	let editorLanguage = 'typescript';
 	let editorContent = '';
-	let MonacoScriptEditorComponent = null;
+	let CodeEditorComponent = null;
 
-	async function ensureMonacoEditorComponent(silent = false) {
-		if (MonacoScriptEditorComponent) {
+	async function ensureCodeEditorComponent(silent = false) {
+		if (CodeEditorComponent) {
 			return true;
 		}
 
 		try {
-			const module = await import('$lib/components/MonacoScriptEditor.svelte');
-			MonacoScriptEditorComponent = module.default;
+			const module = await import('$lib/components/CodeEditor.svelte');
+			CodeEditorComponent = module.default;
 			return true;
 		} catch {
 			if (!silent) {
@@ -66,8 +67,8 @@
 		}
 	}
 
-	async function preloadMonacoEditor() {
-		await ensureMonacoEditorComponent(true);
+	async function preloadCodeEditor() {
+		await ensureCodeEditorComponent(true);
 	}
 
 	$: selectedScript = selectedIndex >= 0 ? scripts[selectedIndex] : null;
@@ -112,7 +113,7 @@
 		}
 
 		status = `Loading editor: ${script.name}`;
-		const ready = await ensureMonacoEditorComponent();
+		const ready = await ensureCodeEditorComponent();
 		if (!ready) {
 			return;
 		}
@@ -123,26 +124,27 @@
 			return;
 		}
 
-		editorScriptPath = script.path;
-		editorScriptName = script.name;
+		editorFilePath = script.path;
+		editorFileName = script.name;
+		editorLanguage = 'typescript';
 		editorContent = result.content || '';
 		editorOpen = true;
 		status = `Editing: ${script.name}`;
 	}
 
-	function closeMonacoEditor() {
+	function closeCodeEditor() {
 		editorOpen = false;
 	}
 
-	async function saveMonacoEditor(nextContent) {
-		const result = await saveScriptContent(editorScriptPath, nextContent);
+	async function saveCodeEditor(nextContent) {
+		const result = await saveScriptContent(editorFilePath, nextContent);
 		if (!result?.ok) {
 			status = `Error: ${result?.error || 'unable to save script'}`;
 			return;
 		}
 
 		editorContent = nextContent;
-		status = `Saved: ${editorScriptName}`;
+		status = `Saved: ${editorFileName}`;
 		await refreshAll();
 	}
 
@@ -256,8 +258,31 @@
 		if (!script) {
 			return;
 		}
-		const result = await openEventLog(script.path);
-		status = result?.ok ? `Opened activity.log for ${script.name}` : `Error: ${result?.error || 'unknown'}`;
+
+		status = `Loading log: ${script.name}`;
+		const ready = await ensureCodeEditorComponent();
+		if (!ready) {
+			return;
+		}
+
+		const logPathResult = await openEventLog(script.path);
+		if (!logPathResult?.ok || !logPathResult?.path) {
+			status = `Error: ${logPathResult?.error || 'activity.log path unavailable'}`;
+			return;
+		}
+
+		const result = await readScriptContent(logPathResult.path);
+		if (!result?.ok) {
+			status = `Error: ${result?.error || 'unable to load activity.log'}`;
+			return;
+		}
+
+		editorFilePath = logPathResult.path;
+		editorFileName = `${script.name} / activity.log`;
+		editorLanguage = 'log';
+		editorContent = result.content || '';
+		editorOpen = true;
+		status = `Editing log: ${script.name}`;
 	}
 
 	async function clearLog(index) {
@@ -274,8 +299,30 @@
 	});
 
 	async function openGlobalLog() {
-		const result = await openEventLog();
-		status = result?.ok ? 'Opened project activity.log' : `Error: ${result?.error || 'unknown'}`;
+		status = 'Loading project activity.log';
+		const ready = await ensureCodeEditorComponent();
+		if (!ready) {
+			return;
+		}
+
+		const logPathResult = await openEventLog();
+		if (!logPathResult?.ok || !logPathResult?.path) {
+			status = `Error: ${logPathResult?.error || 'activity.log path unavailable'}`;
+			return;
+		}
+
+		const result = await readScriptContent(logPathResult.path);
+		if (!result?.ok) {
+			status = `Error: ${result?.error || 'unable to load activity.log'}`;
+			return;
+		}
+
+		editorFilePath = logPathResult.path;
+		editorFileName = 'project activity.log';
+		editorLanguage = 'log';
+		editorContent = result.content || '';
+		editorOpen = true;
+		status = 'Editing project activity.log';
 	}
 
 	async function clearGlobalLog() {
@@ -335,7 +382,7 @@
 				onSelect={(index) => (selectedIndex = index)}
 				onOpen={openScript}
 				onQuickOpen={editScript}
-				onQuickOpenHover={preloadMonacoEditor}
+				onQuickOpenHover={preloadCodeEditor}
 				onRename={renameScript}
 				onDelete={deleteScript}
 				onToggleState={(index) => toggleDirective(index, 'state')}
@@ -367,15 +414,16 @@
 		onSave={saveWorkflowGraph}
 	/>
 
-	{#if editorOpen && MonacoScriptEditorComponent}
+	{#if editorOpen && CodeEditorComponent}
 		<svelte:component
-			this={MonacoScriptEditorComponent}
+			this={CodeEditorComponent}
 			open={editorOpen}
-			filePath={editorScriptPath}
-			fileName={editorScriptName}
+			filePath={editorFilePath}
+			fileName={editorFileName}
+			language={editorLanguage}
 			initialContent={editorContent}
-			onClose={closeMonacoEditor}
-			onSave={saveMonacoEditor}
+			onClose={closeCodeEditor}
+			onSave={saveCodeEditor}
 		/>
 	{/if}
 

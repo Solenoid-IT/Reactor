@@ -34,6 +34,26 @@ async function openWithConfiguredProgramOrDefault(targetPath) {
 }
 
 function setupIpcHandlers(runtime) {
+	const scriptsRoot = runtime ? path.resolve(runtime.scriptsDir) : '';
+	const projectRoot = runtime ? path.resolve(runtime.reactorRootDir || path.dirname(runtime.scriptsDir)) : '';
+
+	function isPathInsideRoot(targetPath, rootPath) {
+		if (!targetPath || !rootPath) {
+			return false;
+		}
+		const normalizedTarget = path.resolve(targetPath);
+		const normalizedRoot = path.resolve(rootPath);
+		return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(normalizedRoot + path.sep);
+	}
+
+	function isAllowedEditorPath(targetPath) {
+		return isPathInsideRoot(targetPath, scriptsRoot) || isPathInsideRoot(targetPath, projectRoot);
+	}
+
+	function isEditableExtension(targetPath) {
+		return /\.(ts|js|log)$/i.test(targetPath || '');
+	}
+
 	readUiSettings()
 		.then(async (settings) => {
 			if (runtime && runtime.setHttpServerPort && Number(settings.httpServerPort)) {
@@ -161,13 +181,12 @@ function setupIpcHandlers(runtime) {
 			return { ok: false, error: 'invalid request' };
 		}
 
-		const allowedPath = path.resolve(runtime.scriptsDir);
 		const normalizedFilePath = path.resolve(filePath);
-		if (!normalizedFilePath.startsWith(allowedPath + path.sep)) {
+		if (!isAllowedEditorPath(normalizedFilePath)) {
 			return { ok: false, error: 'path not allowed' };
 		}
 
-		if (!/\.(ts|js)$/i.test(normalizedFilePath)) {
+		if (!isEditableExtension(normalizedFilePath)) {
 			return { ok: false, error: 'unsupported file type' };
 		}
 
@@ -184,20 +203,48 @@ function setupIpcHandlers(runtime) {
 			return { ok: false, error: 'invalid request' };
 		}
 
-		const allowedPath = path.resolve(runtime.scriptsDir);
 		const normalizedFilePath = path.resolve(filePath);
-		if (!normalizedFilePath.startsWith(allowedPath + path.sep)) {
+		if (!isAllowedEditorPath(normalizedFilePath)) {
 			return { ok: false, error: 'path not allowed' };
 		}
 
-		if (!/\.(ts|js)$/i.test(normalizedFilePath)) {
+		if (!isEditableExtension(normalizedFilePath)) {
 			return { ok: false, error: 'unsupported file type' };
 		}
 
 		try {
 			await fs.writeFile(normalizedFilePath, content, 'utf8');
-			await runtime.reloadScripts('ui-save-script-content');
+			if (/\.(ts|js)$/i.test(normalizedFilePath)) {
+				await runtime.reloadScripts('ui-save-script-content');
+			}
 			return { ok: true, path: normalizedFilePath };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('resolve-event-log-path', async (_, filePath) => {
+		if (!runtime) {
+			return { ok: false, error: 'activity.log path unavailable' };
+		}
+
+		const logPath = runtime.resolveScriptEventLogPath(filePath);
+		if (!logPath) {
+			return { ok: false, error: 'activity.log path unavailable' };
+		}
+
+		if (!isAllowedEditorPath(logPath)) {
+			return { ok: false, error: 'path not allowed' };
+		}
+
+		if (!/\.log$/i.test(logPath)) {
+			return { ok: false, error: 'unsupported file type' };
+		}
+
+		try {
+			await fs.mkdir(path.dirname(logPath), { recursive: true });
+			await fs.writeFile(logPath, '', { encoding: 'utf8', flag: 'a' });
+			return { ok: true, path: logPath, name: path.basename(logPath) };
 		} catch (error) {
 			return { ok: false, error: error.message };
 		}
@@ -622,11 +669,10 @@ function setupIpcHandlers(runtime) {
 		try {
 			await fs.mkdir(path.dirname(logPath), { recursive: true });
 			await fs.writeFile(logPath, '', { encoding: 'utf8', flag: 'a' });
+			return { ok: true, path: logPath, name: path.basename(logPath) };
 		} catch (error) {
 			return { ok: false, error: error.message };
 		}
-
-		return openWithConfiguredProgramOrDefault(logPath);
 	});
 
 	ipcMain.handle('clear-event-log', async (_, filePath) => {

@@ -7,6 +7,7 @@ declare global {
 			openScriptFile?: (filePath: string) => Promise<any>;
 			readScriptContent?: (filePath: string) => Promise<any>;
 			saveScriptContent?: (filePath: string, content: string) => Promise<any>;
+			resolveEventLogPath?: (filePath?: string) => Promise<any>;
 			pickDefaultProgram?: () => Promise<any>;
 			runScriptNow?: (filePath: string) => Promise<any>;
 			createScriptFile?: (templateKey: string) => Promise<any>;

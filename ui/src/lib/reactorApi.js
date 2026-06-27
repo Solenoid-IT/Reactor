@@ -52,6 +52,14 @@ export async function saveScriptContent(filePath, content) {
 	return bridge.saveScriptContent(filePath, content);
 }
 
+export async function resolveEventLogPath(filePath) {
+	const bridge = getBridge();
+	if (!bridge || !bridge.resolveEventLogPath) {
+		return { ok: false, error: 'bridge unavailable' };
+	}
+	return bridge.resolveEventLogPath(filePath);
+}
+
 export async function pickDefaultProgram() {
 	const bridge = getBridge();
 	if (!bridge || !bridge.pickDefaultProgram) {

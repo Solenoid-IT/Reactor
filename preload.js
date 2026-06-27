@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('reactor', {
 	openScriptFile: (filePath) => ipcRenderer.invoke('open-script-file', filePath),
 	readScriptContent: (filePath) => ipcRenderer.invoke('read-script-content', filePath),
 	saveScriptContent: (filePath, content) => ipcRenderer.invoke('save-script-content', filePath, content),
+	resolveEventLogPath: (filePath) => ipcRenderer.invoke('resolve-event-log-path', filePath),
 	runScriptNow: (filePath) => ipcRenderer.invoke('run-script-now', filePath),
 	createScriptFile: (templateKey) => ipcRenderer.invoke('create-script-file', templateKey),
 	deleteScriptFile: (filePath) => ipcRenderer.invoke('delete-script-file', filePath),
