@@ -10,7 +10,7 @@ return {
 	assets: new Set(["logo.jpg"]),
 	mimeTypes: {".jpg":"image/jpeg"},
 	_: {
-		client: {start:"_app/immutable/entry/start.Dlp68yMb.js",app:"_app/immutable/entry/app.C0Io6WDa.js",imports:["_app/immutable/entry/start.Dlp68yMb.js","_app/immutable/chunks/CdhSw2rE.js","_app/immutable/chunks/CJf_8U9q.js","_app/immutable/entry/app.C0Io6WDa.js","_app/immutable/chunks/CJf_8U9q.js","_app/immutable/chunks/DYl5dUZ5.js","_app/immutable/chunks/xihTtKlq.js"],stylesheets:[],fonts:[],uses_env_dynamic_public:false},
+		client: {start:"_app/immutable/entry/start.CPS4MxIo.js",app:"_app/immutable/entry/app.CxabzMcI.js",imports:["_app/immutable/entry/start.CPS4MxIo.js","_app/immutable/chunks/C4Wyoctv.js","_app/immutable/chunks/CJf_8U9q.js","_app/immutable/entry/app.CxabzMcI.js","_app/immutable/chunks/CJf_8U9q.js","_app/immutable/chunks/DYl5dUZ5.js","_app/immutable/chunks/xihTtKlq.js"],stylesheets:[],fonts:[],uses_env_dynamic_public:false},
 		nodes: [
 			__memo(() => import('./nodes/0.js')),
 			__memo(() => import('./nodes/1.js')),

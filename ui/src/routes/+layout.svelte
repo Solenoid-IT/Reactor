@@ -1,4 +1,5 @@
 <script>
+	import 'bootstrap/dist/css/bootstrap.min.css';
 	import '@fortawesome/fontawesome-free/css/all.min.css';
 </script>
 
@@ -31,12 +32,22 @@
 
 	:global(body) {
 		font-family: "Avenir Next", "SF Pro Display", "Segoe UI", sans-serif;
+		font-weight: 400;
 		background:
 			radial-gradient(1200px 480px at 85% -12%, rgba(67, 209, 143, 0.17), transparent 58%),
 			radial-gradient(900px 420px at 0% 100%, rgba(111, 144, 255, 0.12), transparent 62%),
 			linear-gradient(175deg, var(--bg-2) 0%, var(--bg) 58%);
 		color: var(--text);
 		padding: clamp(10px, 1.7vw, 22px);
+	}
+
+	/* Keep typography consistent with legacy UI even with Bootstrap loaded. */
+	:global(body),
+	:global(button),
+	:global(input),
+	:global(select),
+	:global(textarea) {
+		font-family: "Avenir Next", "SF Pro Display", "Segoe UI", sans-serif;
 	}
 
 	:global(.header) {
@@ -281,6 +292,11 @@
 		border-color: var(--accent);
 		box-shadow: 0 0 0 1px rgba(60, 170, 122, 0.26) inset, 0 14px 24px rgba(6, 15, 14, 0.35);
 	}
+	:global(.file-item.selected:hover) {
+		background: linear-gradient(145deg, #334a64 0%, #2a5a52 62%, #275149 100%);
+		border-color: #45a87a;
+		box-shadow: 0 0 0 1px rgba(88, 194, 146, 0.34) inset, 0 16px 26px rgba(6, 15, 14, 0.42);
+	}
 	:global(.file-header) { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
 	:global(.file-header-main) { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
 	:global(.file-name) { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
@@ -313,7 +329,7 @@
 		background: linear-gradient(165deg, #2c3441, #28313f);
 		color: #dce9fb;
 		font-size: 10px;
-		font-weight: 800;
+		/*font-weight: 800;*/
 		text-transform: uppercase;
 		letter-spacing: 0.45px;
 		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 2px 8px rgba(0, 0, 0, 0.2);
@@ -388,7 +404,7 @@
 		border-radius: 13px;
 		padding: 14px 15px;
 	}
-	:global(.detail-card h3) { font-size: 13px; color: var(--muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+	:global(.detail-card h3) { font-size: 13px; font-weight: 700; color: var(--muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
 	:global(.detail-value) { font-size: 13px; line-height: 1.5; word-break: break-all; }
 	:global(.detail-card input) {
 		width: 100%;

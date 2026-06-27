@@ -35,7 +35,7 @@ function set_public_env(environment) {
 }
 //#endregion
 //#region node_modules/@sveltejs/kit/src/runtime/app/env/internal.js
-var version = "1782563902001";
+var version = "1782564333481";
 var prerendering = false;
 function set_building() {}
 function set_prerendering() {
