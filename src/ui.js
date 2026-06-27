@@ -2579,6 +2579,18 @@ function buildHtmlContent() {
 			await refreshScripts();
 		}
 
+		window.toggleTemplateMenu = toggleTemplateMenu;
+		window.createNewScript = createNewScript;
+		window.refreshScripts = refreshScripts;
+		window.openScriptsFolder = openScriptsFolder;
+		window.chooseDefaultProgram = chooseDefaultProgram;
+		window.openServerStatus = openServerStatus;
+		window.toggleLogMenu = toggleLogMenu;
+		window.openEventLog = openEventLog;
+		window.clearEventLog = clearEventLog;
+		window.saveHttpServerPort = saveHttpServerPort;
+		window.saveReactorName = saveReactorName;
+
 		initialLoad();
 	</script>
 </body>
