@@ -22,7 +22,7 @@
 		<div class="detail-value">{defaultProgramPath || 'System default (not set)'}</div>
 	</section>
 	<section class="detail-card">
-		<h3><i class="fa-solid fa-tag me-2"></i>Reactor Name</h3>
+		<h3><i class="fa-solid fa-tag me-2"></i>Name</h3>
 		<input type="text" bind:value={reactorName} placeholder="sender_1" />
 		<button class="btn-primary" on:click={() => onSaveReactorName(reactorName)}><i class="fa-solid fa-floppy-disk me-2"></i>Save Name</button>
 	</section>
