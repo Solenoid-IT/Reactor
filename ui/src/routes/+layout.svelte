@@ -406,6 +406,21 @@
 	}
 	:global(.detail-card h3) { font-size: 13px; font-weight: 700; color: var(--muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
 	:global(.detail-value) { font-size: 13px; line-height: 1.5; word-break: break-all; }
+	:global(.detail-hint) {
+		margin: 0 0 10px;
+		font-size: 12px;
+		line-height: 1.4;
+		color: #a2aec2;
+	}
+	:global(.detail-label) {
+		display: inline-block;
+		margin-bottom: 6px;
+		font-size: 11px;
+		font-weight: 700;
+		letter-spacing: 0.4px;
+		text-transform: uppercase;
+		color: #a7b4c8;
+	}
 	:global(.detail-card input) {
 		width: 100%;
 		background: #12161c;
@@ -414,6 +429,28 @@
 		border-radius: 8px;
 		padding: 8px;
 		margin: 6px 0 8px;
+	}
+	:global(.http-server-card) {
+		border-color: #3a556a;
+		background: linear-gradient(170deg, #202a37, #1d2632);
+	}
+	:global(.http-port-group) {
+		padding: 10px;
+		margin-bottom: 10px;
+		border: 1px solid #3a4657;
+		border-radius: 10px;
+		background: rgba(14, 20, 28, 0.55);
+	}
+	:global(.http-port-group input) {
+		margin: 0;
+	}
+	:global(.http-server-actions) {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 8px;
+	}
+	:global(.http-server-actions button) {
+		width: 100%;
 	}
 	:global(.empty) {
 		color: var(--muted);
@@ -478,5 +515,6 @@
 		:global(.actions) { max-width: 100%; justify-content: flex-start; }
 		:global(.content) { grid-template-columns: 1fr; min-height: auto; }
 		:global(.list-pane) { border-right: 0; border-bottom: 1px solid var(--border); }
+		:global(.http-server-actions) { grid-template-columns: 1fr; }
 	}
 </style>

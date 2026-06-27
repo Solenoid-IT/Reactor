@@ -219,7 +219,6 @@
 		onRefresh={refreshAll}
 		onOpenFolder={openScriptsFolder}
 		onPickProgram={pickProgram}
-		onOpenServerStatus={openServerStatusPage}
 		onOpenGlobalLog={openGlobalLog}
 		onClearGlobalLog={clearGlobalLog}
 		onCreateBlank={() => createScript('blank')}
@@ -252,6 +251,7 @@
 			{httpPort}
 			onSaveReactorName={saveReactorNameValue}
 			onSaveHttpPort={saveHttpPortValue}
+			onOpenServerStatus={openServerStatusPage}
 			{status}
 		/>
 	</main>

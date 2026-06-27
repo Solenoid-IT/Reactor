@@ -7,7 +7,6 @@
 	export let onRefresh = () => {};
 	export let onOpenFolder = () => {};
 	export let onPickProgram = () => {};
-	export let onOpenServerStatus = () => {};
 	export let onOpenGlobalLog = () => {};
 	export let onClearGlobalLog = () => {};
 	export let onCreateBlank = () => {};
@@ -37,7 +36,7 @@
 		<img class="logo" src="/logo.jpg" alt="Reactor logo" />
 		<div class="title-copy">
 			<h1>Reactor</h1>
-			<p>Trigger your projects</p>
+			<p>Define your workflow</p>
 		</div>
 	</div>
 	<div class="actions">
@@ -53,7 +52,6 @@
 		<button type="button" class="btn-secondary icon-button" on:click={onRefresh} title="refresh scripts" aria-label="Refresh scripts"><i class="fa-solid fa-rotate-right"></i></button>
 		<button type="button" class="btn-secondary icon-button" on:click={onOpenFolder} title="open project folder" aria-label="Open project folder"><i class="fa-regular fa-folder-open"></i></button>
 		<button type="button" class="btn-secondary" on:click={onPickProgram}><i class="fa-solid fa-gear"></i><span class="ms-2">Set Default Program</span></button>
-		<button type="button" class="btn-secondary" on:click={onOpenServerStatus}><i class="fa-solid fa-heart-pulse"></i><span class="ms-2">Server Status</span></button>
 		<div class="log-picker" class:open={logOpen}>
 			<button type="button" class="btn-secondary" on:click={() => (logOpen = !logOpen)} title="log actions"><i class="fa-solid fa-list"></i><span class="ms-2">LOG</span></button>
 			<div class="log-menu" aria-hidden={!logOpen}>

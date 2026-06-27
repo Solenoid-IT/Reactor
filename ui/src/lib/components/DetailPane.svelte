@@ -5,7 +5,8 @@
 	export let reactorName = '';
 	export let httpPort = 7070;
 	export let onSaveReactorName = () => {};
-	export let onSaveHttpPort = () => {};
+	export let onSaveHttpServerData = () => {};
+	export let onOpenServerStatus = () => {};
 	export let status = 'Ready';
 </script>
 
@@ -21,12 +22,18 @@
 	<section class="detail-card">
 		<h3><i class="fa-solid fa-tag me-2"></i>Reactor Name</h3>
 		<input type="text" bind:value={reactorName} placeholder="sender_1" />
-		<button on:click={() => onSaveReactorName(reactorName)}><i class="fa-solid fa-floppy-disk me-2"></i>Save Name</button>
+		<button class="btn-primary" on:click={() => onSaveReactorName(reactorName)}><i class="fa-solid fa-floppy-disk me-2"></i>Save Name</button>
 	</section>
-	<section class="detail-card">
-		<h3><i class="fa-solid fa-network-wired me-2"></i>HTTP Server Port</h3>
-		<input type="number" min="1" max="65535" bind:value={httpPort} />
-		<button on:click={() => onSaveHttpPort(httpPort)}><i class="fa-solid fa-floppy-disk me-2"></i>Save Port</button>
+	<section class="detail-card http-server-card">
+		<h3><i class="fa-solid fa-network-wired me-2"></i>HTTP Server</h3>
+        <button class="btn-secondary mt-2" on:click={onOpenServerStatus}><i class="fa-solid fa-heart-pulse me-2"></i>View Status</button>
+		<div class="http-port-group mt-2">
+			<label class="detail-label" for="httpServerPortInput">Port</label>
+			<input id="httpServerPortInput" type="number" min="1" max="65535" bind:value={httpPort} />
+		</div>
+		<div class="http-server-actions">
+			<button class="btn-primary" on:click={() => onSaveHttpServerData(httpPort)}><i class="fa-solid fa-floppy-disk me-2"></i>Save</button>
+		</div>
 	</section>
 	<section class="detail-card">
 		<h3><i class="fa-solid fa-file-code me-2"></i>Selected Script</h3>

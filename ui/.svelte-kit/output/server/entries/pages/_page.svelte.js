@@ -8,19 +8,17 @@ function HeaderActions($$renderer, $$props) {
 		let onRefresh = fallback($$props["onRefresh"], () => {});
 		let onOpenFolder = fallback($$props["onOpenFolder"], () => {});
 		let onPickProgram = fallback($$props["onPickProgram"], () => {});
-		let onOpenServerStatus = fallback($$props["onOpenServerStatus"], () => {});
 		let onOpenGlobalLog = fallback($$props["onOpenGlobalLog"], () => {});
 		let onClearGlobalLog = fallback($$props["onClearGlobalLog"], () => {});
 		let onCreateBlank = fallback($$props["onCreateBlank"], () => {});
 		let onCreateSchedule = fallback($$props["onCreateSchedule"], () => {});
 		let onCreateEvent = fallback($$props["onCreateEvent"], () => {});
 		let onCreateWatch = fallback($$props["onCreateWatch"], () => {});
-		$$renderer.push(`<header class="header"><div class="title"><img class="logo" src="/logo.jpg" alt="Reactor logo"/> <div class="title-copy"><h1>Reactor</h1> <p>Trigger your projects</p></div></div> <div class="actions"><div${attr_class("template-picker", void 0, { "open": templateOpen })}><button type="button" class="btn-primary" title="create new script">+</button> <div class="template-menu"${attr("aria-hidden", true)}><button type="button" class="template-menu-item"><i class="fa-regular fa-file"></i><span>Blank</span></button> <button type="button" class="template-menu-item"><i class="fa-solid fa-clock-rotate-left"></i><span>Schedule</span></button> <button type="button" class="template-menu-item"><i class="fa-solid fa-bolt"></i><span>Event</span></button> <button type="button" class="template-menu-item"><i class="fa-solid fa-eye"></i><span>Watch</span></button></div></div> <button type="button" class="btn-secondary icon-button" title="refresh scripts" aria-label="Refresh scripts"><i class="fa-solid fa-rotate-right"></i></button> <button type="button" class="btn-secondary icon-button" title="open project folder" aria-label="Open project folder"><i class="fa-regular fa-folder-open"></i></button> <button type="button" class="btn-secondary"><i class="fa-solid fa-gear"></i><span class="ms-2">Set Default Program</span></button> <button type="button" class="btn-secondary"><i class="fa-solid fa-heart-pulse"></i><span class="ms-2">Server Status</span></button> <div${attr_class("log-picker", void 0, { "open": logOpen })}><button type="button" class="btn-secondary" title="log actions"><i class="fa-solid fa-list"></i><span class="ms-2">LOG</span></button> <div class="log-menu"${attr("aria-hidden", true)}><button type="button" class="log-menu-item"><i class="fa-solid fa-magnifying-glass"></i><span>View</span></button> <button type="button" class="log-menu-item danger"><i class="fa-solid fa-trash"></i><span>Clear</span></button></div></div></div></header>`);
+		$$renderer.push(`<header class="header"><div class="title"><img class="logo" src="/logo.jpg" alt="Reactor logo"/> <div class="title-copy"><h1>Reactor</h1> <p>Trigger your projects</p></div></div> <div class="actions"><div${attr_class("template-picker", void 0, { "open": templateOpen })}><button type="button" class="btn-primary" title="create new script">+</button> <div class="template-menu"${attr("aria-hidden", true)}><button type="button" class="template-menu-item"><i class="fa-regular fa-file"></i><span>Blank</span></button> <button type="button" class="template-menu-item"><i class="fa-solid fa-clock-rotate-left"></i><span>Schedule</span></button> <button type="button" class="template-menu-item"><i class="fa-solid fa-bolt"></i><span>Event</span></button> <button type="button" class="template-menu-item"><i class="fa-solid fa-eye"></i><span>Watch</span></button></div></div> <button type="button" class="btn-secondary icon-button" title="refresh scripts" aria-label="Refresh scripts"><i class="fa-solid fa-rotate-right"></i></button> <button type="button" class="btn-secondary icon-button" title="open project folder" aria-label="Open project folder"><i class="fa-regular fa-folder-open"></i></button> <button type="button" class="btn-secondary"><i class="fa-solid fa-gear"></i><span class="ms-2">Set Default Program</span></button> <div${attr_class("log-picker", void 0, { "open": logOpen })}><button type="button" class="btn-secondary" title="log actions"><i class="fa-solid fa-list"></i><span class="ms-2">LOG</span></button> <div class="log-menu"${attr("aria-hidden", true)}><button type="button" class="log-menu-item"><i class="fa-solid fa-magnifying-glass"></i><span>View</span></button> <button type="button" class="log-menu-item danger"><i class="fa-solid fa-trash"></i><span>Clear</span></button></div></div></div></header>`);
 		bind_props($$props, {
 			onRefresh,
 			onOpenFolder,
 			onPickProgram,
-			onOpenServerStatus,
 			onOpenGlobalLog,
 			onClearGlobalLog,
 			onCreateBlank,
@@ -111,9 +109,10 @@ function DetailPane($$renderer, $$props) {
 		let reactorName = fallback($$props["reactorName"], "");
 		let httpPort = fallback($$props["httpPort"], 7070);
 		let onSaveReactorName = fallback($$props["onSaveReactorName"], () => {});
-		let onSaveHttpPort = fallback($$props["onSaveHttpPort"], () => {});
+		let onSaveHttpServerData = fallback($$props["onSaveHttpServerData"], () => {});
+		let onOpenServerStatus = fallback($$props["onOpenServerStatus"], () => {});
 		let status = fallback($$props["status"], "Ready");
-		$$renderer.push(`<aside class="detail-pane"><section class="detail-card"><h3><i class="fa-solid fa-folder-tree me-2"></i>Scripts Path</h3> <div class="detail-value">${escape_html(scriptsPath || "-")}</div></section> <section class="detail-card"><h3><i class="fa-solid fa-desktop me-2"></i>Default Program</h3> <div class="detail-value">${escape_html(defaultProgramPath || "System default (not set)")}</div></section> <section class="detail-card"><h3><i class="fa-solid fa-tag me-2"></i>Reactor Name</h3> <input type="text"${attr("value", reactorName)} placeholder="sender_1"/> <button><i class="fa-solid fa-floppy-disk me-2"></i>Save Name</button></section> <section class="detail-card"><h3><i class="fa-solid fa-network-wired me-2"></i>HTTP Server Port</h3> <input type="number" min="1" max="65535"${attr("value", httpPort)}/> <button><i class="fa-solid fa-floppy-disk me-2"></i>Save Port</button></section> <section class="detail-card"><h3><i class="fa-solid fa-file-code me-2"></i>Selected Script</h3> `);
+		$$renderer.push(`<aside class="detail-pane"><section class="detail-card"><h3><i class="fa-solid fa-folder-tree me-2"></i>Scripts Path</h3> <div class="detail-value">${escape_html(scriptsPath || "-")}</div></section> <section class="detail-card"><h3><i class="fa-solid fa-desktop me-2"></i>Default Program</h3> <div class="detail-value">${escape_html(defaultProgramPath || "System default (not set)")}</div></section> <section class="detail-card"><h3><i class="fa-solid fa-tag me-2"></i>Reactor Name</h3> <input type="text"${attr("value", reactorName)} placeholder="sender_1"/> <button class="btn-primary"><i class="fa-solid fa-floppy-disk me-2"></i>Save Name</button></section> <section class="detail-card http-server-card"><h3><i class="fa-solid fa-network-wired me-2"></i>HTTP Server</h3> <button class="btn-secondary mt-2"><i class="fa-solid fa-heart-pulse me-2"></i>View Status</button> <div class="http-port-group mt-2"><label class="detail-label" for="httpServerPortInput">Port</label> <input id="httpServerPortInput" type="number" min="1" max="65535"${attr("value", httpPort)}/></div> <div class="http-server-actions"><button class="btn-primary"><i class="fa-solid fa-floppy-disk me-2"></i>Save</button></div></section> <section class="detail-card"><h3><i class="fa-solid fa-file-code me-2"></i>Selected Script</h3> `);
 		if (selectedScript) {
 			$$renderer.push("<!--[0-->");
 			$$renderer.push(`<div class="detail-value"><strong>${escape_html(selectedScript.name)}</strong></div> <div class="detail-value">${escape_html(selectedScript.path)}</div>`);
@@ -129,7 +128,8 @@ function DetailPane($$renderer, $$props) {
 			reactorName,
 			httpPort,
 			onSaveReactorName,
-			onSaveHttpPort,
+			onSaveHttpServerData,
+			onOpenServerStatus,
 			status
 		});
 	});
@@ -400,7 +400,6 @@ function _page($$renderer, $$props) {
 			onRefresh: refreshAll,
 			onOpenFolder: openScriptsFolder,
 			onPickProgram: pickProgram,
-			onOpenServerStatus: openServerStatusPage,
 			onOpenGlobalLog: openGlobalLog,
 			onClearGlobalLog: clearGlobalLog,
 			onCreateBlank: () => createScript("blank"),
@@ -431,6 +430,7 @@ function _page($$renderer, $$props) {
 			httpPort,
 			onSaveReactorName: saveReactorNameValue,
 			onSaveHttpPort: saveHttpPortValue,
+			onOpenServerStatus: openServerStatusPage,
 			status
 		});
 		$$renderer.push(`<!----></main> `);
