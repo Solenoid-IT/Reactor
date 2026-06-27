@@ -358,14 +358,33 @@ class ReactorRuntime {
 
 	async sendNodeMessage(target, content, extraHeaders = {}) {
 		const targetId = String(target || '').trim();
-		const normalizedTarget = normalizeHostPort(targetId, 7070);
-		if (!normalizedTarget) {
+		if (!targetId) {
 			throw new Error('invalid target. expected host or host:port');
 		}
 
-		const [host, portString] = normalizedTarget.split(':');
-		const port = Number(portString || 7070);
-		const endpoint = `http://${host}:${port}/message`;
+		let hasExplicitPort = false;
+		if (/^https?:\/\//i.test(targetId)) {
+			try {
+				const parsedTarget = new URL(targetId);
+				hasExplicitPort = Boolean(parsedTarget.port);
+			} catch {
+				hasExplicitPort = false;
+			}
+		} else {
+			hasExplicitPort = /^([^:]+):(\d{1,5})$/.test(targetId);
+		}
+
+		const preferredPorts = hasExplicitPort
+			? [null]
+			: Array.from(new Set([this.httpServerPort, 7070].filter((port) => Number.isInteger(port) && port > 0)));
+
+		const normalizedTargets = hasExplicitPort
+			? [normalizeHostPort(targetId, this.httpServerPort)].filter(Boolean)
+			: preferredPorts.map((port) => normalizeHostPort(targetId, port)).filter(Boolean);
+
+		if (normalizedTargets.length === 0) {
+			throw new Error('invalid target. expected host or host:port');
+		}
 
 		let payload = content;
 		let contentType = 'text/plain; charset=utf-8';
@@ -383,26 +402,48 @@ class ReactorRuntime {
 
 		const reactorName = await this.getReactorName();
 		const senderId = `${pickPrimaryLocalHost()}:${this.httpServerPort}`;
-		const request = new this.runtimeApi.HttpClient.Request({
-			url: endpoint,
-			method: 'POST',
-			headers: {
-				'content-type': contentType,
-				'Reactor-Name': reactorName || '',
-				'Reactor-Sender': senderId,
-				...extraHeaders,
-			},
-			body: payload,
-		});
+		let lastError = null;
 
-		const response = await this.runtimeApi.HttpClient.sendRequest(request);
-		return {
-			target: normalizedTarget,
-			endpoint,
-			status: response.status,
-			headers: response.headers,
-			body: response.body,
-		};
+		for (let index = 0; index < normalizedTargets.length; index += 1) {
+			const normalizedTarget = normalizedTargets[index];
+			const [host, portString] = normalizedTarget.split(':');
+			const port = Number(portString || 7070);
+			const endpoint = `http://${host}:${port}/message`;
+			const request = new this.runtimeApi.HttpClient.Request({
+				url: endpoint,
+				method: 'POST',
+				headers: {
+					'content-type': contentType,
+					'Reactor-Name': reactorName || '',
+					'Reactor-Sender': senderId,
+					...extraHeaders,
+				},
+				body: payload,
+			});
+
+			try {
+				const shouldUseShortTimeout = index < normalizedTargets.length - 1;
+				const response = await this.runtimeApi.HttpClient.sendRequest(
+					request,
+					shouldUseShortTimeout ? 2000 : undefined,
+				);
+				return {
+					target: normalizedTarget,
+					endpoint,
+					status: response.status,
+					headers: response.headers,
+					body: response.body,
+				};
+			} catch (error) {
+				lastError = error;
+			}
+		}
+
+		if (lastError) {
+			throw lastError;
+		}
+
+		throw new Error('failed to dispatch node message');
 	}
 
 	createScriptCoreApi(scriptName) {
