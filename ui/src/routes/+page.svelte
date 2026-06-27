@@ -50,6 +50,10 @@
 	let editorContent = '';
 	let CodeEditorComponent = null;
 
+	function isBridgeUnavailable(result) {
+		return String(result?.error || '').toLowerCase().includes('bridge unavailable');
+	}
+
 	async function ensureCodeEditorComponent(silent = false) {
 		if (CodeEditorComponent) {
 			return true;
@@ -93,6 +97,14 @@
 
 	async function createScript(templateKey) {
 		const result = await createScriptFile(templateKey);
+		if (isBridgeUnavailable(result)) {
+			status = 'Create script non disponibile su mobile: bridge nativo non implementato';
+			if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+				window.alert('Create script non disponibile su mobile: manca il bridge nativo (Capacitor plugin) per createScriptFile.');
+			}
+			return;
+		}
+
 		status = result?.ok ? `Script created (${templateKey})` : `Error: ${result?.error || 'unknown'}`;
 		await refreshAll();
 	}
