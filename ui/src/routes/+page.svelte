@@ -103,17 +103,27 @@
 
 	async function createScript(templateKey) {
 		let scriptName = '';
-		if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
-			const suggestedName = `new-${templateKey}-script`;
-			const enteredName = window.prompt('Script name', suggestedName);
-			if (enteredName === null) {
-				status = 'Create script cancelled';
-				return;
-			}
-			scriptName = String(enteredName || '').trim();
-			if (!scriptName) {
-				status = 'Error: invalid script name';
-				return;
+		const isMobileRuntime =
+			typeof window !== 'undefined' &&
+			Boolean(window.Capacitor) &&
+			typeof window.prompt === 'function';
+
+		if (isMobileRuntime) {
+			try {
+				const suggestedName = `new-${templateKey}-script`;
+				const enteredName = window.prompt('Script name', suggestedName);
+				if (enteredName === null) {
+					status = 'Create script cancelled';
+					return;
+				}
+				scriptName = String(enteredName || '').trim();
+				if (!scriptName) {
+					status = 'Error: invalid script name';
+					return;
+				}
+			} catch {
+				// Defensive fallback for environments where prompt exists but is blocked.
+				scriptName = '';
 			}
 		}
 
