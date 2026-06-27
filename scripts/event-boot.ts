@@ -5,8 +5,9 @@
 
 import fs from 'fs/promises';
 import path from 'path';
+import { log } from 'core';
 
-import type { Context } from '../src/context.js';
+import type { Context } from 'core';
 
 
 
@@ -19,7 +20,7 @@ export async function run (ctx : Context)
   const payload = await fs.readFile(filePath);
   const fileName = path.basename(filePath);
 
-  ctx.log(`sending file ${fileName} (${payload.length} bytes) to ${endpoint}`);
+  await log(`sending file ${fileName} (${payload.length} bytes) to ${endpoint}`);
 
   const response = await fetch(endpoint, {
     method: 'POST',
@@ -37,5 +38,5 @@ export async function run (ctx : Context)
     throw new Error(`HTTP ${response.status}: ${preview}`);
   }
 
-  ctx.log(`api call success status=${response.status} preview=${preview}`);
+  await log(`api call success status=${response.status} preview=${preview}`);
 }

@@ -445,6 +445,39 @@ class ReactorRuntime {
 		};
 	}
 
+	createScriptCoreApi(scriptName) {
+		const requestCtor = this.runtimeApi.HttpClient && this.runtimeApi.HttpClient.Request;
+		const sendRequest = this.runtimeApi.HttpClient && this.runtimeApi.HttpClient.sendRequest;
+
+		function RequestFactory(...args) {
+			return new requestCtor(...args);
+		}
+
+		const httpClient = {
+			...(this.runtimeApi.HttpClient || {}),
+			Request: RequestFactory,
+			sendRequest: (request, timeout) => sendRequest(request, timeout),
+		};
+
+		return {
+			Node: {
+				sendMessage: async (target, content, options = {}) => {
+					const normalizedOptions = options && typeof options === 'object' ? options : {};
+					const headers = normalizedOptions.headers || {};
+					return this.sendNodeMessage(target, content, headers);
+				},
+			},
+			api: this.runtimeApi,
+			FileSystem: this.runtimeApi.FileSystem,
+			HttpClient: httpClient,
+			Device: this.runtimeApi.Device,
+			System: this.runtimeApi.System,
+			log: async (message) => {
+				this.log(`${scriptName}: ${message}`);
+			},
+		};
+	}
+
 	async handleRouteRequest(req, res) {
 		const method = String(req.method || 'GET').toUpperCase();
 		let pathname = '/';
@@ -840,14 +873,19 @@ class ReactorRuntime {
 			try {
 				const source = await fs.readFile(scriptPath, 'utf8');
 				const metadata = parseScriptMetadata(source);
-				const moduleExports = loadScriptModule(scriptPath, source);
-				const runner = moduleExports.run || moduleExports.default;
 				const normalizedScriptsDir = path.resolve(this.scriptsDir);
 				const normalizedScriptPath = path.resolve(scriptPath);
 				const scriptDir = path.dirname(normalizedScriptPath);
 				const scriptBaseName = path.basename(normalizedScriptPath).toLowerCase();
 				const isProjectBootScript = scriptBaseName === 'boot.ts' && path.dirname(scriptDir) === normalizedScriptsDir;
 				const displayName = isProjectBootScript ? path.basename(scriptDir) : path.basename(scriptPath);
+				const coreApi = this.createScriptCoreApi(displayName);
+				const moduleExports = loadScriptModule(scriptPath, source, {
+					virtualModules: {
+						core: coreApi,
+					},
+				});
+				const runner = moduleExports.run || moduleExports.default;
 
 				if (typeof runner !== 'function') {
 					this.log(`Skipping ${displayName}: missing exported run() or default function`);
@@ -1009,38 +1047,7 @@ class ReactorRuntime {
 		});
 
 		try {
-			const requestCtor = this.runtimeApi.HttpClient && this.runtimeApi.HttpClient.Request;
-			const sendRequest = this.runtimeApi.HttpClient && this.runtimeApi.HttpClient.sendRequest;
-			function RequestFactory(...args) {
-				return new requestCtor(...args);
-			}
-
-			const scriptHttpClient = {
-				...(this.runtimeApi.HttpClient || {}),
-				Request: RequestFactory,
-				sendRequest: (request, timeout) => sendRequest(request, timeout),
-			};
-
-			await Promise.resolve(
-				script.run({
-					...context,
-					Node: {
-						sendMessage: async (target, content, options = {}) => {
-							const normalizedOptions = options && typeof options === 'object' ? options : {};
-							const headers = normalizedOptions.headers || {};
-							return this.sendNodeMessage(target, content, headers);
-						},
-					},
-					api: this.runtimeApi,
-					FileSystem: this.runtimeApi.FileSystem,
-					HttpClient: scriptHttpClient,
-					Device: this.runtimeApi.Device,
-					System: this.runtimeApi.System,
-					log: async (message) => {
-						this.log(`${script.name}: ${message}`);
-					},
-				}),
-			);
+			await Promise.resolve(script.run({ ...context }));
 			this.log(`Completed ${script.name}`);
 		} catch (error) {
 			this.log(`Error in ${script.name}: ${error.stack || error.message}`);

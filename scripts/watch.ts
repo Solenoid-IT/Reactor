@@ -5,7 +5,8 @@
 
 
 
-import type { Context } from '../src/context.js';
+import { log } from 'core';
+import type { Context } from 'core';
 
 
 
@@ -13,5 +14,5 @@ export async function run(ctx : Context)
 {
 	const timestamp = new Date().toISOString();
 	const msg = `[${timestamp}] Watch event on ${ctx.watchPath}: ${ctx.watchType}`;
-	await ctx.log(msg, 'I');
+	await log(msg, 'I');
 }

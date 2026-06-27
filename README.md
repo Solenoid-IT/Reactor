@@ -252,7 +252,7 @@ MESSAGE sender filter rules:
 - host without port uses default 7070
 
 Message transport notes:
-- Node.sendMessage(target, content) sends POST /message to target
+- import { Node } from 'core' then call Node.sendMessage(target, content)
 - request header Reactor-Name contains current node name
 - content supports string, JSON object, and binary payloads
 
@@ -322,8 +322,11 @@ Minimal example:
 // @mutex OFF
 // @schedule EVERY 30 SECOND
 
-export async function run(ctx) {
-  await ctx.log("scheduled execution", "I");
+import { log } from 'core';
+import type { Context } from 'core';
+
+export async function run(ctx: Context) {
+  await log("scheduled execution", "I");
 }
 ```
 
@@ -345,10 +348,12 @@ Available ctx fields:
 - routeQuery: HTTP query string
 - routeBody: request body as string
 - routeHeaders: request headers map
-- api: mapped platform runtime API object
-- FileSystem / HttpClient / Device / System: shorthand mapped APIs
-- Node.sendMessage(target, content): sends a node message to target host/name
-- log(message, type): script-prefixed logging helper, where type is E, W, I, or D
+
+Runtime APIs must be imported from `core`:
+- `import type { Context } from 'core'`
+- `import { log } from 'core'`
+- `import { Node } from 'core'` then `Node.sendMessage(...)`
+- `import { HttpClient, FileSystem, Device, System, api } from 'core'`
 
 WATCH example with listener filter:
 
@@ -357,9 +362,12 @@ WATCH example with listener filter:
 // @mutex ON
 // @watch /my/folder [file:created, file:moved, dir:deleted]
 
-export async function run(ctx) {
+import { log } from 'core';
+import type { Context } from 'core';
+
+export async function run(ctx: Context) {
   if (ctx.trigger === 'WATCH') {
-    await ctx.log('watch event: ' + ctx.watchPath + ' (' + ctx.watchType + ')', 'I');
+    await log('watch event: ' + ctx.watchPath + ' (' + ctx.watchType + ')', 'I');
   }
 }
 ```
@@ -371,9 +379,12 @@ ROUTE example:
 // @mutex ON
 // @route POST /run-script-x
 
-export async function run(ctx) {
+import { log } from 'core';
+import type { Context } from 'core';
+
+export async function run(ctx: Context) {
   if (ctx.trigger === 'ROUTE') {
-    await ctx.log('route trigger: ' + ctx.routeMethod + ' ' + ctx.routePath, 'I');
+    await log('route trigger: ' + ctx.routeMethod + ' ' + ctx.routePath, 'I');
   }
 }
 ```

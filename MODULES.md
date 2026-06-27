@@ -67,7 +67,7 @@ Node message trigger:
 // @on MESSAGE(sender_1)
 // @on MESSAGE(10.20.43.20:7070,sender_2)
 ```
-`Node.sendMessage(target, content)` dispatches POST `/message` and triggers matching MESSAGE listeners.
+`import { Node } from 'core'` and `Node.sendMessage(target, content)` dispatch POST `/message` and trigger matching MESSAGE listeners.
 
 #### `@watch /path/to/folder` (multiple supported)
 File system monitoring. Paths can be absolute or relative to the script directory.
@@ -97,9 +97,12 @@ Example:
 
 **Context example:**
 ```typescript
+import { log } from 'core';
+import type { Context } from 'core';
+
 export async function run(ctx: Context) {
 	if (ctx.trigger === 'WATCH') {
-		await ctx.log(`File event: ${ctx.watchPath} (${ctx.watchType})`, 'I');
+    await log(`File event: ${ctx.watchPath} (${ctx.watchType})`, 'I');
 	}
 }
 ```
