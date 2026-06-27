@@ -225,7 +225,7 @@ export async function confirmDeleteScript(scriptName) {
 	}
 
 	if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
-		const confirmed = window.confirm(`Delete ${scriptName || 'this script'}?`);
+		const confirmed = window.confirm(`Are you sure to delete script '${scriptName.replace( /\.[\w]+$/, '' ) || 'this script'}'?`);
 		return { ok: true, confirmed };
 	}
 

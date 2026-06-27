@@ -105,7 +105,7 @@
 		let scriptName = '';
 		if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
 			const suggestedName = `new-${templateKey}-script`;
-			const enteredName = window.prompt('Nome nuovo script:', suggestedName);
+			const enteredName = window.prompt('Script name', suggestedName);
 			if (enteredName === null) {
 				status = 'Create script cancelled';
 				return;
