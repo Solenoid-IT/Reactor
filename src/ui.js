@@ -633,6 +633,8 @@ function buildHtmlContent() {
 		}
 
 		.file-item {
+			position: relative;
+			z-index: 1;
 			padding: 12px 13px;
 			border-radius: 11px;
 			background: linear-gradient(160deg, #212a36, #1d2632);
@@ -654,6 +656,11 @@ function buildHtmlContent() {
 			background: linear-gradient(145deg, #273444, #23403b);
 			border-color: var(--accent);
 			box-shadow: 0 0 0 1px rgba(60, 170, 122, 0.24) inset;
+			z-index: 2;
+		}
+
+		.file-item.menu-open {
+			z-index: 70;
 		}
 
 		.file-name {
@@ -958,6 +965,183 @@ function buildHtmlContent() {
 			margin-top: auto;
 		}
 
+		.flow-modal {
+			position: fixed;
+			inset: 0;
+			background: rgba(8, 12, 18, 0.72);
+			backdrop-filter: blur(3px);
+			display: none;
+			align-items: stretch;
+			justify-content: center;
+			padding: 22px;
+			z-index: 900;
+		}
+
+		.flow-modal.open {
+			display: flex;
+		}
+
+		.flow-shell {
+			width: min(1400px, 100%);
+			height: min(900px, 100%);
+			background: linear-gradient(180deg, #1a2230, #151c28);
+			border: 1px solid #3c4a5e;
+			border-radius: 14px;
+			overflow: hidden;
+			box-shadow: 0 24px 46px rgba(0, 0, 0, 0.42);
+			display: flex;
+			flex-direction: column;
+		}
+
+		.flow-head {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			gap: 12px;
+			padding: 12px 14px;
+			border-bottom: 1px solid #39475b;
+			background: linear-gradient(180deg, rgba(33, 42, 57, 0.96), rgba(26, 34, 47, 0.92));
+		}
+
+		.flow-title-wrap {
+			display: flex;
+			flex-direction: column;
+			gap: 4px;
+		}
+
+		.flow-title-wrap h3 {
+			font-size: 14px;
+			letter-spacing: 0.3px;
+		}
+
+		.flow-title-wrap p {
+			font-size: 11px;
+			color: var(--muted);
+		}
+
+		.flow-head-actions {
+			display: flex;
+			gap: 8px;
+			flex-wrap: wrap;
+		}
+
+		.flow-body {
+			flex: 1;
+			min-height: 0;
+			display: grid;
+			grid-template-columns: 1fr 300px;
+		}
+
+		.flow-canvas {
+			position: relative;
+			overflow: auto;
+			background:
+				radial-gradient(circle at 1px 1px, rgba(139, 156, 180, 0.22) 1px, transparent 0),
+				linear-gradient(180deg, #131926, #111723);
+			background-size: 22px 22px, 100% 100%;
+		}
+
+		.flow-edges {
+			position: absolute;
+			inset: 0;
+			width: 100%;
+			height: 100%;
+			pointer-events: none;
+		}
+
+		.flow-edge {
+			stroke: #6da2ff;
+			stroke-width: 2;
+			fill: none;
+			opacity: 0.9;
+		}
+
+		.flow-nodes {
+			position: relative;
+			min-width: 1200px;
+			min-height: 760px;
+		}
+
+		.flow-node {
+			position: absolute;
+			width: 220px;
+			background: linear-gradient(165deg, #223042, #1d2837);
+			border: 1px solid #4f6078;
+			border-radius: 11px;
+			padding: 9px;
+			box-shadow: 0 10px 22px rgba(0, 0, 0, 0.32);
+			cursor: grab;
+			user-select: none;
+		}
+
+		.flow-node.selected {
+			border-color: #6da2ff;
+			box-shadow: 0 0 0 1px rgba(109, 162, 255, 0.28) inset, 0 12px 24px rgba(0, 0, 0, 0.35);
+		}
+
+		.flow-node-title {
+			font-size: 12px;
+			font-weight: 800;
+			margin-bottom: 4px;
+		}
+
+		.flow-node-meta {
+			font-size: 10px;
+			color: #a8b6cb;
+			line-height: 1.3;
+			margin-bottom: 7px;
+		}
+
+		.flow-node-ports {
+			display: flex;
+			justify-content: space-between;
+			gap: 8px;
+		}
+
+		.flow-port {
+			font-size: 10px;
+			font-weight: 800;
+			letter-spacing: 0.3px;
+			text-transform: uppercase;
+			padding: 4px 8px;
+			border-radius: 999px;
+			border: 1px solid #5b6f8a;
+			background: #273649;
+			color: #deebff;
+		}
+
+		.flow-port.output {
+			cursor: pointer;
+			background: #1f3a2f;
+			border-color: #4e8a67;
+		}
+
+		.flow-side {
+			padding: 12px;
+			border-left: 1px solid #39475b;
+			overflow: auto;
+			display: flex;
+			flex-direction: column;
+			gap: 10px;
+		}
+
+		.flow-input {
+			width: 100%;
+			background: #121a27;
+			color: var(--text);
+			border: 1px solid #39495e;
+			border-radius: 8px;
+			padding: 8px;
+			font-size: 12px;
+			margin-top: 6px;
+		}
+
+		.flow-side-actions {
+			margin-top: 10px;
+			display: flex;
+			gap: 8px;
+		}
+
 		@media (max-width: 1180px) {
 			.header {
 				flex-direction: column;
@@ -982,6 +1166,15 @@ function buildHtmlContent() {
 			.file-list {
 				max-height: min(46vh, 460px);
 				height: auto;
+			}
+
+			.flow-body {
+				grid-template-columns: 1fr;
+			}
+
+			.flow-side {
+				border-left: 0;
+				border-top: 1px solid #39475b;
 			}
 		}
 
@@ -1091,6 +1284,7 @@ function buildHtmlContent() {
 				</div>
 				<button class="btn-secondary icon-button" onclick="refreshScripts()" title="refresh scripts" aria-label="Refresh scripts"><i class="fa-solid fa-rotate-right"></i></button>
 				<button class="btn-secondary icon-button" onclick="openScriptsFolder()" title="open project folder" aria-label="Open project folder"><i class="fa-regular fa-folder-open"></i></button>
+				<button class="btn-secondary" onclick="openFlowEditor()" title="open flow editor"><i class="fa-solid fa-diagram-project" style="margin-right: 8px;"></i>Open Flow</button>
 				<button class="btn-secondary" onclick="chooseDefaultProgram()" title="set default program"><i class="fa-solid fa-cog" style="margin-right: 8px;"></i>Set Default Program</button>
 				<button class="btn-secondary" onclick="openServerStatus()" title="open server status"><i class="fa-solid fa-heart-pulse" style="margin-right: 8px;"></i>Server Status</button>
 				<div class="log-picker" id="logPicker">
@@ -1146,12 +1340,65 @@ function buildHtmlContent() {
 		</div>
 	</div>
 
+	<div class="flow-modal" id="flowModal" aria-hidden="true">
+		<div class="flow-shell" role="dialog" aria-modal="true" aria-label="Flow editor">
+			<div class="flow-head">
+				<div class="flow-title-wrap">
+					<h3>Flow Editor</h3>
+					<p id="flowPathHint">flow.json</p>
+				</div>
+				<div class="flow-head-actions">
+					<button class="btn-secondary" onclick="saveFlowEditor()"><i class="fa-solid fa-floppy-disk" style="margin-right: 8px;"></i>Save Flow</button>
+					<button class="btn-secondary" onclick="closeFlowEditor()"><i class="fa-solid fa-xmark" style="margin-right: 8px;"></i>Close</button>
+				</div>
+			</div>
+			<div class="flow-body">
+				<div class="flow-canvas" id="flowCanvas">
+					<svg class="flow-edges" id="flowEdges"></svg>
+					<div class="flow-nodes" id="flowNodes"></div>
+				</div>
+				<div class="flow-side">
+					<div class="detail-card">
+						<h3>Selected Node</h3>
+						<div class="detail-value" id="flowSelectedNode">None</div>
+					</div>
+					<div class="detail-card">
+						<h3>Trigger</h3>
+						<select id="flowTriggerType" class="flow-input" onchange="onFlowTriggerTypeChange()">
+							<option value="NONE">None</option>
+							<option value="EVENT">Event (@on)</option>
+							<option value="MESSAGE">Message (@on MESSAGE)</option>
+							<option value="SCHEDULE">Schedule (@schedule)</option>
+							<option value="WATCH">Watch (@watch)</option>
+						</select>
+						<input id="flowTriggerValue" class="flow-input" type="text" placeholder="Value" />
+						<div class="detail-value" id="flowTriggerHint">Select a node to edit trigger.</div>
+						<div class="flow-side-actions">
+							<button class="btn-secondary" onclick="applyFlowTriggerToScript()"><i class="fa-solid fa-wand-magic-sparkles" style="margin-right: 8px;"></i>Apply Trigger</button>
+						</div>
+					</div>
+					<div class="detail-card">
+						<h3>Links</h3>
+						<div class="detail-value" id="flowLinkHint">Click OUT on a node, then click another node to connect.</div>
+						<div class="flow-side-actions">
+							<button class="btn-secondary" onclick="clearSelectedNodeLinks()"><i class="fa-solid fa-link-slash" style="margin-right: 8px;"></i>Clear Links</button>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
 	<script>
 		let scriptsState = [];
 		let selectedIndex = -1;
 		let templateMenuOpen = false;
 		let logMenuOpen = false;
 		let openItemLogIndex = -1;
+		let flowState = { version: 1, nodes: [], edges: [] };
+		let flowModalOpen = false;
+		let selectedFlowNodeId = null;
+		let pendingFlowLinkFromId = null;
 
 		function setTemplateMenuOpen(nextOpen) {
 			templateMenuOpen = nextOpen;
@@ -1206,7 +1453,11 @@ function buildHtmlContent() {
 			document.querySelectorAll('.item-log-picker').forEach((picker) => {
 				const pickerIndex = Number(picker.getAttribute('data-item-log-idx'));
 				const menu = picker.querySelector('.item-log-menu');
+				const card = picker.closest('.file-item');
 				picker.classList.toggle('open', pickerIndex === openItemLogIndex);
+				if (card) {
+					card.classList.toggle('menu-open', pickerIndex === openItemLogIndex);
+				}
 				if (pickerIndex === openItemLogIndex) {
 					picker.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'smooth' });
 				}
@@ -1228,6 +1479,394 @@ function buildHtmlContent() {
 			setItemLogMenuOpen(-1);
 		}
 
+		function makeFlowNodeId(scriptPath) {
+			const base = String(scriptPath || 'script');
+			let hash = 0;
+			for (let index = 0; index < base.length; index += 1) {
+				hash = ((hash << 5) - hash + base.charCodeAt(index)) | 0;
+			}
+			return 'node_' + String(Math.abs(hash));
+		}
+
+		function inferTriggerFromScript(script) {
+			if (!script) {
+				return { type: 'NONE', value: '' };
+			}
+
+			if (script.schedule) {
+				return { type: 'SCHEDULE', value: String(script.schedule) };
+			}
+
+			if (Array.isArray(script.watch) && script.watch.length > 0) {
+				const firstWatch = String(script.watch[0] || '').trim();
+				const watchPath = firstWatch.split('[')[0].trim();
+				return { type: 'WATCH', value: watchPath };
+			}
+
+			if (Array.isArray(script.events) && script.events.includes('MESSAGE')) {
+				const sender = Array.isArray(script.messageSenders) && script.messageSenders.length > 0 ? script.messageSenders[0] : '';
+				return { type: 'MESSAGE', value: sender || '' };
+			}
+
+			if (Array.isArray(script.events) && script.events.length > 0) {
+				return { type: 'EVENT', value: String(script.events[0]) };
+			}
+
+			return { type: 'NONE', value: '' };
+		}
+
+		function normalizeFlowState(rawFlow) {
+			const incoming = rawFlow && typeof rawFlow === 'object' ? rawFlow : {};
+			const incomingNodes = Array.isArray(incoming.nodes) ? incoming.nodes : [];
+			const nodeByPath = new Map();
+
+			for (const node of incomingNodes) {
+				if (!node || !node.scriptPath) {
+					continue;
+				}
+				nodeByPath.set(node.scriptPath, node);
+			}
+
+			const nodes = scriptsState.map((script, index) => {
+				const existing = nodeByPath.get(script.path);
+				const fallbackTrigger = inferTriggerFromScript(script);
+				return {
+					id: existing && existing.id ? String(existing.id) : makeFlowNodeId(script.path),
+					scriptPath: script.path,
+					name: script.name,
+					x: Number(existing && existing.x),
+					y: Number(existing && existing.y),
+					trigger: existing && existing.trigger ? existing.trigger : fallbackTrigger,
+				};
+			}).map((node, index) => ({
+				...node,
+				x: Number.isFinite(node.x) ? node.x : 80 + (index % 4) * 260,
+				y: Number.isFinite(node.y) ? node.y : 70 + Math.floor(index / 4) * 170,
+				trigger: {
+					type: String(node.trigger && node.trigger.type ? node.trigger.type : 'NONE').toUpperCase(),
+					value: String(node.trigger && node.trigger.value ? node.trigger.value : ''),
+				},
+			}));
+
+			const nodeIds = new Set(nodes.map((node) => node.id));
+			const edges = (Array.isArray(incoming.edges) ? incoming.edges : [])
+				.filter((edge) => edge && nodeIds.has(edge.from) && nodeIds.has(edge.to) && edge.from !== edge.to)
+				.map((edge, index) => ({
+					id: edge.id ? String(edge.id) : ('edge_' + index + '_' + Date.now()),
+					from: String(edge.from),
+					to: String(edge.to),
+				}));
+
+			return {
+				version: Number(incoming.version) || 1,
+				nodes,
+				edges,
+			};
+		}
+
+		function getFlowNodeById(nodeId) {
+			return flowState.nodes.find((node) => node.id === nodeId) || null;
+		}
+
+		function getFlowNodeUi(nodeId) {
+			return document.querySelector('.flow-node[data-flow-node-id="' + nodeId + '"]');
+		}
+
+		function drawFlowEdges() {
+			const svg = document.getElementById('flowEdges');
+			const nodesLayer = document.getElementById('flowNodes');
+			if (!svg || !nodesLayer) {
+				return;
+			}
+
+			const width = Math.max(nodesLayer.scrollWidth, nodesLayer.clientWidth, 1200);
+			const height = Math.max(nodesLayer.scrollHeight, nodesLayer.clientHeight, 760);
+			svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+			svg.setAttribute('width', String(width));
+			svg.setAttribute('height', String(height));
+
+			svg.innerHTML = flowState.edges.map((edge) => {
+				const from = getFlowNodeById(edge.from);
+				const to = getFlowNodeById(edge.to);
+				if (!from || !to) {
+					return '';
+				}
+
+				const startX = from.x + 220;
+				const startY = from.y + 52;
+				const endX = to.x;
+				const endY = to.y + 52;
+				const controlOffset = Math.max(54, Math.abs(endX - startX) * 0.45);
+				const d = 'M ' + startX + ' ' + startY + ' C ' + (startX + controlOffset) + ' ' + startY + ', ' + (endX - controlOffset) + ' ' + endY + ', ' + endX + ' ' + endY;
+				return '<path class="flow-edge" d="' + d + '" />';
+			}).join('');
+		}
+
+		function getTriggerLabel(trigger) {
+			const type = String(trigger && trigger.type ? trigger.type : 'NONE').toUpperCase();
+			const value = String(trigger && trigger.value ? trigger.value : '');
+			if (!value) {
+				return type;
+			}
+			return type + ': ' + value;
+		}
+
+		function onFlowTriggerTypeChange() {
+			const typeInput = document.getElementById('flowTriggerType');
+			const valueInput = document.getElementById('flowTriggerValue');
+			const hint = document.getElementById('flowTriggerHint');
+			if (!typeInput || !valueInput || !hint) {
+				return;
+			}
+
+			const type = String(typeInput.value || 'NONE').toUpperCase();
+			if (type === 'EVENT') {
+				valueInput.placeholder = 'BOOT, NET_UP, WIFI_OFF, ...';
+				hint.textContent = 'Use one event name supported by @on.';
+			} else if (type === 'MESSAGE') {
+				valueInput.placeholder = 'sender_1 or 127.0.0.1[:port]';
+				hint.textContent = 'Leave empty to accept messages from any sender.';
+			} else if (type === 'SCHEDULE') {
+				valueInput.placeholder = 'EVERY 30 SECOND';
+				hint.textContent = 'Schedule expression used in @schedule.';
+			} else if (type === 'WATCH') {
+				valueInput.placeholder = '/path/to/folder';
+				hint.textContent = 'Watch path used in @watch.';
+			} else {
+				valueInput.placeholder = 'Value';
+				hint.textContent = 'Trigger disabled for this node.';
+			}
+		}
+
+		function syncFlowSidePanel() {
+			const selected = getFlowNodeById(selectedFlowNodeId);
+			const selectedLabel = document.getElementById('flowSelectedNode');
+			const typeInput = document.getElementById('flowTriggerType');
+			const valueInput = document.getElementById('flowTriggerValue');
+			if (!selectedLabel || !typeInput || !valueInput) {
+				return;
+			}
+
+			if (!selected) {
+				selectedLabel.textContent = 'None';
+				typeInput.value = 'NONE';
+				valueInput.value = '';
+				onFlowTriggerTypeChange();
+				return;
+			}
+
+			selectedLabel.textContent = selected.name + ' (' + selected.id + ')';
+			typeInput.value = String(selected.trigger && selected.trigger.type ? selected.trigger.type : 'NONE').toUpperCase();
+			valueInput.value = String(selected.trigger && selected.trigger.value ? selected.trigger.value : '');
+			onFlowTriggerTypeChange();
+		}
+
+		function selectFlowNode(nodeId) {
+			selectedFlowNodeId = nodeId;
+			renderFlowEditor();
+		}
+
+		function startFlowLink(nodeId, event) {
+			if (event) {
+				event.stopPropagation();
+			}
+			pendingFlowLinkFromId = nodeId;
+			const hint = document.getElementById('flowLinkHint');
+			if (hint) {
+				hint.textContent = 'Select target node for link from ' + (getFlowNodeById(nodeId)?.name || nodeId) + '.';
+			}
+		}
+
+		function handleFlowNodeClick(nodeId, event) {
+			if (event) {
+				event.stopPropagation();
+			}
+
+			if (pendingFlowLinkFromId && pendingFlowLinkFromId !== nodeId) {
+				const exists = flowState.edges.some((edge) => edge.from === pendingFlowLinkFromId && edge.to === nodeId);
+				if (!exists) {
+					flowState.edges.push({
+						id: 'edge_' + Date.now() + '_' + Math.floor(Math.random() * 999),
+						from: pendingFlowLinkFromId,
+						to: nodeId,
+					});
+					showToast('Flow link added');
+				}
+				pendingFlowLinkFromId = null;
+				const hint = document.getElementById('flowLinkHint');
+				if (hint) {
+					hint.textContent = 'Click OUT on a node, then click another node to connect.';
+				}
+			}
+
+			selectFlowNode(nodeId);
+		}
+
+		function attachFlowNodeDragHandlers() {
+			const nodesLayer = document.getElementById('flowNodes');
+			if (!nodesLayer) {
+				return;
+			}
+
+			document.querySelectorAll('.flow-node').forEach((nodeEl) => {
+				nodeEl.addEventListener('mousedown', (event) => {
+					if (event.button !== 0) {
+						return;
+					}
+					if (event.target && event.target.closest('.flow-port.output')) {
+						return;
+					}
+
+					const nodeId = nodeEl.getAttribute('data-flow-node-id');
+					const node = getFlowNodeById(nodeId);
+					if (!node) {
+						return;
+					}
+
+					selectFlowNode(nodeId);
+					event.preventDefault();
+
+					const startX = event.clientX;
+					const startY = event.clientY;
+					const originX = node.x;
+					const originY = node.y;
+
+					const onMove = (moveEvent) => {
+						const deltaX = moveEvent.clientX - startX;
+						const deltaY = moveEvent.clientY - startY;
+						node.x = Math.max(10, originX + deltaX + nodesLayer.scrollLeft);
+						node.y = Math.max(10, originY + deltaY + nodesLayer.scrollTop);
+						nodeEl.style.left = node.x + 'px';
+						nodeEl.style.top = node.y + 'px';
+						drawFlowEdges();
+					};
+
+					const onUp = () => {
+						document.removeEventListener('mousemove', onMove);
+						document.removeEventListener('mouseup', onUp);
+					};
+
+					document.addEventListener('mousemove', onMove);
+					document.addEventListener('mouseup', onUp);
+				});
+			});
+		}
+
+		function renderFlowEditor() {
+			const nodesLayer = document.getElementById('flowNodes');
+			if (!nodesLayer) {
+				return;
+			}
+
+			nodesLayer.innerHTML = flowState.nodes.map((node) => {
+				const selected = node.id === selectedFlowNodeId ? ' selected' : '';
+				const triggerLabel = getTriggerLabel(node.trigger);
+				return '<div class="flow-node' + selected + '" data-flow-node-id="' + node.id + '" style="left:' + node.x + 'px; top:' + node.y + 'px;" onclick="handleFlowNodeClick(\'' + node.id + '\', event)">' +
+					'<div class="flow-node-title">' + node.name.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>' +
+					'<div class="flow-node-meta">' + triggerLabel.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>' +
+					'<div class="flow-node-ports">' +
+						'<span class="flow-port">IN</span>' +
+						'<button class="flow-port output" onclick="startFlowLink(\'' + node.id + '\', event)">OUT</button>' +
+					'</div>' +
+				'</div>';
+			}).join('');
+
+			attachFlowNodeDragHandlers();
+			drawFlowEdges();
+			syncFlowSidePanel();
+		}
+
+		function setFlowModalOpen(nextOpen) {
+			flowModalOpen = Boolean(nextOpen);
+			const modal = document.getElementById('flowModal');
+			if (!modal) {
+				return;
+			}
+			modal.classList.toggle('open', flowModalOpen);
+			modal.setAttribute('aria-hidden', flowModalOpen ? 'false' : 'true');
+		}
+
+		async function openFlowEditor() {
+			closeTemplateMenu();
+			closeLogMenu();
+			closeItemLogMenu();
+
+			await refreshScripts();
+			const result = await window.reactor.getFlowData();
+			if (!result || !result.ok) {
+				showToast('Flow load failed: ' + ((result && result.error) || 'unknown error'), 'error');
+				return;
+			}
+
+			flowState = normalizeFlowState(result.flow || {});
+			selectedFlowNodeId = flowState.nodes.length > 0 ? flowState.nodes[0].id : null;
+			pendingFlowLinkFromId = null;
+			const pathHint = document.getElementById('flowPathHint');
+			if (pathHint) {
+				pathHint.textContent = result.path || 'flow.json';
+			}
+
+			setFlowModalOpen(true);
+			renderFlowEditor();
+		}
+
+		function closeFlowEditor() {
+			setFlowModalOpen(false);
+			pendingFlowLinkFromId = null;
+			selectedFlowNodeId = null;
+		}
+
+		async function saveFlowEditor() {
+			const result = await window.reactor.saveFlowData(flowState);
+			if (!result || !result.ok) {
+				showToast('Flow save failed: ' + ((result && result.error) || 'unknown error'), 'error');
+				return;
+			}
+
+			document.getElementById('statusBox').textContent = 'Flow saved: ' + (result.path || 'flow.json');
+			showToast('Flow saved');
+		}
+
+		async function applyFlowTriggerToScript() {
+			const selected = getFlowNodeById(selectedFlowNodeId);
+			if (!selected) {
+				showToast('Select a flow node first', 'error');
+				return;
+			}
+
+			const typeInput = document.getElementById('flowTriggerType');
+			const valueInput = document.getElementById('flowTriggerValue');
+			if (!typeInput || !valueInput) {
+				return;
+			}
+
+			const trigger = {
+				type: String(typeInput.value || 'NONE').toUpperCase(),
+				value: String(valueInput.value || '').trim(),
+			};
+
+			const result = await window.reactor.setScriptTrigger(selected.scriptPath, trigger);
+			if (!result || !result.ok) {
+				showToast('Trigger apply failed: ' + ((result && result.error) || 'unknown error'), 'error');
+				return;
+			}
+
+			selected.trigger = trigger;
+			renderFlowEditor();
+			await refreshScripts();
+			document.getElementById('statusBox').textContent = 'Trigger updated on ' + selected.name;
+			showToast('Trigger updated');
+		}
+
+		function clearSelectedNodeLinks() {
+			if (!selectedFlowNodeId) {
+				return;
+			}
+			flowState.edges = flowState.edges.filter((edge) => edge.from !== selectedFlowNodeId && edge.to !== selectedFlowNodeId);
+			renderFlowEditor();
+			showToast('Links cleared');
+		}
+
 		window.addEventListener('click', (event) => {
 			const picker = document.getElementById('templatePicker');
 			if (!picker || !picker.contains(event.target)) {
@@ -1242,6 +1881,17 @@ function buildHtmlContent() {
 			const openItemPicker = document.querySelector('.item-log-picker.open');
 			if (openItemPicker && !openItemPicker.contains(event.target)) {
 				closeItemLogMenu();
+			}
+
+			const flowModal = document.getElementById('flowModal');
+			if (flowModalOpen && flowModal && event.target === flowModal) {
+				closeFlowEditor();
+			}
+		});
+
+		window.addEventListener('keydown', (event) => {
+			if (event.key === 'Escape' && flowModalOpen) {
+				closeFlowEditor();
 			}
 		});
 
@@ -2472,6 +3122,129 @@ function setupIpcHandlers(runtime) {
 
 			await fs.writeFile(normalizedFilePath, source, 'utf8');
 			return { ok: true, directive: 'mutex', value: nextValue };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('get-flow-data', async () => {
+		if (!runtime) {
+			return { ok: false, error: 'runtime unavailable' };
+		}
+
+		const reactorRoot = path.resolve(runtime.reactorRootDir || path.dirname(runtime.scriptsDir));
+		const flowPath = path.join(reactorRoot, 'flow.json');
+
+		try {
+			const raw = await fs.readFile(flowPath, 'utf8');
+			const parsed = JSON.parse(raw);
+			const nodes = Array.isArray(parsed && parsed.nodes) ? parsed.nodes : [];
+			const edges = Array.isArray(parsed && parsed.edges) ? parsed.edges : [];
+			return {
+				ok: true,
+				path: flowPath,
+				flow: {
+					version: Number(parsed && parsed.version) || 1,
+					nodes,
+					edges,
+					updatedAt: parsed && parsed.updatedAt ? parsed.updatedAt : null,
+				},
+			};
+		} catch (error) {
+			if (error && error.code !== 'ENOENT') {
+				return { ok: false, error: error.message };
+			}
+
+			return {
+				ok: true,
+				path: flowPath,
+				flow: {
+					version: 1,
+					nodes: [],
+					edges: [],
+					updatedAt: null,
+				},
+			};
+		}
+	});
+
+	ipcMain.handle('save-flow-data', async (_, flow) => {
+		if (!runtime) {
+			return { ok: false, error: 'runtime unavailable' };
+		}
+
+		const reactorRoot = path.resolve(runtime.reactorRootDir || path.dirname(runtime.scriptsDir));
+		const flowPath = path.join(reactorRoot, 'flow.json');
+		const incoming = flow && typeof flow === 'object' ? flow : {};
+		const safeFlow = {
+			version: Number(incoming.version) || 1,
+			nodes: Array.isArray(incoming.nodes) ? incoming.nodes : [],
+			edges: Array.isArray(incoming.edges) ? incoming.edges : [],
+			updatedAt: new Date().toISOString(),
+		};
+
+		try {
+			await fs.mkdir(path.dirname(flowPath), { recursive: true });
+			await fs.writeFile(flowPath, `${JSON.stringify(safeFlow, null, 2)}\n`, 'utf8');
+			return { ok: true, path: flowPath };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('set-script-trigger', async (_, filePath, trigger) => {
+		if (!runtime || !filePath) {
+			return { ok: false, error: 'invalid request' };
+		}
+
+		const allowedPath = path.resolve(runtime.scriptsDir);
+		const normalizedFilePath = path.resolve(filePath);
+		if (!normalizedFilePath.startsWith(allowedPath + path.sep)) {
+			return { ok: false, error: 'path not allowed' };
+		}
+
+		const triggerObj = trigger && typeof trigger === 'object' ? trigger : {};
+		const type = String(triggerObj.type || 'NONE').trim().toUpperCase();
+		const value = String(triggerObj.value || '').trim();
+		const overrides = {};
+
+		if (type === 'MESSAGE') {
+			overrides.on = value ? `MESSAGE(${value})` : 'MESSAGE';
+			overrides.schedule = null;
+			overrides.watch = [];
+		} else if (type === 'EVENT') {
+			if (!value) {
+				return { ok: false, error: 'event value required' };
+			}
+			overrides.on = value.toUpperCase();
+			overrides.schedule = null;
+			overrides.watch = [];
+		} else if (type === 'SCHEDULE') {
+			if (!value) {
+				return { ok: false, error: 'schedule expression required' };
+			}
+			overrides.on = null;
+			overrides.schedule = value;
+			overrides.watch = [];
+		} else if (type === 'WATCH') {
+			if (!value) {
+				return { ok: false, error: 'watch path required' };
+			}
+			overrides.on = null;
+			overrides.schedule = null;
+			overrides.watch = [value];
+		} else {
+			overrides.on = null;
+			overrides.schedule = null;
+			overrides.watch = [];
+		}
+
+		try {
+			const source = await fs.readFile(normalizedFilePath, 'utf8');
+			const rebuilt = rebuildDirectiveHeader(source, overrides);
+			await fs.writeFile(normalizedFilePath, rebuilt, 'utf8');
+			await runtime.reloadScripts('ui-set-script-trigger');
+			return { ok: true };
 		} catch (error) {
 			return { ok: false, error: error.message };
 		}
