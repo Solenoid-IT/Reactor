@@ -3,11 +3,11 @@
 
 
 
-import { Context, Node } from 'core';
+import { Node } from 'core';
 
 
 
-export async function run (ctx : Context)
+export async function run ()
 {
     await Node.sendMessage( '127.0.0.1', 'hello' );
 }

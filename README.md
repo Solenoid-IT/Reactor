@@ -186,7 +186,6 @@ Canonical header order:
 3. @on
 4. @schedule
 5. @watch
-6. @route
 
 Note: you do not need all directives. When UI rewrites headers (ENABLED/MUTEX toggles), it preserves this order.
 
@@ -289,25 +288,11 @@ Complete header example:
 // @on BOOT
 // @schedule EVERY 30 SECOND
 // @watch /tmp/inbox [file:created, file:moved]
-// @route POST /run-script-x
 ```
 
-### @route
-
-Supported syntax:
-- @route METHOD /path
-
-Examples:
-- @route POST /run-script-x
-- @route CUSTOM_METHOD /sync-job
-
-Rules:
-- METHOD is case-insensitive and normalized to uppercase
-- path must start with /
-- route matching is exact by METHOD + path
-
 HTTP server notes:
-- Reactor starts an internal HTTP server for @route triggers
+- Reactor starts an internal HTTP server for health and message dispatch
+- `POST /message` is used by `@on MESSAGE(...)`
 - Default port: 7070
 - Port can be configured at runtime (UI bridge) or with environment variable REACTOR_HTTP_PORT
 
@@ -331,7 +316,7 @@ export async function run(ctx: Context) {
 ```
 
 Available ctx fields:
-- trigger: EVENT, SCHEDULE, or WATCH
+- trigger: EVENT, SCHEDULE, WATCH, or MESSAGE
 - event: event name when trigger is EVENT
 - expression: schedule expression when trigger is SCHEDULE
 - messageSender: normalized sender identifier for MESSAGE trigger
@@ -343,11 +328,6 @@ Available ctx fields:
 - messageHeaders: incoming request headers for MESSAGE trigger
 - watchPath: path that generated WATCH event
 - watchType: watch event type
-- routeMethod: HTTP method when trigger is ROUTE
-- routePath: HTTP path when trigger is ROUTE
-- routeQuery: HTTP query string
-- routeBody: request body as string
-- routeHeaders: request headers map
 
 Runtime APIs must be imported from `core`:
 - `import type { Context } from 'core'`
@@ -368,23 +348,6 @@ import type { Context } from 'core';
 export async function run(ctx: Context) {
   if (ctx.trigger === 'WATCH') {
     await log('watch event: ' + ctx.watchPath + ' (' + ctx.watchType + ')', 'I');
-  }
-}
-```
-
-ROUTE example:
-
-```ts
-// @state ENABLED
-// @mutex ON
-// @route POST /run-script-x
-
-import { log } from 'core';
-import type { Context } from 'core';
-
-export async function run(ctx: Context) {
-  if (ctx.trigger === 'ROUTE') {
-    await log('route trigger: ' + ctx.routeMethod + ' ' + ctx.routePath, 'I');
   }
 }
 ```

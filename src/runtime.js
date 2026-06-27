@@ -180,7 +180,6 @@ class ReactorRuntime {
 		this.isReloading = false;
 		this.pendingReloadReason = null;
 		this.watchers = [];
-		this.routeMap = new Map();
 		this.messageListenerMap = new Map();
 		this.httpServer = null;
 		this.httpServerPort = Number(options.httpServerPort || process.env.REACTOR_HTTP_PORT || 7070);
@@ -207,10 +206,6 @@ class ReactorRuntime {
 			port: this.httpServerPort,
 			active: Boolean(this.httpServer),
 			reactorName: this.cachedReactorName || null,
-			routes: Array.from(this.routeMap.entries()).map(([routeKey, scripts]) => ({
-				route: routeKey,
-				scripts: scripts.map((script) => script.name),
-			})),
 			messageListeners: Array.from(this.messageListenerMap.entries()).map(([sender, scripts]) => ({
 				sender,
 				scripts: scripts.map((script) => script.name),
@@ -267,43 +262,8 @@ class ReactorRuntime {
 		}
 
 		this.httpServerPort = nextPort;
-		await this.restartHttpRouteServer();
+		await this.restartHttpServer();
 		return this.getHttpServerConfig();
-	}
-
-	registerScriptRoutes(script) {
-		if (!script.enabled || !Array.isArray(script.routes) || script.routes.length === 0) {
-			return;
-		}
-
-		for (const route of script.routes) {
-			if (!route || !route.method || !route.path) {
-				continue;
-			}
-
-			const routeKey = `${String(route.method).toUpperCase()} ${route.path}`;
-			const listeners = this.routeMap.get(routeKey) || [];
-			listeners.push(script);
-			this.routeMap.set(routeKey, listeners);
-		}
-	}
-
-	findRouteListeners(method, routePath) {
-		const methodKey = `${String(method || '').toUpperCase()} ${routePath}`;
-		const wildcardKey = `* ${routePath}`;
-		const listeners = [];
-
-		for (const script of this.routeMap.get(methodKey) || []) {
-			listeners.push(script);
-		}
-
-		for (const script of this.routeMap.get(wildcardKey) || []) {
-			if (!listeners.includes(script)) {
-				listeners.push(script);
-			}
-		}
-
-		return listeners;
 	}
 
 	registerScriptMessageListeners(script) {
@@ -478,7 +438,7 @@ class ReactorRuntime {
 		};
 	}
 
-	async handleRouteRequest(req, res) {
+	async handleHttpRequest(req, res) {
 		const method = String(req.method || 'GET').toUpperCase();
 		let pathname = '/';
 		let query = '';
@@ -507,7 +467,6 @@ class ReactorRuntime {
 					uptimeSec: Math.floor(process.uptime()),
 					httpPort: this.httpServerPort,
 					scriptsCount: this.scripts.length,
-					routesCount: this.routeMap.size,
 				}),
 			);
 			return;
@@ -570,77 +529,19 @@ class ReactorRuntime {
 			return;
 		}
 
-		const listeners = this.findRouteListeners(method, pathname);
-		if (listeners.length === 0) {
-			this.addHttpServerLog(`${method} ${pathname} -> 404 (no matching @route)`);
-			res.writeHead(404, { 'content-type': 'application/json' });
-			res.end(JSON.stringify({ ok: false, error: 'route not found', method, path: pathname }));
-			return;
-		}
-
-		const bodyChunks = [];
-		for await (const chunk of req) {
-			bodyChunks.push(chunk);
-		}
-
-		const body = Buffer.concat(bodyChunks).toString('utf8');
-		const headers = req.headers || {};
-		const contentType = String(headers['content-type'] || '').toLowerCase();
-		let bodyJson = null;
-		if (body && contentType.includes('application/json')) {
-			try {
-				bodyJson = JSON.parse(body);
-			} catch {
-				bodyJson = null;
-			}
-		}
-
-		const request = {
-			method,
-			path: pathname,
-			query,
-			queryParams,
-			headers,
-			body,
-			bodyJson,
-		};
-		this.addHttpServerLog(`${method} ${pathname} -> ${listeners.length} script(s)`);
-
-		await Promise.allSettled(
-			listeners.map((script) =>
-				this.runScript(script, {
-					trigger: 'ROUTE',
-					event: 'HTTP_ROUTE',
-					request,
-					routeMethod: method,
-					routePath: pathname,
-					routeQuery: query,
-					routeBody: body,
-					routeHeaders: headers,
-				}),
-			),
-		);
-
-		res.writeHead(200, { 'content-type': 'application/json' });
-		res.end(
-			JSON.stringify({
-				ok: true,
-				trigger: 'ROUTE',
-				method,
-				path: pathname,
-				scripts: listeners.map((script) => script.name),
-			}),
-		);
+		this.addHttpServerLog(`${method} ${pathname} -> 404`);
+		res.writeHead(404, { 'content-type': 'application/json' });
+		res.end(JSON.stringify({ ok: false, error: 'endpoint not found', method, path: pathname }));
 	}
 
-	async startHttpRouteServer() {
+	async startHttpServer() {
 		if (this.httpServer) {
 			return;
 		}
 
 		await new Promise((resolve, reject) => {
 			const server = http.createServer((req, res) => {
-				this.handleRouteRequest(req, res).catch((error) => {
+				this.handleHttpRequest(req, res).catch((error) => {
 					this.addHttpServerLog(`request handling failed: ${error.message}`);
 					res.writeHead(500, { 'content-type': 'application/json' });
 					res.end(JSON.stringify({ ok: false, error: 'internal server error' }));
@@ -657,7 +558,7 @@ class ReactorRuntime {
 		});
 	}
 
-	async stopHttpRouteServer() {
+	async stopHttpServer() {
 		if (!this.httpServer) {
 			return;
 		}
@@ -668,9 +569,9 @@ class ReactorRuntime {
 		this.addHttpServerLog('stopped');
 	}
 
-	async restartHttpRouteServer() {
-		await this.stopHttpRouteServer();
-		await this.startHttpRouteServer();
+	async restartHttpServer() {
+		await this.stopHttpServer();
+		await this.startHttpServer();
 	}
 
 	findScriptByPath(filePath) {
@@ -727,8 +628,6 @@ class ReactorRuntime {
 			expression: context.expression || null,
 			watchPath: context.watchPath || null,
 			watchType: context.watchType || null,
-			routeMethod: context.routeMethod || null,
-			routePath: context.routePath || null,
 			durationMs,
 			output,
 			error,
@@ -741,7 +640,7 @@ class ReactorRuntime {
 		await this.discoverScripts();
 		this.setupSchedules();
 		this.setupWatchers();
-		await this.startHttpRouteServer();
+		await this.startHttpServer();
 		this.setupScriptsWatcher();
 		this.setupNetworkWatcher();
 		await this.emitEvent('BOOT');
@@ -858,7 +757,6 @@ class ReactorRuntime {
 	async discoverScripts() {
 		this.scripts = [];
 		this.eventMap.clear();
-		this.routeMap.clear();
 		this.messageListenerMap.clear();
 
 		try {
@@ -906,7 +804,6 @@ class ReactorRuntime {
 					mutex: metadata.mutex,
 					watch: metadata.watch || [], // Existing watch property
 					watchRules: metadata.watchRules || [], // New watchRules property
-					routes: metadata.routes || [],
 					isRunning: false,
 				};
 
@@ -920,9 +817,7 @@ class ReactorRuntime {
 								? '*'
 								: script.messageSenders.join(', ')
 							: 'none'
-					} @watch=${script.watch.length > 0 ? script.watch.join(', ') : 'none'} @route=${
-						script.routes.length > 0 ? script.routes.map((route) => route.raw).join(', ') : 'none'
-					} @mutex=${script.mutex ? 'on' : 'off'} (from ${this.scriptsDir})`,
+					} @watch=${script.watch.length > 0 ? script.watch.join(', ') : 'none'} @mutex=${script.mutex ? 'on' : 'off'} (from ${this.scriptsDir})`,
 				);
 
 				if (!script.enabled) {
@@ -936,7 +831,6 @@ class ReactorRuntime {
 					this.eventMap.set(eventName, scriptsForEvent);
 				}
 
-				this.registerScriptRoutes(script);
 				this.registerScriptMessageListeners(script);
 			} catch (error) {
 				this.log(`Failed to load script ${scriptPath}: ${error.message}`);
@@ -1035,8 +929,6 @@ class ReactorRuntime {
 				trigger: context.trigger,
 				event: context.event || null,
 				expression: context.expression || null,
-				routeMethod: context.routeMethod || null,
-				routePath: context.routePath || null,
 			});
 		}
 		await this.recordExecutionEvent({

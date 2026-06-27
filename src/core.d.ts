@@ -163,20 +163,6 @@ declare module 'core' {
 		messageHeaders?: IncomingHeadersMap;
 		watchPath?: string;
 		watchType?: 'file:created' | 'file:deleted' | 'file:moved' | 'dir:created' | 'dir:deleted' | 'dir:moved' | 'file:changed';
-		routeMethod?: string;
-		routePath?: string;
-		routeQuery?: string;
-		routeBody?: string;
-		routeHeaders?: IncomingHeadersMap;
-		request?: {
-			method: string;
-			path: string;
-			query: string;
-			queryParams: Record<string, string>;
-			headers: IncomingHeadersMap;
-			body: string;
-			bodyJson: unknown;
-		};
 	}
 
 	export const api: RuntimeApi;

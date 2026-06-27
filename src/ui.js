@@ -46,7 +46,6 @@ function parseDirectiveHeader(source) {
 		on: null,
 		mutex: null,
 		watch: [],
-		route: [],
 	};
 
 	for (; index < lines.length; index += 1) {
@@ -81,12 +80,6 @@ function parseDirectiveHeader(source) {
 			continue;
 		}
 
-		const routeMatch = line.match(/^\s*\/\/\s*@route\s+(.+)$/i);
-		if (routeMatch) {
-			values.route.push(routeMatch[1].trim());
-			continue;
-		}
-
 		if (line.trim() === '') {
 			continue;
 		}
@@ -110,7 +103,7 @@ function rebuildDirectiveHeader(source, overrides = {}) {
 	let bodyStart = index;
 	for (; bodyStart < lines.length; bodyStart += 1) {
 		const line = lines[bodyStart];
-		if (/^\s*\/\/\s*@(state|mutex|on|schedule|watch|route)\b/i.test(line) || line.trim() === '') {
+		if (/^\s*\/\/\s*@(state|mutex|on|schedule|watch)\b/i.test(line) || line.trim() === '') {
 			continue;
 		}
 		break;
@@ -129,14 +122,6 @@ function rebuildDirectiveHeader(source, overrides = {}) {
 
 	if (nextValues.on) {
 		headerLines.push(`// @on ${nextValues.on}`);
-	}
-
-	if (Array.isArray(nextValues.route)) {
-		for (const routeEntry of nextValues.route) {
-			if (routeEntry) {
-				headerLines.push(`// @route ${routeEntry}`);
-			}
-		}
 	}
 
 	if (nextValues.schedule) {
@@ -1102,7 +1087,6 @@ function buildHtmlContent() {
 						<button class="template-menu-item" onclick="createNewScript('schedule')"><i class="fa-solid fa-clock-rotate-left"></i><span>Schedule</span></button>
 						<button class="template-menu-item" onclick="createNewScript('event')"><i class="fa-solid fa-bolt"></i><span>Event</span></button>
 						<button class="template-menu-item" onclick="createNewScript('watch')"><i class="fa-solid fa-eye"></i><span>Watch</span></button>
-						<button class="template-menu-item" onclick="createNewScript('route')"><i class="fa-solid fa-route"></i><span>Route</span></button>
 					</div>
 				</div>
 				<button class="btn-secondary icon-button" onclick="refreshScripts()" title="refresh scripts" aria-label="Refresh scripts"><i class="fa-solid fa-rotate-right"></i></button>
@@ -2233,38 +2217,6 @@ function setupIpcHandlers(runtime) {
 				'}',
 				'',
 			],
-			route: [
-				'// @state DISABLED',
-				'// @mutex ON',
-				'// @route RUN /api?p=Script.run',
-				'',
-				'',
-				'',
-				"import { log } from 'core';",
-				"import type { Context } from 'core';",
-				'',
-				'',
-				'',
-				'export async function run (ctx : Context)',
-				'{',
-				"\tconst req = ctx.request;",
-				"\tconst method = req?.method || ctx.routeMethod || '';",
-				"\tconst routePath = req?.path || ctx.routePath || '';",
-				"\tconst headers = req?.headers || {};",
-				"\tconst body = req?.body || '';",
-				"\tconst bodyJson = req?.bodyJson;",
-				"\tconst queryParams = req?.queryParams || {};",
-				'',
-				"\tawait log('route trigger: ' + method + ' ' + routePath);",
-				"\tawait log('headers.authorization: ' + String(headers['authorization'] || 'none'));",
-				"\tawait log('query p: ' + String(queryParams.p || ''));",
-				"\tawait log('body: ' + body);",
-				"\tif (bodyJson) {",
-				"\t\tawait log('bodyJson: ' + JSON.stringify(bodyJson));",
-				"\t}",
-				'}',
-				'',
-			],
 		};
 
 		const safeTemplateKey = templateKey && templateMap[templateKey] ? templateKey : 'schedule';
@@ -2578,7 +2530,6 @@ function setupIpcHandlers(runtime) {
 					events: s.events,
 					messageSenders: s.messageSenders || [],
 					messageFromAnySender: Boolean(s.messageFromAnySender),
-					routes: s.routes || [],
 					mutex: s.mutex,
 					watch: s.watch || [],
 				})),

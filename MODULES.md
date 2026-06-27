@@ -87,14 +87,6 @@ Prevents concurrent executions. Default: `OFF`
 // @mutex ON
 ```
 
-#### `@route METHOD /path`
-Triggers script execution when Reactor internal HTTP server receives a matching HTTP request.
-
-Example:
-```typescript
-// @route POST /run-script-x
-```
-
 **Context example:**
 ```typescript
 import { log } from 'core';
@@ -124,7 +116,7 @@ export async function run(ctx: Context) {
   - Script discovery
   - Schedule setup
   - Event emission
-  - HTTP route server and @route dispatch
+  - HTTP server health/message handling (`POST /message`)
   - Script execution
   - Event logging
 - Supports platform service injection (filesystem/http/permissions)
