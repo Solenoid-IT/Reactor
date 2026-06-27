@@ -84,6 +84,11 @@
 			getHttpServerConfig(),
 			getReactorName(),
 		]);
+
+		if (info?.ok === false) {
+			status = `Error scripts list: ${info?.error || 'unknown'}`;
+		}
+
 		scripts = Array.isArray(info?.scripts) ? info.scripts : [];
 		scriptsPath = info?.path || '';
 		defaultProgramPath = settings?.defaultProgramPath || '';
@@ -96,16 +101,32 @@
 	}
 
 	async function createScript(templateKey) {
-		const result = await createScriptFile(templateKey);
+		let scriptName = '';
+		if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
+			const suggestedName = `new-${templateKey}-script`;
+			const enteredName = window.prompt('Nome nuovo script:', suggestedName);
+			if (enteredName === null) {
+				status = 'Create script cancelled';
+				return;
+			}
+			scriptName = String(enteredName || '').trim();
+			if (!scriptName) {
+				status = 'Error: invalid script name';
+				return;
+			}
+		}
+
+		const result = await createScriptFile(templateKey, scriptName);
 		if (isBridgeUnavailable(result)) {
-			status = 'Create script non disponibile su mobile: bridge nativo non implementato';
+			status = 'Create script non disponibile su mobile: bridge nativo non disponibile';
 			if (typeof window !== 'undefined' && typeof window.alert === 'function') {
-				window.alert('Create script non disponibile su mobile: manca il bridge nativo (Capacitor plugin) per createScriptFile.');
+				window.alert('Create script non disponibile su mobile: bridge nativo Capacitor non disponibile per createScriptFile.');
 			}
 			return;
 		}
 
-		status = result?.ok ? `Script created (${templateKey})` : `Error: ${result?.error || 'unknown'}`;
+		status = result?.ok ? `Script created (${scriptName || templateKey})` : `Error: ${result?.error || 'unknown'}`;
+		await refreshAll();
 		await refreshAll();
 	}
 

@@ -10,7 +10,7 @@ declare global {
 			resolveEventLogPath?: (filePath?: string) => Promise<any>;
 			pickDefaultProgram?: () => Promise<any>;
 			runScriptNow?: (filePath: string) => Promise<any>;
-			createScriptFile?: (templateKey: string) => Promise<any>;
+			createScriptFile?: (templateKey: string, scriptName?: string) => Promise<any>;
 			renameScriptFile?: (filePath: string, nextName: string) => Promise<any>;
 			confirmDeleteScript?: (scriptName: string) => Promise<any>;
 			deleteScriptFile?: (filePath: string) => Promise<any>;

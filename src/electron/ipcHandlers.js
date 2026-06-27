@@ -275,23 +275,31 @@ function setupIpcHandlers(runtime) {
 		return { ok: true, started: true, script: script.name };
 	});
 
-	ipcMain.handle('create-script-file', async (_, templateKey) => {
+	ipcMain.handle('create-script-file', async (_, templateKey, scriptName) => {
 		if (!runtime) {
 			return { ok: false, error: 'runtime not ready' };
 		}
 
 		await fs.mkdir(runtime.scriptsDir, { recursive: true });
-		const saveResult = await dialog.showSaveDialog({
-			title: 'Create new script',
-			defaultPath: path.join(runtime.scriptsDir, 'new-script'),
-		});
+		const allowedPath = path.resolve(runtime.scriptsDir);
 
-		if (saveResult.canceled || !saveResult.filePath) {
-			return { ok: false, canceled: true };
+		let targetPath = '';
+		const requestedName = String(scriptName || '').trim();
+		if (requestedName) {
+			targetPath = path.resolve(path.join(runtime.scriptsDir, requestedName));
+		} else {
+			const saveResult = await dialog.showSaveDialog({
+				title: 'Create new script',
+				defaultPath: path.join(runtime.scriptsDir, 'new-script'),
+			});
+
+			if (saveResult.canceled || !saveResult.filePath) {
+				return { ok: false, canceled: true };
+			}
+
+			targetPath = path.resolve(saveResult.filePath);
 		}
 
-		const allowedPath = path.resolve(runtime.scriptsDir);
-		const targetPath = path.resolve(saveResult.filePath);
 		if (!targetPath.startsWith(allowedPath + path.sep)) {
 			return { ok: false, error: 'target path outside scripts directory' };
 		}
