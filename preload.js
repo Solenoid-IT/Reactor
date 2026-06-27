@@ -20,7 +20,4 @@ contextBridge.exposeInMainWorld('reactor', {
 	openServerStatus: () => ipcRenderer.invoke('open-server-status'),
 	getReactorName: () => ipcRenderer.invoke('get-reactor-name'),
 	setReactorName: (name) => ipcRenderer.invoke('set-reactor-name', name),
-	getFlowData: () => ipcRenderer.invoke('get-flow-data'),
-	saveFlowData: (flow) => ipcRenderer.invoke('save-flow-data', flow),
-	setScriptTrigger: (filePath, trigger) => ipcRenderer.invoke('set-script-trigger', filePath, trigger),
 });

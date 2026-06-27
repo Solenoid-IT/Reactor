@@ -54,6 +54,36 @@ To start with visible UI:
 npm run start:debug-ui
 ```
 
+## SvelteKit UI (Component-based Frontend)
+
+Reactor now supports a SvelteKit frontend under `ui/`, so the interface can be split into reusable components.
+
+Install UI dependencies:
+
+```bash
+npm run ui:install
+```
+
+Run SvelteKit dev server:
+
+```bash
+npm run ui:dev
+```
+
+In another terminal, start Electron with SvelteKit dev URL:
+
+```bash
+npm run start:ui
+```
+
+Build static SvelteKit UI (used by Electron in production builds):
+
+```bash
+npm run ui:build
+```
+
+If `ui/build/index.html` exists, Electron loads it automatically. If not, Reactor shows a minimal error page asking to run `npm run ui:build`.
+
 To run in headless mode (daemon):
 
 ```bash

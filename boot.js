@@ -1,7 +1,8 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
 const { ReactorRuntime } = require('./src/runtime');
-const { createMainWindow, setupIpcHandlers } = require('./src/ui');
+const { createMainWindow } = require('./src/electron/window');
+const { setupIpcHandlers } = require('./src/electron/ipcHandlers');
 
 // Constants
 const EXTERNAL_SCRIPTS_DIR = path.join(app.getPath('userData'), 'projects');
