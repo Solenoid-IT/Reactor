@@ -1673,7 +1673,8 @@ function buildHtmlContent() {
 			pendingFlowLinkFromId = nodeId;
 			const hint = document.getElementById('flowLinkHint');
 			if (hint) {
-				hint.textContent = 'Select target node for link from ' + (getFlowNodeById(nodeId)?.name || nodeId) + '.';
+				const fromNode = getFlowNodeById(nodeId);
+				hint.textContent = 'Select target node for link from ' + ((fromNode && fromNode.name) ? fromNode.name : nodeId) + '.';
 			}
 		}
 
@@ -1866,6 +1867,15 @@ function buildHtmlContent() {
 			renderFlowEditor();
 			showToast('Links cleared');
 		}
+
+		window.openFlowEditor = openFlowEditor;
+		window.closeFlowEditor = closeFlowEditor;
+		window.saveFlowEditor = saveFlowEditor;
+		window.onFlowTriggerTypeChange = onFlowTriggerTypeChange;
+		window.applyFlowTriggerToScript = applyFlowTriggerToScript;
+		window.clearSelectedNodeLinks = clearSelectedNodeLinks;
+		window.startFlowLink = startFlowLink;
+		window.handleFlowNodeClick = handleFlowNodeClick;
 
 		window.addEventListener('click', (event) => {
 			const picker = document.getElementById('templatePicker');
