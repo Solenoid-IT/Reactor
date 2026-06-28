@@ -27,6 +27,10 @@ function usage() {
 	console.log('  node daemonctl.js delete <script-name>');
 	console.log('  node daemonctl.js set-name <reactor-name>');
 	console.log('  node daemonctl.js set-port <1-65535>');
+	console.log('  node daemonctl.js set-exchange exchange [port]');
+	console.log('  node daemonctl.js set-exchange client <host> [port]');
+	console.log('  node daemonctl.js set-exchange disabled');
+	console.log('  node daemonctl.js get-exchange');
 	console.log('  node daemonctl.js stop');
 	process.exit(1);
 }
@@ -165,6 +169,75 @@ async function main() {
 		}
 
 		console.log(response.message || 'Shutdown requested');
+		return;
+	}
+
+	if (command === 'get-exchange') {
+		const response = await sendCommand({ command: 'get-exchange' });
+		if (!response.ok) {
+			console.error(`[daemonctl] ${response.error || 'get-exchange failed'}`);
+			process.exit(1);
+		}
+		const ex = response.exchange || {};
+		console.log(`Mode:   ${ex.mode || 'disabled'}`);
+		console.log(`Host:   ${ex.host || '-'}`);
+		console.log(`Port:   ${ex.port || 7070}`);
+		console.log(`Active: ${ex.active ? 'yes' : 'no'}`);
+		if (Array.isArray(ex.connectedClients) && ex.connectedClients.length > 0) {
+			console.log(`Clients: ${ex.connectedClients.join(', ')}`);
+		}
+		return;
+	}
+
+	if (command === 'set-exchange') {
+		const mode = String(rest[0] || '').trim().toLowerCase();
+		if (!['disabled', 'exchange', 'client'].includes(mode)) {
+			console.error('[daemonctl] set-exchange: mode must be disabled, exchange or client');
+			usage();
+		}
+
+		let host = '';
+		let port = 7070;
+
+		if (mode === 'exchange') {
+			// set-exchange exchange [port]
+			if (rest[1]) {
+				port = Number(rest[1]);
+				if (!Number.isFinite(port) || port < 1 || port > 65535) {
+					console.error('[daemonctl] set-exchange: invalid port');
+					process.exit(1);
+				}
+			}
+		} else if (mode === 'client') {
+			// set-exchange client <host[:port]>  OR  <host> <port>
+			const hostArg = String(rest[1] || '').trim();
+			if (!hostArg) {
+				console.error('[daemonctl] set-exchange client: host is required');
+				usage();
+			}
+			if (hostArg.includes(':')) {
+				const parts = hostArg.split(':');
+				host = parts[0];
+				port = Number(parts[1]);
+			} else {
+				host = hostArg;
+				port = rest[2] ? Number(rest[2]) : 7070;
+			}
+			if (!host || !Number.isFinite(port) || port < 1 || port > 65535) {
+				console.error('[daemonctl] set-exchange client: invalid host or port');
+				process.exit(1);
+			}
+		}
+
+		const response = await sendCommand({ command: 'set-exchange', mode, host, port });
+		if (!response.ok) {
+			console.error(`[daemonctl] ${response.error || 'set-exchange failed'}`);
+			process.exit(1);
+		}
+		const ex = response.exchange || {};
+		console.log(`Exchange mode set: ${ex.mode}`);
+		if (ex.mode === 'client') console.log(`Exchange: ws://${ex.host}:${ex.port}`);
+		if (ex.mode === 'exchange') console.log(`Exchange server active on port: ${ex.port}`);
 		return;
 	}
 

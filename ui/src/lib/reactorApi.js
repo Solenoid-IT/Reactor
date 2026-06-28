@@ -429,3 +429,65 @@ export async function saveWorkflow(workflow) {
 	}
 	return bridge.saveWorkflow(workflow);
 }
+
+export async function getExchangeConfig() {
+	const bridge = getBridge();
+	if (bridge && bridge.getExchangeConfig) {
+		return bridge.getExchangeConfig();
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.getExchangeConfig) {
+		return mobile.getExchangeConfig();
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'getExchangeConfig');
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function setExchangeConfig(mode, host, port, tls = false) {
+	const bridge = getBridge();
+	if (bridge && bridge.setExchangeConfig) {
+		return bridge.setExchangeConfig(mode, host, port, tls);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.setExchangeConfig) {
+		return mobile.setExchangeConfig({ mode, host, port, tls });
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'setExchangeConfig', { mode, host, port, tls });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function getTlsConfig() {
+	const bridge = getBridge();
+	if (bridge && bridge.getTlsConfig) {
+		return bridge.getTlsConfig();
+	}
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function generateTlsCert() {
+	const bridge = getBridge();
+	if (bridge && bridge.generateTlsCert) {
+		return bridge.generateTlsCert();
+	}
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function deleteTlsCert() {
+	const bridge = getBridge();
+	if (bridge && bridge.deleteTlsCert) {
+		return bridge.deleteTlsCert();
+	}
+	return { ok: false, error: 'bridge unavailable' };
+}

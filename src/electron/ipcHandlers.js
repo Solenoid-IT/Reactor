@@ -59,6 +59,16 @@ function setupIpcHandlers(runtime) {
 			if (runtime && runtime.setHttpServerPort && Number(settings.httpServerPort)) {
 				await runtime.setHttpServerPort(Number(settings.httpServerPort));
 			}
+			if (runtime && runtime.setExchangeConfig && settings.exchangeMode && settings.exchangeMode !== 'disabled') {
+				await runtime
+					.setExchangeConfig(
+						settings.exchangeMode,
+						settings.exchangeHost || '',
+						Number(settings.exchangePort) || 7070,
+						Boolean(settings.exchangeTls),
+					)
+					.catch(() => {});
+			}
 		})
 		.catch(() => {
 			// Ignore settings bootstrap failures.
@@ -748,6 +758,68 @@ function setupIpcHandlers(runtime) {
 			await fs.mkdir(path.dirname(workflowPath), { recursive: true });
 			await fs.writeFile(workflowPath, `${JSON.stringify(safeWorkflow, null, 2)}\n`, 'utf8');
 			return { ok: true, workflow: safeWorkflow, path: workflowPath };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('get-exchange-config', async () => {
+		if (!runtime || !runtime.getExchangeConfig) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+		return { ok: true, config: runtime.getExchangeConfig() };
+	});
+
+	ipcMain.handle('set-exchange-config', async (_, { mode, host, port, tls }) => {
+		if (!runtime || !runtime.setExchangeConfig) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		const safeMode = String(mode || 'disabled');
+		const safeHost = String(host || '').trim();
+		const safePort = Number(port) > 0 ? Number(port) : 7070;
+		const safeTls = Boolean(tls);
+
+		try {
+			const config = await runtime.setExchangeConfig(safeMode, safeHost, safePort, safeTls);
+			await writeUiSettings({ exchangeMode: safeMode, exchangeHost: safeHost, exchangePort: safePort, exchangeTls: safeTls });
+			return { ok: true, config };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('get-tls-config', async () => {
+		if (!runtime || !runtime.getTlsConfig) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+		try {
+			const info = await runtime.getTlsConfig();
+			return { ok: true, tls: info };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('generate-tls-cert', async () => {
+		if (!runtime || !runtime.generateTlsCert) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+		try {
+			const info = await runtime.generateTlsCert();
+			return { ok: true, tls: info };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('delete-tls-cert', async () => {
+		if (!runtime || !runtime.deleteTlsCert) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+		try {
+			await runtime.deleteTlsCert();
+			return { ok: true };
 		} catch (error) {
 			return { ok: false, error: error.message };
 		}

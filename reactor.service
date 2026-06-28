@@ -19,5 +19,14 @@ TimeoutStopSec=15
 StandardOutput=journal
 StandardError=journal
 
+# --- Exchange config (opzionale, alternativa a exchange-config.json) ---
+# Per far funzionare questo nodo come EXCHANGE server:
+#Environment=REACTOR_EXCHANGE_MODE=exchange
+#
+# Per far funzionare questo nodo come CLIENT (sostituire con IP/porta dell'exchange):
+#Environment=REACTOR_EXCHANGE_MODE=client
+#Environment=REACTOR_EXCHANGE_HOST=192.168.1.10
+#Environment=REACTOR_EXCHANGE_PORT=7070
+
 [Install]
 WantedBy=multi-user.target

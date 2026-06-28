@@ -28,6 +28,11 @@
 		setReactorName,
 		getWorkflow,
 		saveWorkflow,
+		getExchangeConfig,
+		setExchangeConfig,
+		getTlsConfig,
+		generateTlsCert,
+		deleteTlsCert,
 	} from '$lib/reactorApi';
 
 	let scripts = [];
@@ -36,6 +41,16 @@
 	let defaultProgramPath = '';
 	let reactorName = '';
 	let httpPort = 7070;
+	let exchangeMode = 'disabled';
+	let exchangeHost = '';
+	let exchangePort = 7070;
+	let exchangeTls = false;
+	let exchangeActive = false;
+	let exchangeClients = [];
+	let tlsEnabled = false;
+	let tlsSubject = '';
+	let tlsNotAfter = '';
+	let tlsFingerprint = '';
 	let status = 'Ready';
 	let renameOpen = false;
 	let renameScriptPath = '';
@@ -79,11 +94,13 @@
 	$: selectedScript = selectedIndex >= 0 ? scripts[selectedIndex] : null;
 
 	async function refreshAll() {
-		const [info, settings, serverConfig, currentReactorName] = await Promise.all([
+		const [info, settings, serverConfig, currentReactorName, exchangeConfigResult, tlsConfigResult] = await Promise.all([
 			getScriptsInfo(),
 			getUiSettings(),
 			getHttpServerConfig(),
 			getReactorName(),
+			getExchangeConfig(),
+			getTlsConfig(),
 		]);
 
 		if (info?.ok === false) {
@@ -95,6 +112,30 @@
 		defaultProgramPath = settings?.defaultProgramPath || '';
 		httpPort = Number(serverConfig?.config?.port || settings?.httpServerPort || 7070);
 		reactorName = String(currentReactorName?.name || '');
+
+		if (tlsConfigResult?.ok && tlsConfigResult?.tls) {
+			const tls = tlsConfigResult.tls;
+			tlsEnabled = Boolean(tls.enabled);
+			tlsSubject = tls.subject || '';
+			tlsNotAfter = tls.notAfter || '';
+			tlsFingerprint = tls.fingerprint || '';
+		} else {
+			tlsEnabled = false;
+			tlsSubject = '';
+			tlsNotAfter = '';
+			tlsFingerprint = '';
+		}
+
+		if (exchangeConfigResult?.ok && exchangeConfigResult?.config) {
+			const ec = exchangeConfigResult.config;
+			exchangeMode = ec.mode || 'disabled';
+			exchangeHost = ec.host || '';
+			exchangePort = Number(ec.port) || 7070;
+			exchangeTls = Boolean(ec.tls);
+			exchangeActive = Boolean(ec.active);
+			exchangeClients = Array.isArray(ec.connectedClients) ? ec.connectedClients : [];
+		}
+
 		if (selectedIndex >= scripts.length) {
 			selectedIndex = -1;
 		}
@@ -297,6 +338,39 @@
 		status = result?.ok ? `Server status opened: ${result.url}` : `Error: ${result?.error || 'unknown'}`;
 	}
 
+	async function saveExchangeConfigValue(mode, host, port, tls) {
+		const numericPort = Number(port);
+		if (!Number.isFinite(numericPort) || numericPort < 1 || numericPort > 65535) {
+			status = 'Error: invalid Exchange port';
+			return;
+		}
+		const result = await setExchangeConfig(mode, host || '', numericPort, Boolean(tls));
+		status = result?.ok
+			? `Exchange config saved: mode=${mode}${Boolean(tls) ? ' (TLS)' : ''}`
+			: `Error: ${result?.error || 'unknown'}`;
+		await refreshAll();
+	}
+
+	async function generateTlsCertHandler() {
+		status = 'Generando certificato TLS...';
+		const result = await generateTlsCert();
+		status = result?.ok
+			? `Certificato generato: ${result.tls?.subject || 'OK'}`
+			: `Error: ${result?.error || 'unknown'}`;
+		await refreshAll();
+	}
+
+	async function deleteTlsCertHandler() {
+		const confirm = window.confirm('Sei sicuro di voler eliminare il certificato TLS?');
+		if (!confirm) return;
+		status = 'Eliminando certificato TLS...';
+		const result = await deleteTlsCert();
+		status = result?.ok ? 'Certificato eliminato' : `Error: ${result?.error || 'unknown'}`;
+		await refreshAll();
+	}
+		await refreshAll();
+	}
+
 	async function openLog(index) {
 		const script = scripts[index];
 		if (!script) {
@@ -442,10 +516,23 @@
 			{defaultProgramPath}
 			{reactorName}
 			{httpPort}
+			{tlsEnabled}
+			{tlsSubject}
+			{tlsNotAfter}
+			{tlsFingerprint}
+			{exchangeMode}
+			{exchangeHost}
+			{exchangePort}
+			{exchangeTls}
+			{exchangeActive}
+			{exchangeClients}
 			onSaveReactorName={saveReactorNameValue}
 			onSaveHttpServerData={saveHttpPortValue}
 			onOpenServerStatus={openServerStatusPage}
 			onOpenWorkflow={openWorkflowEditor}
+			onGenerateTlsCert={generateTlsCertHandler}
+			onDeleteTlsCert={deleteTlsCertHandler}
+			onSaveExchangeConfig={saveExchangeConfigValue}
 			{status}
 		/>
 	</main>

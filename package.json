@@ -38,7 +38,8 @@
   },
   "dependencies": {
     "@capacitor/core": "^8.4.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@capacitor/android": "^8.4.1",
@@ -62,7 +63,8 @@
       "ui/build/**/*",
       "assets/**/*",
       "reactor.service",
-      "package.json"
+      "package.json",
+      "node_modules/ws/**/*"
     ],
     "mac": {
       "icon": "assets/logo.icns",

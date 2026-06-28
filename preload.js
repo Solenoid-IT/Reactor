@@ -25,4 +25,9 @@ contextBridge.exposeInMainWorld('reactor', {
 	setReactorName: (name) => ipcRenderer.invoke('set-reactor-name', name),
 	getWorkflow: () => ipcRenderer.invoke('get-workflow'),
 	saveWorkflow: (workflow) => ipcRenderer.invoke('save-workflow', workflow),
+	getExchangeConfig: () => ipcRenderer.invoke('get-exchange-config'),
+	setExchangeConfig: (mode, host, port, tls) => ipcRenderer.invoke('set-exchange-config', { mode, host, port, tls }),
+	getTlsConfig: () => ipcRenderer.invoke('get-tls-config'),
+	generateTlsCert: () => ipcRenderer.invoke('generate-tls-cert'),
+	deleteTlsCert: () => ipcRenderer.invoke('delete-tls-cert'),
 });

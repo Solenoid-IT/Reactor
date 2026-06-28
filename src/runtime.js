@@ -9,6 +9,8 @@ const { loadScriptModule } = require('./scriptLoader');
 const { NetworkMonitor } = require('./networkMonitor');
 const { createNodePlatformServices } = require('./platform/nodePlatformServices');
 const { createNodeRuntimeApi } = require('./platform/nodeRuntimeApi');
+const { ExchangeManager } = require('./exchangeManager');
+const { TlsManager } = require('./tlsManager');
 
 const ALL_WATCH_LISTENERS = new Set([
 	'file:created',
@@ -187,6 +189,12 @@ class ReactorRuntime {
 		this.reactorRootDir = options.reactorRootDir || path.dirname(this.scriptsDir);
 		this.reactorNamePath = path.join(this.reactorRootDir, 'name');
 		this.cachedReactorName = null;
+		this.exchangeManager = new ExchangeManager(this);
+		this.exchangeMode = String(options.exchangeMode || process.env.REACTOR_EXCHANGE_MODE || 'disabled');
+		this.exchangeHost = String(options.exchangeHost || process.env.REACTOR_EXCHANGE_HOST || '');
+		this.exchangePort = Number(options.exchangePort || process.env.REACTOR_EXCHANGE_PORT || 7070);
+		this.tlsManager = new TlsManager(path.join(this.reactorRootDir, 'tls'));
+		this.tlsEnabled = false; // impostato da startHttpServer
 	}
 
 	addHttpServerLog(message) {
@@ -249,6 +257,46 @@ class ReactorRuntime {
 	getHttpServerLogs(limit = 100) {
 		const safeLimit = Number(limit) > 0 ? Number(limit) : 100;
 		return this.httpServerLogs.slice(-safeLimit);
+	}
+
+	getExchangeConfig() {
+		return this.exchangeManager.getConfig();
+	}
+
+	async getTlsConfig() {
+		return this.tlsManager.getCertInfo();
+	}
+
+	async generateTlsCert() {
+		const reactorName = await this.getReactorName();
+		const info = await this.tlsManager.generateCert(reactorName || 'reactor');
+		// Riavvia il server HTTP con TLS attivo
+		await this.restartHttpServer();
+		return info;
+	}
+
+	async deleteTlsCert() {
+		await this.tlsManager.deleteCert();
+		this.tlsEnabled = false;
+		await this.restartHttpServer();
+	}
+
+	async setExchangeConfig(mode, host, port, tls = false) {
+		const safeMode = String(mode || 'disabled');
+		const safeHost = String(host || '').trim();
+		const safePort = Number(port) > 0 ? Number(port) : 7070;
+		const safeTls = Boolean(tls);
+
+		if (!['disabled', 'exchange', 'client'].includes(safeMode)) {
+			throw new Error('modalità exchange non valida: usa disabled, exchange o client');
+		}
+
+		this.exchangeMode = safeMode;
+		this.exchangeHost = safeHost;
+		this.exchangePort = safePort;
+		this.exchangeManager.configure(safeMode, safeHost, safePort, safeTls);
+		await this.exchangeManager.start(this.httpServer);
+		return this.getExchangeConfig();
 	}
 
 	async setHttpServerPort(port) {
@@ -408,6 +456,19 @@ class ReactorRuntime {
 			const normalizedTarget = normalizedTargets[index];
 			const [host, portString] = normalizedTarget.split(':');
 			const port = Number(portString || 7070);
+			const isLast = index === normalizedTargets.length - 1;
+			const shortTimeout = isLast ? undefined : 2000;
+
+			// Se TLS abilitato localmente, tenta prima HTTPS (cert self-signed → rejectUnauthorized: false)
+			if (this.tlsEnabled) {
+				try {
+					const result = await this._sendHttpsMessage(host, port, payload, contentType, reactorName, senderId, extraHeaders, shortTimeout || 3000);
+					return { target: normalizedTarget, endpoint: `https://${host}:${port}/message`, ...result };
+				} catch {
+					// Fallback a HTTP
+				}
+			}
+
 			const endpoint = `http://${host}:${port}/message`;
 			const request = new this.runtimeApi.HttpClient.Request({
 				url: endpoint,
@@ -422,11 +483,7 @@ class ReactorRuntime {
 			});
 
 			try {
-				const shouldUseShortTimeout = index < normalizedTargets.length - 1;
-				const response = await this.runtimeApi.HttpClient.sendRequest(
-					request,
-					shouldUseShortTimeout ? 2000 : undefined,
-				);
+				const response = await this.runtimeApi.HttpClient.sendRequest(request, shortTimeout);
 				return {
 					target: normalizedTarget,
 					endpoint,
@@ -440,10 +497,70 @@ class ReactorRuntime {
 		}
 
 		if (lastError) {
+			// Fallback via Exchange se siamo in modalità client
+			if (this.exchangeMode === 'client') {
+				try {
+					await this.exchangeManager.sendViaExchange(targetId, content);
+					return { target: targetId, endpoint: 'exchange', status: 200 };
+				} catch (exchangeError) {
+					throw new Error(
+						`direct failed (${lastError.message}); exchange failed (${exchangeError.message})`,
+					);
+				}
+			}
 			throw lastError;
 		}
 
+		// Se nessun target diretto era disponibile e siamo in modalità client, prova exchange
+		if (this.exchangeMode === 'client') {
+			try {
+				await this.exchangeManager.sendViaExchange(targetId, content);
+				return { target: targetId, endpoint: 'exchange', status: 200 };
+			} catch (exchangeError) {
+				throw new Error(`exchange failed: ${exchangeError.message}`);
+			}
+		}
+
 		throw new Error('failed to dispatch node message');
+	}
+
+	/**
+	 * Invia una richiesta HTTPS a /message con rejectUnauthorized: false
+	 * (supporta certificati self-signed).
+	 */
+	_sendHttpsMessage(host, port, payload, contentType, reactorName, senderId, extraHeaders, timeoutMs = 5000) {
+		return new Promise((resolve, reject) => {
+			const https = require('https');
+			const body = Buffer.isBuffer(payload)
+				? payload
+				: Buffer.from(typeof payload === 'string' ? payload : JSON.stringify(payload) ?? '', 'utf8');
+
+			const options = {
+				hostname: host,
+				port,
+				path: '/message',
+				method: 'POST',
+				rejectUnauthorized: false, // accetta self-signed
+				headers: {
+					'content-type': contentType,
+					'content-length': String(body.length),
+					'Reactor-Name': reactorName || '',
+					'Reactor-Sender': senderId || '',
+					...extraHeaders,
+				},
+			};
+
+			const req = https.request(options, (res) => {
+				let data = '';
+				res.on('data', (chunk) => { data += chunk; });
+				res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+			});
+
+			req.setTimeout(timeoutMs, () => req.destroy(new Error('HTTPS request timeout')));
+			req.on('error', reject);
+			req.write(body);
+			req.end();
+		});
 	}
 
 	createScriptCoreApi(scriptName) {
@@ -580,20 +697,33 @@ class ReactorRuntime {
 			return;
 		}
 
-		await new Promise((resolve, reject) => {
-			const server = http.createServer((req, res) => {
-				this.handleHttpRequest(req, res).catch((error) => {
-					this.addHttpServerLog(`request handling failed: ${error.message}`);
-					res.writeHead(500, { 'content-type': 'application/json' });
-					res.end(JSON.stringify({ ok: false, error: 'internal server error' }));
-				});
+		const requestHandler = (req, res) => {
+			this.handleHttpRequest(req, res).catch((error) => {
+				this.addHttpServerLog(`request handling failed: ${error.message}`);
+				res.writeHead(500, { 'content-type': 'application/json' });
+				res.end(JSON.stringify({ ok: false, error: 'internal server error' }));
 			});
+		};
+
+		// Tenta di usare HTTPS se esiste un certificato TLS
+		const tlsCert = await this.tlsManager.loadCert();
+
+		await new Promise((resolve, reject) => {
+			let server;
+			if (tlsCert) {
+				const https = require('https');
+				server = https.createServer({ cert: tlsCert.cert, key: tlsCert.key }, requestHandler);
+			} else {
+				server = http.createServer(requestHandler);
+			}
 
 			server.once('error', reject);
 			server.listen(this.httpServerPort, () => {
 				server.off('error', reject);
 				this.httpServer = server;
-				this.addHttpServerLog(`listening on port ${this.httpServerPort}`);
+				this.tlsEnabled = Boolean(tlsCert);
+				const proto = tlsCert ? 'HTTPS' : 'HTTP';
+				this.addHttpServerLog(`listening on port ${this.httpServerPort} (${proto})`);
 				resolve();
 			});
 		});
@@ -684,6 +814,12 @@ class ReactorRuntime {
 		await this.startHttpServer();
 		this.setupScriptsWatcher();
 		this.setupNetworkWatcher();
+		if (this.exchangeMode !== 'disabled') {
+			this.exchangeManager.configure(this.exchangeMode, this.exchangeHost, this.exchangePort);
+			await this.exchangeManager.start(this.httpServer).catch((err) => {
+				this.log(`[Exchange] Avvio fallito: ${err.message}`);
+			});
+		}
 		await this.emitEvent('BOOT');
 	}
 

@@ -15,9 +15,13 @@ async function readUiSettings() {
 		return {
 			defaultProgramPath: parsed.defaultProgramPath || '',
 			httpServerPort: Number(parsed.httpServerPort) || 7070,
+			exchangeMode: parsed.exchangeMode || 'disabled',
+			exchangeHost: parsed.exchangeHost || '',
+			exchangePort: Number(parsed.exchangePort) || 7070,
+			exchangeTls: Boolean(parsed.exchangeTls),
 		};
 	} catch (error) {
-		return { defaultProgramPath: '', httpServerPort: 7070 };
+		return { defaultProgramPath: '', httpServerPort: 7070, exchangeMode: 'disabled', exchangeHost: '', exchangePort: 7070, exchangeTls: false };
 	}
 }
 

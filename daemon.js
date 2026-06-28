@@ -171,6 +171,19 @@ async function createControlServer(runtime, socketPath, onStopRequested) {
 						const config = await runtime.setHttpServerPort(numericPort);
 						response = { ok: true, port: config.port };
 					}
+				} else if (command === 'set-exchange') {
+					const mode = String(payload.mode || 'disabled');
+					const host = String(payload.host || '').trim();
+					const port = Number(payload.port) > 0 ? Number(payload.port) : 7070;
+					if (!['disabled', 'exchange', 'client'].includes(mode)) {
+						response = { ok: false, error: 'invalid mode: use disabled, exchange or client' };
+					} else {
+						const config = await runtime.setExchangeConfig(mode, host, port);
+						await saveExchangeConfig(mode, host, port);
+						response = { ok: true, exchange: config };
+					}
+				} else if (command === 'get-exchange') {
+					response = { ok: true, exchange: runtime.getExchangeConfig() };
 				} else if (command === 'delete') {
 					await runtime.reloadScripts('daemonctl-delete-script-preload');
 					const script = findScriptByName(runtime, payload.name);
@@ -227,12 +240,49 @@ async function main() {
 	const scriptsDir = process.env.REACTOR_SCRIPTS_DIR || path.join(dataDir, 'projects');
 	const eventLogPath = process.env.REACTOR_EVENT_LOG_PATH || path.join(dataDir, 'activity.log');
 	const daemonSocketPath = getDaemonSocketPath(dataDir);
+	const exchangeConfigPath = path.join(dataDir, 'exchange-config.json');
 
 	await fs.mkdir(dataDir, { recursive: true });
 	await fs.mkdir(scriptsDir, { recursive: true });
 	await fs.mkdir(path.dirname(eventLogPath), { recursive: true });
 
-	const runtime = new ReactorRuntime(scriptsDir, eventLogPath);
+	// Carica la configurazione exchange (env vars hanno priorità > file > default)
+	async function loadExchangeConfig() {
+		// Env vars hanno la priorità massima
+		if (process.env.REACTOR_EXCHANGE_MODE) {
+			return {
+				mode: process.env.REACTOR_EXCHANGE_MODE,
+				host: process.env.REACTOR_EXCHANGE_HOST || '',
+				port: Number(process.env.REACTOR_EXCHANGE_PORT) || 7070,
+			};
+		}
+		try {
+			const raw = await fs.readFile(exchangeConfigPath, 'utf8');
+			const parsed = JSON.parse(raw);
+			return {
+				mode: String(parsed.mode || 'disabled'),
+				host: String(parsed.host || ''),
+				port: Number(parsed.port) > 0 ? Number(parsed.port) : 7070,
+			};
+		} catch {
+			return { mode: 'disabled', host: '', port: 7070 };
+		}
+	}
+
+	async function saveExchangeConfig(mode, host, port) {
+		const cfg = { mode, host, port };
+		await fs.mkdir(dataDir, { recursive: true });
+		await fs.writeFile(exchangeConfigPath, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+	}
+
+	const exchangeCfg = await loadExchangeConfig();
+
+	const runtime = new ReactorRuntime(scriptsDir, eventLogPath, {
+		reactorRootDir: dataDir,
+		exchangeMode: exchangeCfg.mode,
+		exchangeHost: exchangeCfg.host,
+		exchangePort: exchangeCfg.port,
+	});
 	let controlServer = null;
 	let isShuttingDown = false;
 
