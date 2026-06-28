@@ -27,12 +27,36 @@ function usage() {
 	console.log('  node daemonctl.js delete <script-name>');
 	console.log('  node daemonctl.js set-name <reactor-name>');
 	console.log('  node daemonctl.js set-port <1-65535>');
-	console.log('  node daemonctl.js set-exchange exchange [port]');
-	console.log('  node daemonctl.js set-exchange client <host> [port]');
-	console.log('  node daemonctl.js set-exchange disabled');
+	console.log('  node daemonctl.js set-exchange exchange [port] [--tls] [--token <token>]');
+	console.log('  node daemonctl.js set-exchange node <host> [port] [--tls] [--token <token>]');
 	console.log('  node daemonctl.js get-exchange');
+	console.log('  node daemonctl.js get-exchange-token');
+	console.log('  node daemonctl.js generate-exchange-token');
 	console.log('  node daemonctl.js stop');
 	process.exit(1);
+}
+
+function extractExchangeFlags(args) {
+	const values = [...args];
+	let tls = false;
+	let token = '';
+
+	for (let index = 0; index < values.length; index += 1) {
+		const value = String(values[index] || '').trim();
+		if (value === '--tls') {
+			tls = true;
+			values.splice(index, 1);
+			index -= 1;
+			continue;
+		}
+		if (value === '--token') {
+			token = String(values[index + 1] || '').trim();
+			values.splice(index, 2);
+			index -= 1;
+		}
+	}
+
+	return { args: values, tls, token };
 }
 
 async function sendCommand(payload) {
@@ -182,17 +206,45 @@ async function main() {
 		console.log(`Mode:   ${ex.mode || 'disabled'}`);
 		console.log(`Host:   ${ex.host || '-'}`);
 		console.log(`Port:   ${ex.port || 7070}`);
+		console.log(`TLS:    ${ex.tls ? 'yes' : 'no'}`);
 		console.log(`Active: ${ex.active ? 'yes' : 'no'}`);
+		console.log(`Token:  ${ex.token ? 'configured' : 'missing'}`);
 		if (Array.isArray(ex.connectedClients) && ex.connectedClients.length > 0) {
 			console.log(`Clients: ${ex.connectedClients.join(', ')}`);
 		}
 		return;
 	}
 
+	if (command === 'get-exchange-token') {
+		const response = await sendCommand({ command: 'get-exchange-token' });
+		if (!response.ok) {
+			console.error(`[daemonctl] ${response.error || 'get-exchange-token failed'}`);
+			process.exit(1);
+		}
+		const token = response.exchangeToken || {};
+		console.log(`Path:   ${token.path || '-'}`);
+		console.log(`Exists: ${token.exists ? 'yes' : 'no'}`);
+		console.log(`Token:  ${token.token || ''}`);
+		return;
+	}
+
+	if (command === 'generate-exchange-token') {
+		const response = await sendCommand({ command: 'generate-exchange-token' });
+		if (!response.ok) {
+			console.error(`[daemonctl] ${response.error || 'generate-exchange-token failed'}`);
+			process.exit(1);
+		}
+		const token = response.exchangeToken || {};
+		console.log(`Generated token at: ${token.path || '-'}`);
+		console.log(token.token || '');
+		return;
+	}
+
 	if (command === 'set-exchange') {
-		const mode = String(rest[0] || '').trim().toLowerCase();
-		if (!['disabled', 'exchange', 'client'].includes(mode)) {
-			console.error('[daemonctl] set-exchange: mode must be disabled, exchange or client');
+		const parsed = extractExchangeFlags(rest);
+		const mode = String(parsed.args[0] || '').trim().toLowerCase();
+		if (!['node', 'exchange'].includes(mode)) {
+			console.error('[daemonctl] set-exchange: mode must be node or exchange');
 			usage();
 		}
 
@@ -201,18 +253,18 @@ async function main() {
 
 		if (mode === 'exchange') {
 			// set-exchange exchange [port]
-			if (rest[1]) {
-				port = Number(rest[1]);
+			if (parsed.args[1]) {
+				port = Number(parsed.args[1]);
 				if (!Number.isFinite(port) || port < 1 || port > 65535) {
 					console.error('[daemonctl] set-exchange: invalid port');
 					process.exit(1);
 				}
 			}
-		} else if (mode === 'client') {
-			// set-exchange client <host[:port]>  OR  <host> <port>
-			const hostArg = String(rest[1] || '').trim();
+		} else if (mode === 'node') {
+			// set-exchange node <host[:port]>  OR  <host> <port>
+			const hostArg = String(parsed.args[1] || '').trim();
 			if (!hostArg) {
-				console.error('[daemonctl] set-exchange client: host is required');
+				console.error('[daemonctl] set-exchange node: host is required');
 				usage();
 			}
 			if (hostArg.includes(':')) {
@@ -221,23 +273,25 @@ async function main() {
 				port = Number(parts[1]);
 			} else {
 				host = hostArg;
-				port = rest[2] ? Number(rest[2]) : 7070;
+				port = parsed.args[2] ? Number(parsed.args[2]) : 7070;
 			}
 			if (!host || !Number.isFinite(port) || port < 1 || port > 65535) {
-				console.error('[daemonctl] set-exchange client: invalid host or port');
+				console.error('[daemonctl] set-exchange node: invalid host or port');
 				process.exit(1);
 			}
 		}
 
-		const response = await sendCommand({ command: 'set-exchange', mode, host, port });
+		const response = await sendCommand({ command: 'set-exchange', mode, host, port, tls: parsed.tls, token: parsed.token });
 		if (!response.ok) {
 			console.error(`[daemonctl] ${response.error || 'set-exchange failed'}`);
 			process.exit(1);
 		}
 		const ex = response.exchange || {};
 		console.log(`Exchange mode set: ${ex.mode}`);
-		if (ex.mode === 'client') console.log(`Exchange: ws://${ex.host}:${ex.port}`);
+		if (ex.mode === 'node') console.log(`Exchange: ${ex.tls ? 'wss' : 'ws'}://${ex.host}:${ex.port}`);
 		if (ex.mode === 'exchange') console.log(`Exchange server active on port: ${ex.port}`);
+		console.log(`TLS: ${ex.tls ? 'enabled' : 'disabled'}`);
+		if (ex.token) console.log('Token: configured');
 		return;
 	}
 

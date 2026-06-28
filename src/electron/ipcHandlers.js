@@ -59,13 +59,14 @@ function setupIpcHandlers(runtime) {
 			if (runtime && runtime.setHttpServerPort && Number(settings.httpServerPort)) {
 				await runtime.setHttpServerPort(Number(settings.httpServerPort));
 			}
-			if (runtime && runtime.setExchangeConfig && settings.exchangeMode && settings.exchangeMode === 'exchange') {
+			if (runtime && runtime.setExchangeConfig && settings.exchangeMode) {
 				await runtime
 					.setExchangeConfig(
 						settings.exchangeMode,
 						settings.exchangeHost || '',
 						Number(settings.exchangePort) || 7070,
 						Boolean(settings.exchangeTls),
+						settings.exchangeToken || '',
 					)
 					.catch(() => {});
 			}
@@ -770,20 +771,46 @@ function setupIpcHandlers(runtime) {
 		return { ok: true, config: runtime.getExchangeConfig() };
 	});
 
-	ipcMain.handle('set-exchange-config', async (_, { mode, host, port, tls }) => {
+	ipcMain.handle('set-exchange-config', async (_, { mode, host, port, tls, token }) => {
 		if (!runtime || !runtime.setExchangeConfig) {
 			return { ok: false, error: 'runtime not ready' };
 		}
 
-		const safeMode = String(mode || 'disabled');
+		const safeMode = String(mode || 'node');
 		const safeHost = String(host || '').trim();
 		const safePort = Number(port) > 0 ? Number(port) : 7070;
 		const safeTls = Boolean(tls);
+		const safeToken = String(token || '').trim();
 
 		try {
-			const config = await runtime.setExchangeConfig(safeMode, safeHost, safePort, safeTls);
-			await writeUiSettings({ exchangeMode: safeMode, exchangeHost: safeHost, exchangePort: safePort, exchangeTls: safeTls });
+			const config = await runtime.setExchangeConfig(safeMode, safeHost, safePort, safeTls, safeToken);
+			await writeUiSettings({ exchangeMode: safeMode, exchangeHost: safeHost, exchangePort: safePort, exchangeTls: safeTls, exchangeToken: safeToken });
 			return { ok: true, config };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('get-exchange-token', async () => {
+		if (!runtime || !runtime.getExchangeToken) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+		try {
+			const token = await runtime.getExchangeToken();
+			return { ok: true, exchangeToken: token };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('generate-exchange-token', async () => {
+		if (!runtime || !runtime.generateExchangeToken) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+		try {
+			const token = await runtime.generateExchangeToken();
+			await writeUiSettings({ exchangeToken: token.token || '' });
+			return { ok: true, exchangeToken: token };
 		} catch (error) {
 			return { ok: false, error: error.message };
 		}

@@ -66,6 +66,20 @@
 	box-shadow: 0 0 0 0.2rem rgba(193, 84, 103, 0.28);
 }
 
+.input-invalid
+{
+	border-color: #c15467 !important;
+	box-shadow: 0 0 0 0.2rem rgba(193, 84, 103, 0.28) !important;
+	background-color: #1a151a !important;
+}
+
+.input-invalid:focus,
+.input-invalid:focus-visible
+{
+	border-color: #c15467 !important;
+	box-shadow: 0 0 0 0.2rem rgba(193, 84, 103, 0.35) !important;
+}
+
 .input:valid
 {
 	border-color: #3b8a62;
@@ -89,4 +103,22 @@ fieldset legend
     float: none;
     font-size: 14px;
     color: var( --muted );
+}
+
+button,
+.btn
+{
+	--button-focus-color: var(--primary-color, var(--accent, #2e8a61));
+	--button-focus-rgb: var(--primary-color-rgb, 46, 138, 97);
+	--bs-btn-focus-shadow-rgb: var(--button-focus-rgb);
+}
+
+button:focus,
+button:focus-visible,
+.btn:focus,
+.btn:focus-visible
+{
+	outline: none;
+	border-color: var(--button-focus-color);
+	box-shadow: 0 0 0 0.2rem rgba(var(--button-focus-rgb), 0.35) !important;
 }

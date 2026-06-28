@@ -449,18 +449,56 @@ export async function getExchangeConfig() {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
-export async function setExchangeConfig(mode, host, port, tls = false) {
+export async function setExchangeConfig(mode, host, port, tls = false, token = '') {
 	const bridge = getBridge();
 	if (bridge && bridge.setExchangeConfig) {
-		return bridge.setExchangeConfig(mode, host, port, tls);
+		return bridge.setExchangeConfig(mode, host, port, tls, token);
 	}
 
 	const mobile = getMobilePlugin();
 	if (mobile && mobile.setExchangeConfig) {
-		return mobile.setExchangeConfig({ mode, host, port, tls });
+		return mobile.setExchangeConfig({ mode, host, port, tls, token });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'setExchangeConfig', { mode, host, port, tls });
+	const nativeResult = await invokeNative('ReactorMobile', 'setExchangeConfig', { mode, host, port, tls, token });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function getExchangeToken() {
+	const bridge = getBridge();
+	if (bridge && bridge.getExchangeToken) {
+		return bridge.getExchangeToken();
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.getExchangeToken) {
+		return mobile.getExchangeToken();
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'getExchangeToken');
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function generateExchangeToken() {
+	const bridge = getBridge();
+	if (bridge && bridge.generateExchangeToken) {
+		return bridge.generateExchangeToken();
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.generateExchangeToken) {
+		return mobile.generateExchangeToken();
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'generateExchangeToken');
 	if (nativeResult) {
 		return nativeResult;
 	}

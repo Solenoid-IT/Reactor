@@ -30,6 +30,8 @@
 		saveWorkflow,
 		getExchangeConfig,
 		setExchangeConfig,
+		getExchangeToken,
+		generateExchangeToken,
 		getTlsConfig,
 		generateTlsCert,
 		deleteTlsCert,
@@ -45,6 +47,7 @@
 	let exchangeHost = '';
 	let exchangePort = 7070;
 	let exchangeTls = false;
+	let exchangeToken = '';
 	let exchangeActive = false;
 	let exchangeClients = [];
 	let tlsEnabled = false;
@@ -94,12 +97,13 @@
 	$: selectedScript = selectedIndex >= 0 ? scripts[selectedIndex] : null;
 
 	async function refreshAll() {
-		const [info, settings, serverConfig, currentReactorName, exchangeConfigResult, tlsConfigResult] = await Promise.all([
+		const [info, settings, serverConfig, currentReactorName, exchangeConfigResult, exchangeTokenResult, tlsConfigResult] = await Promise.all([
 			getScriptsInfo(),
 			getUiSettings(),
 			getHttpServerConfig(),
 			getReactorName(),
 			getExchangeConfig(),
+			getExchangeToken(),
 			getTlsConfig(),
 		]);
 
@@ -132,8 +136,13 @@
 			exchangeHost = ec.host || '';
 			exchangePort = Number(ec.port) || 7070;
 			exchangeTls = Boolean(ec.tls);
+			exchangeToken = ec.token || '';
 			exchangeActive = Boolean(ec.active);
 			exchangeClients = Array.isArray(ec.connectedClients) ? ec.connectedClients : [];
+		}
+
+		if (exchangeTokenResult?.ok && exchangeTokenResult?.exchangeToken?.token) {
+			exchangeToken = exchangeTokenResult.exchangeToken.token;
 		}
 
 		if (selectedIndex >= scripts.length) {
@@ -338,16 +347,23 @@
 		status = result?.ok ? `Server status opened: ${result.url}` : `Error: ${result?.error || 'unknown'}`;
 	}
 
-	async function saveExchangeConfigValue(mode, host, port, tls) {
+	async function saveExchangeConfigValue(mode, host, port, tls, token) {
 		const numericPort = Number(port);
 		if (!Number.isFinite(numericPort) || numericPort < 1 || numericPort > 65535) {
 			status = 'Error: invalid Exchange port';
 			return;
 		}
-		const result = await setExchangeConfig(mode, host || '', numericPort, Boolean(tls));
+		const result = await setExchangeConfig(mode, host || '', numericPort, Boolean(tls), token || '');
 		status = result?.ok
 			? `Exchange config saved: mode=${mode}${Boolean(tls) ? ' (TLS)' : ''}`
 			: `Error: ${result?.error || 'unknown'}`;
+		await refreshAll();
+	}
+
+	async function generateExchangeTokenHandler() {
+		status = 'Generando token Exchange...';
+		const result = await generateExchangeToken();
+		status = result?.ok ? 'Token Exchange generato' : `Error: ${result?.error || 'unknown'}`;
 		await refreshAll();
 	}
 
@@ -522,6 +538,7 @@
 			{exchangeHost}
 			{exchangePort}
 			{exchangeTls}
+			{exchangeToken}
 			{exchangeActive}
 			{exchangeClients}
 			onSaveReactorName={saveReactorNameValue}
@@ -530,6 +547,7 @@
 			onOpenWorkflow={openWorkflowEditor}
 			onGenerateTlsCert={generateTlsCertHandler}
 			onDeleteTlsCert={deleteTlsCertHandler}
+			onGenerateExchangeToken={generateExchangeTokenHandler}
 			onSaveExchangeConfig={saveExchangeConfigValue}
 			{status}
 		/>

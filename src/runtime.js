@@ -1,8 +1,10 @@
 const fs = require('fs/promises');
 const fsNative = require('fs');
+const crypto = require('crypto');
 const http = require('http');
 const os = require('os');
 const path = require('path');
+const { readWorkingModeConfig, writeWorkingModeConfig } = require('./workingModeConfig');
 const { parseScheduleExpression } = require('./scheduleParser');
 const { parseScriptMetadata } = require('./metadata');
 const { loadScriptModule } = require('./scriptLoader');
@@ -193,6 +195,9 @@ class ReactorRuntime {
 		this.exchangeMode = String(options.exchangeMode || process.env.REACTOR_EXCHANGE_MODE || 'node');
 		this.exchangeHost = String(options.exchangeHost || process.env.REACTOR_EXCHANGE_HOST || '');
 		this.exchangePort = Number(options.exchangePort || process.env.REACTOR_EXCHANGE_PORT || 7070);
+		this.exchangeTls = Boolean(options.exchangeTls || process.env.REACTOR_EXCHANGE_TLS === '1' || process.env.REACTOR_EXCHANGE_TLS === 'true');
+		this.exchangeAuthToken = String(options.exchangeToken || process.env.REACTOR_EXCHANGE_TOKEN || '');
+		this.workingModeConfigPath = path.join(this.reactorRootDir, 'working-mode.json');
 		this.tlsManager = new TlsManager(path.join(this.reactorRootDir, 'tls'));
 		this.tlsEnabled = false; // impostato da startHttpServer
 	}
@@ -260,7 +265,42 @@ class ReactorRuntime {
 	}
 
 	getExchangeConfig() {
-		return this.exchangeManager.getConfig();
+		const config = this.exchangeManager.getConfig();
+		return {
+			...config,
+			mode: this.exchangeMode,
+			host: this.exchangeHost,
+			port: this.exchangePort,
+			token: this.exchangeAuthToken,
+		};
+	}
+
+	async getExchangeToken() {
+		const config = await readWorkingModeConfig(this.workingModeConfigPath);
+		const token = String(config.token || '').trim();
+		return {
+			exists: Boolean(token),
+			token,
+			path: this.workingModeConfigPath,
+		};
+	}
+
+	async generateExchangeToken() {
+		const token = crypto.randomBytes(32).toString('base64url');
+		await fs.mkdir(path.dirname(this.workingModeConfigPath), { recursive: true });
+		await writeWorkingModeConfig(this.workingModeConfigPath, {
+			type: this.exchangeMode,
+			host: this.exchangeHost,
+			port: this.exchangePort,
+			tls: this.exchangeTls,
+			token,
+		});
+		this.exchangeAuthToken = token;
+		return {
+			exists: true,
+			token,
+			path: this.workingModeConfigPath,
+		};
 	}
 
 	async getTlsConfig() {
@@ -281,20 +321,25 @@ class ReactorRuntime {
 		await this.restartHttpServer();
 	}
 
-	async setExchangeConfig(mode, host, port, tls = false) {
-		const safeMode = String(mode || 'disabled');
+	async setExchangeConfig(mode, host, port, tls = false, token = '') {
+		const requestedMode = String(mode || 'node').trim().toLowerCase();
 		const safeHost = String(host || '').trim();
 		const safePort = Number(port) > 0 ? Number(port) : 7070;
 		const safeTls = Boolean(tls);
+		const safeToken = String(token || '').trim();
+		const safeMode = requestedMode === 'client' ? 'node' : requestedMode === 'disabled' ? 'node' : requestedMode;
+		const internalMode = safeMode === 'exchange' ? 'exchange' : 'client';
 
-		if (!['disabled', 'exchange', 'client'].includes(safeMode)) {
-			throw new Error('modalità exchange non valida: usa disabled, exchange o client');
+		if (!['node', 'exchange'].includes(safeMode)) {
+			throw new Error('modalità exchange non valida: usa node o exchange');
 		}
 
 		this.exchangeMode = safeMode;
 		this.exchangeHost = safeHost;
 		this.exchangePort = safePort;
-		this.exchangeManager.configure(safeMode, safeHost, safePort, safeTls);
+		this.exchangeTls = safeTls;
+		this.exchangeAuthToken = safeToken;
+		this.exchangeManager.configure(internalMode, safeHost, safePort, safeTls);
 		await this.exchangeManager.start(this.httpServer);
 		return this.getExchangeConfig();
 	}
@@ -794,8 +839,9 @@ class ReactorRuntime {
 		await this.startHttpServer();
 		this.setupScriptsWatcher();
 		this.setupNetworkWatcher();
-		if (this.exchangeMode === 'exchange') {
-			this.exchangeManager.configure(this.exchangeMode, this.exchangeHost, this.exchangePort);
+		if (this.exchangeMode === 'exchange' || this.exchangeMode === 'node') {
+			const internalMode = this.exchangeMode === 'exchange' ? 'exchange' : 'client';
+			this.exchangeManager.configure(internalMode, this.exchangeHost, this.exchangePort, this.exchangeTls);
 			await this.exchangeManager.start(this.httpServer).catch((err) => {
 				this.log(`[Exchange] Avvio fallito: ${err.message}`);
 			});

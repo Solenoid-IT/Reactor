@@ -29,6 +29,11 @@ function printHelp() {
 	console.log('  reactor-cli build mobile');
 	console.log('  reactor-cli build all');
 	console.log('  reactor-cli plugin build <pluginDir>');
+	console.log('  reactor-cli exchange get');
+	console.log('  reactor-cli exchange set exchange [port] [--tls] [--token <token>]');
+	console.log('  reactor-cli exchange set node <host> [port] [--tls] [--token <token>]');
+	console.log('  reactor-cli exchange token get');
+	console.log('  reactor-cli exchange token generate');
 }
 
 async function build(target) {
@@ -59,8 +64,12 @@ async function buildPlugin(pluginDir) {
 	await run('npm', ['pack', pluginDir]);
 }
 
+async function runDaemonCtl(args = []) {
+	await run(process.execPath, ['daemonctl.js', ...args]);
+}
+
 async function main() {
-	const [, , command, subcommand, arg] = process.argv;
+	const [, , command, subcommand, arg, ...rest] = process.argv;
 
 	if (!command) {
 		printHelp();
@@ -74,6 +83,26 @@ async function main() {
 
 	if (command === 'plugin' && subcommand === 'build') {
 		await buildPlugin(arg);
+		return;
+	}
+
+	if (command === 'exchange' && subcommand === 'get') {
+		await runDaemonCtl(['get-exchange']);
+		return;
+	}
+
+	if (command === 'exchange' && subcommand === 'set') {
+		await runDaemonCtl(['set-exchange', arg, ...rest]);
+		return;
+	}
+
+	if (command === 'exchange' && subcommand === 'token' && arg === 'get') {
+		await runDaemonCtl(['get-exchange-token']);
+		return;
+	}
+
+	if (command === 'exchange' && subcommand === 'token' && arg === 'generate') {
+		await runDaemonCtl(['generate-exchange-token']);
 		return;
 	}
 

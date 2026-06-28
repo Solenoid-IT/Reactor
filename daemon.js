@@ -4,6 +4,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { ReactorRuntime } = require('./src/runtime');
+const { readWorkingModeConfig, writeWorkingModeConfig } = require('./src/workingModeConfig');
 
 function getDefaultDataDir() {
 	switch (process.platform) {
@@ -172,16 +173,24 @@ async function createControlServer(runtime, socketPath, onStopRequested) {
 						response = { ok: true, port: config.port };
 					}
 				} else if (command === 'set-exchange') {
-					const mode = String(payload.mode || 'disabled');
+					const mode = String(payload.mode || 'node');
 					const host = String(payload.host || '').trim();
 					const port = Number(payload.port) > 0 ? Number(payload.port) : 7070;
-					if (!['disabled', 'exchange', 'client'].includes(mode)) {
-						response = { ok: false, error: 'invalid mode: use disabled, exchange or client' };
+					const tls = Boolean(payload.tls);
+					const token = String(payload.token || '').trim();
+					if (!['node', 'exchange'].includes(mode)) {
+						response = { ok: false, error: 'invalid mode: use node or exchange' };
 					} else {
-						const config = await runtime.setExchangeConfig(mode, host, port);
-						await saveExchangeConfig(mode, host, port);
+						const config = await runtime.setExchangeConfig(mode, host, port, tls, token);
+						await saveExchangeConfig(mode, host, port, tls, token);
 						response = { ok: true, exchange: config };
 					}
+				} else if (command === 'get-exchange-token') {
+					response = { ok: true, exchangeToken: await runtime.getExchangeToken() };
+				} else if (command === 'generate-exchange-token') {
+					const exchangeToken = await runtime.generateExchangeToken();
+					await saveExchangeConfig(runtime.exchangeMode, runtime.exchangeHost, runtime.exchangePort, runtime.exchangeManager.tls, exchangeToken.token);
+					response = { ok: true, exchangeToken };
 				} else if (command === 'get-exchange') {
 					response = { ok: true, exchange: runtime.getExchangeConfig() };
 				} else if (command === 'delete') {
@@ -240,7 +249,7 @@ async function main() {
 	const scriptsDir = process.env.REACTOR_SCRIPTS_DIR || path.join(dataDir, 'projects');
 	const eventLogPath = process.env.REACTOR_EVENT_LOG_PATH || path.join(dataDir, 'activity.log');
 	const daemonSocketPath = getDaemonSocketPath(dataDir);
-	const exchangeConfigPath = path.join(dataDir, 'exchange-config.json');
+	const workingModeConfigPath = path.join(dataDir, 'working-mode.json');
 
 	await fs.mkdir(dataDir, { recursive: true });
 	await fs.mkdir(scriptsDir, { recursive: true });
@@ -254,25 +263,33 @@ async function main() {
 				mode: process.env.REACTOR_EXCHANGE_MODE,
 				host: process.env.REACTOR_EXCHANGE_HOST || '',
 				port: Number(process.env.REACTOR_EXCHANGE_PORT) || 7070,
+				tls: process.env.REACTOR_EXCHANGE_TLS === '1' || process.env.REACTOR_EXCHANGE_TLS === 'true',
+				token: process.env.REACTOR_EXCHANGE_TOKEN || '',
 			};
 		}
 		try {
-			const raw = await fs.readFile(exchangeConfigPath, 'utf8');
-			const parsed = JSON.parse(raw);
+			const parsed = await readWorkingModeConfig(workingModeConfigPath);
 			return {
-				mode: String(parsed.mode || 'disabled'),
+				mode: String(parsed.type || 'node'),
 				host: String(parsed.host || ''),
 				port: Number(parsed.port) > 0 ? Number(parsed.port) : 7070,
+				tls: Boolean(parsed.tls),
+				token: String(parsed.token || ''),
 			};
 		} catch {
-			return { mode: 'disabled', host: '', port: 7070 };
+			return { mode: 'node', host: '', port: 7070, tls: false, token: '' };
 		}
 	}
 
-	async function saveExchangeConfig(mode, host, port) {
-		const cfg = { mode, host, port };
+	async function saveExchangeConfig(mode, host, port, tls, token) {
 		await fs.mkdir(dataDir, { recursive: true });
-		await fs.writeFile(exchangeConfigPath, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+		await writeWorkingModeConfig(workingModeConfigPath, {
+			type: mode,
+			host,
+			port,
+			tls: Boolean(tls),
+			token: String(token || ''),
+		});
 	}
 
 	const exchangeCfg = await loadExchangeConfig();
@@ -282,6 +299,8 @@ async function main() {
 		exchangeMode: exchangeCfg.mode,
 		exchangeHost: exchangeCfg.host,
 		exchangePort: exchangeCfg.port,
+		exchangeTls: exchangeCfg.tls,
+		exchangeToken: exchangeCfg.token,
 	});
 	let controlServer = null;
 	let isShuttingDown = false;

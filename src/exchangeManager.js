@@ -8,12 +8,12 @@ const RECONNECT_DELAY_MS = 5000;
  * - exchange: WS server attaccato all'HTTP server esistente (stessa porta HTTP).
  *             I client si registrano per nome e i messaggi vengono instradati src→dst.
  *
- * - client:   WS client che si connette all'exchange (ws://host:port).
+	 * - client:   WS client che si connette all'exchange (ws://host:port).
  *             Riceve messaggi → triggera i listener MESSAGE locali.
  *             Node.sendMessage() usa l'exchange come canale di uscita.
  *
  * Protocollo JSON:
- *   { type: 'register', name: 'my-name' }
+ *   { type: 'register', name: 'my-name', token: 'shared-secret' }
  *   { type: 'message', to: 'target', content: '...', contentType: '...' }
  *   { type: 'message', from: 'sender', content: '...', contentType: '...' }  (deliver)
  */
@@ -22,7 +22,9 @@ class ExchangeManager {
 		this.runtime = runtime;
 		this.mode = 'disabled'; // 'disabled' | 'exchange' | 'client'
 		this.host = ''; // client mode: exchange server host
-		this.port = 7070; // client mode: exchange server port (= HTTP port of exchange)		this.tls = false; // usa WSS (wss://) invece di WS (ws://)		this.wss = null; // WebSocketServer noServer (exchange mode)
+		this.port = 7070; // client mode: exchange server port (= HTTP port of exchange)
+		this.tls = false; // usa WSS (wss://) invece di WS (ws://)
+		this.wss = null; // WebSocketServer noServer (exchange mode)
 		this.wsClient = null; // WebSocket client (client mode)
 		this.connectedClients = new Map(); // name → ws (exchange mode)
 		this.reconnectTimer = null;
@@ -36,6 +38,50 @@ class ExchangeManager {
 		this.host = String(host || '').trim();
 		this.port = Number(port) > 0 ? Number(port) : 7070;
 		this.tls = Boolean(tls);
+	}
+
+	async _getExpectedExchangeToken() {
+		if (this.runtime && this.runtime.getExchangeToken) {
+			try {
+				const info = await this.runtime.getExchangeToken();
+				return String(info?.token || '').trim();
+			} catch {
+				return String(this.runtime.exchangeAuthToken || '').trim();
+			}
+		}
+
+		return String(this.runtime.exchangeAuthToken || '').trim();
+	}
+
+	_readBearerToken(request) {
+		const rawAuthorization = String(request?.headers?.authorization || '').trim();
+		if (!rawAuthorization) {
+			return '';
+		}
+
+		const match = rawAuthorization.match(/^Bearer\s+(.+)$/i);
+		return match ? String(match[1] || '').trim() : '';
+	}
+
+	_rejectUpgrade(socket, statusCode, message) {
+		try {
+			socket.write(
+				`HTTP/1.1 ${statusCode} ${message}\r\n` +
+				'Content-Type: text/plain; charset=utf-8\r\n' +
+				'Connection: close\r\n' +
+				`Content-Length: ${Buffer.byteLength(message)}\r\n` +
+				'\r\n' +
+				message,
+			);
+		} catch {
+			// ignore socket write failures during rejected upgrade
+		}
+
+		try {
+			socket.destroy();
+		} catch {
+			// ignore destroy failures
+		}
 	}
 
 	/** Avvia l'exchange. Deve essere chiamata dopo che l'httpServer è in ascolto. */
@@ -88,12 +134,26 @@ class ExchangeManager {
 
 		this._httpServer = httpServer;
 		this._upgradeHandler = (request, socket, head) => {
-			if (this.mode !== 'exchange' || !this.wss) {
-				socket.destroy();
-				return;
-			}
-			this.wss.handleUpgrade(request, socket, head, (ws) => {
-				this.wss.emit('connection', ws, request);
+			(async () => {
+				if (this.mode !== 'exchange' || !this.wss) {
+					socket.destroy();
+					return;
+				}
+
+				const expectedToken = await this._getExpectedExchangeToken();
+				const providedToken = this._readBearerToken(request);
+
+				if (expectedToken && providedToken !== expectedToken) {
+					this.runtime.log('[Exchange] Upgrade rifiutato: Authorization Bearer token non valido');
+					this._rejectUpgrade(socket, 401, 'Unauthorized');
+					return;
+				}
+
+				this.wss.handleUpgrade(request, socket, head, (ws) => {
+					this.wss.emit('connection', ws, request);
+				});
+			})().catch(() => {
+				this._rejectUpgrade(socket, 500, 'Internal Server Error');
 			});
 		};
 
@@ -111,6 +171,16 @@ class ExchangeManager {
 
 			if (packet.type === 'register') {
 				const name = String(packet.name || '').trim().toLowerCase();
+				const providedToken = String(packet.token || '').trim();
+				const expectedToken = String(this.runtime.exchangeAuthToken || '').trim();
+
+				if (expectedToken && providedToken !== expectedToken) {
+					this.runtime.log(`[Exchange] Registrazione rifiutata per ${name || 'unknown'}: token non valido`);
+					ws.send(JSON.stringify({ type: 'auth-error', error: 'invalid exchange token' }));
+					ws.close(4001, 'invalid exchange token');
+					return;
+				}
+
 				if (name) {
 					if (clientName && clientName !== name) this.connectedClients.delete(clientName);
 					clientName = name;
@@ -172,7 +242,9 @@ class ExchangeManager {
 		let ws;
 		try {
 			// rejectUnauthorized: false per supportare certificati self-signed
-			ws = new WebSocket(url, { rejectUnauthorized: false });
+			const token = String(this.runtime.exchangeAuthToken || '').trim();
+			const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
+			ws = new WebSocket(url, { rejectUnauthorized: false, headers });
 		} catch (err) {
 			this.runtime.log(`[Exchange] Impossibile creare il client: ${err.message}`);
 			this._scheduleReconnect();
@@ -185,7 +257,8 @@ class ExchangeManager {
 			try {
 				const name = await this.runtime.getReactorName();
 				const safeName = String(name || '').trim() || 'unnamed';
-				ws.send(JSON.stringify({ type: 'register', name: safeName }));
+				const token = String(this.runtime.exchangeAuthToken || '').trim();
+				ws.send(JSON.stringify({ type: 'register', name: safeName, token }));
 				this.runtime.log(`[Exchange] Connesso come: ${safeName}`);
 			} catch (err) {
 				this.runtime.log(`[Exchange] Errore registrazione: ${err.message}`);
@@ -196,6 +269,9 @@ class ExchangeManager {
 			let packet;
 			try { packet = JSON.parse(String(data)); } catch { return; }
 			if (packet && packet.type === 'message') this._handleIncomingMessage(packet);
+			if (packet && packet.type === 'auth-error') {
+				this.runtime.log(`[Exchange] Autenticazione fallita: ${packet.error || 'invalid exchange token'}`);
+			}
 		});
 
 		ws.on('close', () => {
