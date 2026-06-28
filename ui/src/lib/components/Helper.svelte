@@ -32,9 +32,9 @@
 	.helper-tooltip {
 		position: absolute;
 		left: 50%;
-		bottom: calc(100% + 10px);
+		top: calc(100% + 10px);
 		transform: translateX(-50%);
-		z-index: 30;
+		z-index: 2000;
 		min-width: 220px;
 		max-width: 300px;
 		padding: 8px 10px;
@@ -55,11 +55,11 @@
 		content: '';
 		position: absolute;
 		left: 50%;
-		top: 100%;
+		bottom: 100%;
 		transform: translateX(-50%);
 		border-width: 6px;
 		border-style: solid;
-		border-color: rgba(18, 24, 30, 0.96) transparent transparent transparent;
+		border-color: transparent transparent rgba(18, 24, 30, 0.96) transparent;
 	}
 
 	.helper:hover .helper-tooltip,

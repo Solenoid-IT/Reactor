@@ -98,9 +98,9 @@
 		<h3 class="d-flex align-items-center">
 			<i class="fa-solid fa-tag me-2"></i>
 			<span>Name</span>
-			<Helper ariaLabel="Spiegazione Name Reactor">
-				<div>Il nome identifica univocamente questo Reactor come nodo nella rete.</div>
-				<div class="mt-1">Nel contesto multi-nodo, gli script possono inviare messaggi a un altro nodo usando proprio questo identificatore.</div>
+			<Helper ariaLabel="Reactor Name Help">
+				<div>The name uniquely identifies this Reactor as a node in the network.</div>
+				<div class="mt-1">In a multi-node setup, scripts can send messages to another node using this identifier.</div>
 			</Helper>
 		</h3>
 		<Form on:submit={onNameSubmit}>
@@ -122,11 +122,11 @@
 		<h3 class="d-flex align-items-center">
 			<i class="fa-solid fa-arrows-left-right me-2"></i>
 			<span>Working Mode</span>
-			<Helper ariaLabel="Spiegazione Working Mode">
-				<div><strong>Node</strong>: esegue script locali e puo usare direttamente <code>Node.sendMessage</code> nella stessa LAN.</div>
-				<div class="mt-1"><strong>Use Exchange</strong>: collega il nodo a un Exchange remoto per instradare messaggi.</div>
-				<div class="mt-1"><strong>Exchange</strong>: avvia questo Reactor come hub centrale.</div>
-				<div class="mt-1">Tipicamente Exchange serve quando i nodi sono su reti diverse (internet/VPN), non nella stessa LAN.</div>
+			<Helper ariaLabel="Working Mode Help">
+				<div><strong>Node</strong>: runs local scripts and can use <code>Node.sendMessage</code> directly inside the same LAN.</div>
+				<div class="mt-1"><strong>Use Exchange</strong>: connects this node to a remote Exchange for message routing.</div>
+				<div class="mt-1"><strong>Exchange</strong>: runs this Reactor as a central hub.</div>
+				<div class="mt-1">Exchange is typically used when nodes are on different networks (Internet/VPN), not on the same LAN.</div>
 			</Helper>
 		</h3>
 		<Form on:submit={onWorkingModeSubmit}>
@@ -310,9 +310,9 @@
 		<h3 class="d-flex align-items-center">
 			<i class="fa-solid fa-list-check me-2"></i>
 			<span>Message Queue</span>
-			<Helper ariaLabel="Spiegazione Message Queue">
-				<div>Se <code>Node.sendMessage()</code> non riesce a contattare Exchange o un nodo target, il messaggio non viene perso.</div>
-				<div class="mt-1">I dati finiscono in una coda temporanea locale e vengono reinviati automaticamente quando la rete torna disponibile.</div>
+			<Helper ariaLabel="Message Queue Help">
+				<div>If <code>Node.sendMessage()</code> cannot reach Exchange or a target node, the message is not lost.</div>
+				<div class="mt-1">Payloads are stored in a temporary local queue and sent automatically when connectivity is restored.</div>
 			</Helper>
 		</h3>
 		<div class="detail-value" style="font-size:0.82em; opacity:0.75; margin-bottom:10px;">
