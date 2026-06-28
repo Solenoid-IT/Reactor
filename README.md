@@ -154,6 +154,9 @@ Important: if you use daemonctl with a custom data directory, use the same REACT
 
 A service template is included: reactor.service.
 
+For a complete Linux server installation and Exchange configuration guide, see:
+- `docs/linux-server-exchange-setup.md`
+
 Recommended setup:
 
 1. Copy project to /opt/reactor
