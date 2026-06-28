@@ -481,11 +481,15 @@ Build output is generated in:
 ### Startup Behavior (macOS)
 
 - Reactor registers itself at login and starts hidden in background.
+- On macOS packaged builds, Reactor also installs a LaunchAgent for reliable autostart at user login (no manual app opening required).
 - If started by login items, the window stays hidden.
 - If opened manually from Finder/Applications, the UI opens normally.
+- Closing the window does not stop Reactor: it stays running in background to keep runtime and Exchange connection active.
+- Quitting the app is also intercepted in persistent mode, so runtime stays active in background.
 - You can force behavior during tests:
   - Show window: `REACTOR_SHOW_WINDOW=1 npm start`
   - Hide window: `REACTOR_SHOW_WINDOW=0 npm start`
+  - Disable desktop persistence (allow normal quit): `REACTOR_PERSIST_BACKGROUND=0 npm start`
 
 Build outputs:
 - macOS: dmg, zip

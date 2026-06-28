@@ -783,9 +783,12 @@ function setupIpcHandlers(runtime) {
 		const safeToken = String(token || '').trim();
 
 		try {
-			const config = await runtime.setExchangeConfig(safeMode, safeHost, safePort, safeTls, safeToken);
 			await writeUiSettings({ exchangeMode: safeMode, exchangeHost: safeHost, exchangePort: safePort, exchangeTls: safeTls, exchangeToken: safeToken });
-			return { ok: true, config };
+			await runtime.setExchangeConfig(safeMode, safeHost, safePort, safeTls, safeToken);
+			const connectionTest = runtime.testExchangeClientConnection
+				? await runtime.testExchangeClientConnection(5000)
+				: { connected: false, skipped: true, reason: 'connection test unavailable', elapsedMs: 0 };
+			return { ok: true, config: runtime.getExchangeConfig(), connectionTest };
 		} catch (error) {
 			return { ok: false, error: error.message };
 		}

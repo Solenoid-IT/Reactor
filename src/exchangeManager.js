@@ -46,6 +46,10 @@ class ExchangeManager {
 		this._serverTerminatedClients = 0;
 		this._connectedClientDetails = new Map();
 		this._socketClientMeta = new WeakMap();
+		this._clientLastError = '';
+		this._clientLastCloseReason = '';
+		this._clientLastCloseCode = 0;
+		this._clientConnectedAt = 0;
 		this._heartbeatIntervalMs = this._readHeartbeatValue('REACTOR_EXCHANGE_HEARTBEAT_INTERVAL_MS', DEFAULT_WS_HEARTBEAT_INTERVAL_MS, 3000);
 		this._heartbeatTimeoutMs = this._readHeartbeatValue('REACTOR_EXCHANGE_HEARTBEAT_TIMEOUT_MS', DEFAULT_WS_HEARTBEAT_TIMEOUT_MS, this._heartbeatIntervalMs + 1000);
 		this._connectionLogPath = path.join(this.runtime.reactorRootDir || process.cwd(), 'exchange-connections.log');
@@ -407,6 +411,10 @@ class ExchangeManager {
 		this.wsClient = ws;
 
 		ws.on('open', async () => {
+			this._clientLastError = '';
+			this._clientLastCloseReason = '';
+			this._clientLastCloseCode = 0;
+			this._clientConnectedAt = Date.now();
 			this._clientLastPongAt = Date.now();
 			this._startClientHeartbeat(ws);
 			try {
@@ -434,17 +442,60 @@ class ExchangeManager {
 			this._clientLastPongAt = Date.now();
 		});
 
-		ws.on('close', () => {
+		ws.on('close', (code, reason) => {
 			this._stopClientHeartbeat();
 			if (this.wsClient === ws) this.wsClient = null;
+			this._clientConnectedAt = 0;
+			this._clientLastCloseCode = Number(code) || 0;
+			this._clientLastCloseReason = String(reason || '').trim();
 			this.runtime.log('[Exchange] Connection closed, reconnecting...');
 			this._scheduleReconnect();
 		});
 
 		ws.on('error', (err) => {
 			this._stopClientHeartbeat();
+			this._clientLastError = String(err?.message || 'unknown error');
 			this.runtime.log(`[Exchange] Error: ${err.message}`);
 		});
+	}
+
+	async waitForClientConnection(timeoutMs = 5000) {
+		if (this.mode !== 'client') {
+			return {
+				connected: false,
+				skipped: true,
+				reason: 'exchange mode is not client',
+				elapsedMs: 0,
+			};
+		}
+
+		const safeTimeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 5000;
+		const startedAt = Date.now();
+
+		while (Date.now() - startedAt <= safeTimeoutMs) {
+			if (this.wsClient && this.wsClient.readyState === WebSocket.OPEN) {
+				return {
+					connected: true,
+					skipped: false,
+					reason: '',
+					elapsedMs: Date.now() - startedAt,
+				};
+			}
+
+			await new Promise((resolve) => setTimeout(resolve, 150));
+		}
+
+		let reason = this._clientLastError || this._clientLastCloseReason || 'timeout waiting for connection';
+		if (!reason && this._clientLastCloseCode) {
+			reason = `connection closed (${this._clientLastCloseCode})`;
+		}
+
+		return {
+			connected: Boolean(this.wsClient && this.wsClient.readyState === WebSocket.OPEN),
+			skipped: false,
+			reason,
+			elapsedMs: Date.now() - startedAt,
+		};
 	}
 
 	_startServerHeartbeat() {

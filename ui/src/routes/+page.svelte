@@ -356,10 +356,27 @@
 			return;
 		}
 		const result = await setExchangeConfig(mode, host || '', numericPort, Boolean(tls), token || '');
-		status = result?.ok
-			? `Exchange config saved: mode=${mode}${Boolean(tls) ? ' (TLS)' : ''}`
-			: `Error: ${result?.error || 'unknown'}`;
+		if (!result?.ok) {
+			status = `Error: ${result?.error || 'unknown'}`;
+			await refreshAll();
+			return;
+		}
+
+		const connectionTest = result?.connectionTest || null;
+		if (mode === 'node' && connectionTest) {
+			status = connectionTest.connected
+				? `Exchange config saved and connected (${Boolean(tls) ? 'WSS' : 'WS'})`
+				: `Exchange config saved but not connected (${connectionTest.reason || 'connection test failed'})`;
+		} else {
+			status = `Exchange config saved: mode=${mode}${Boolean(tls) ? ' (TLS)' : ''}`;
+		}
+
 		await refreshAll();
+
+		if (mode === 'node' && !exchangeActive) {
+			await new Promise((resolve) => setTimeout(resolve, 800));
+			await refreshAll();
+		}
 	}
 
 	async function generateExchangeTokenHandler() {

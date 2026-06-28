@@ -148,6 +148,42 @@ public class ReactorMobilePlugin extends Plugin {
         return config;
     }
 
+    private JSObject waitForExchangeClientConnection(long timeoutMs) {
+        long safeTimeoutMs = timeoutMs > 0 ? timeoutMs : 5000L;
+
+        if (!"node".equals(ReactorHttpService.getCurrentExchangeMode())) {
+            return new JSObject()
+                    .put("connected", false)
+                    .put("skipped", true)
+                    .put("reason", "exchange mode is not node/client")
+                    .put("elapsedMs", 0);
+        }
+
+        long startedAt = System.currentTimeMillis();
+        while (System.currentTimeMillis() - startedAt <= safeTimeoutMs) {
+            if (ReactorHttpService.isExchangeClientConnected()) {
+                return new JSObject()
+                        .put("connected", true)
+                        .put("skipped", false)
+                        .put("reason", "")
+                        .put("elapsedMs", System.currentTimeMillis() - startedAt);
+            }
+
+            try {
+                Thread.sleep(150L);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+
+        return new JSObject()
+                .put("connected", ReactorHttpService.isExchangeClientConnected())
+                .put("skipped", false)
+                .put("reason", "timeout waiting for connection")
+                .put("elapsedMs", System.currentTimeMillis() - startedAt);
+    }
+
     private File getProjectsDir() {
         File projectsDir = new File(getContext().getFilesDir(), "projects");
         if (!projectsDir.exists()) {
@@ -949,6 +985,8 @@ public class ReactorMobilePlugin extends Plugin {
 
 		startHttpService(getConfiguredHttpPort());
 
+		JSObject connectionTest = waitForExchangeClientConnection(5000L);
+
         JSObject result = new JSObject();
         result.put("ok", true);
         result.put("config", new JSObject()
@@ -957,7 +995,8 @@ public class ReactorMobilePlugin extends Plugin {
                 .put("port", port)
                 .put("tls", tls)
                 .put("token", token)
-                .put("active", false));
+        .put("active", ReactorHttpService.isExchangeClientConnected()));
+		result.put("connectionTest", connectionTest);
         call.resolve(result);
     }
 

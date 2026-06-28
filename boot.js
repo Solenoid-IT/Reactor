@@ -1,4 +1,6 @@
 const { app, BrowserWindow } = require('electron');
+const fs = require('fs/promises');
+const os = require('os');
 const path = require('path');
 const { ReactorRuntime } = require('./src/runtime');
 const { createMainWindow } = require('./src/electron/window');
@@ -9,6 +11,10 @@ const EXTERNAL_SCRIPTS_DIR = path.join(app.getPath('userData'), 'projects');
 const EVENT_LOG_PATH = path.join(app.getPath('userData'), 'activity.log');
 
 function shouldShowWindowOnLaunch() {
+	if (process.argv.includes('--reactor-background-startup')) {
+		return false;
+	}
+
 	if (process.env.REACTOR_SHOW_WINDOW === '1') {
 		return true;
 	}
@@ -26,13 +32,50 @@ function shouldShowWindowOnLaunch() {
 	return true;
 }
 
+function shouldPersistInBackground() {
+	const raw = String(process.env.REACTOR_PERSIST_BACKGROUND || '').trim().toLowerCase();
+	if (raw === '0' || raw === 'false' || raw === 'no') {
+		return false;
+	}
+
+	return true;
+}
+
 const SHOW_WINDOW = shouldShowWindowOnLaunch();
+const PERSIST_BACKGROUND = shouldPersistInBackground();
 
 // Globals
 let mainWindow;
 let runtime;
 let isQuitting = false;
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
+
+function wireBackgroundWindowBehavior(windowRef) {
+	if (!windowRef || windowRef.isDestroyed()) {
+		return;
+	}
+
+	windowRef.on('close', (event) => {
+		if (!PERSIST_BACKGROUND || isQuitting) {
+			return;
+		}
+
+		event.preventDefault();
+		windowRef.hide();
+		if (app.dock) {
+			app.dock.hide();
+		}
+		if (runtime) {
+			runtime.log('Window close intercepted: app is still running in background');
+		}
+	});
+
+	windowRef.on('show', () => {
+		if (app.dock) {
+			app.dock.show();
+		}
+	});
+}
 
 /**
  * Configures app for background mode: auto-start, hidden dock
@@ -41,10 +84,53 @@ function configureBackgroundMode() {
 	app.setLoginItemSettings({
 		openAtLogin: true,
 		openAsHidden: true,
+		args: ['--reactor-background-startup'],
 	});
 
 	if (!SHOW_WINDOW && app.dock) {
 		app.dock.hide();
+	}
+}
+
+async function ensureMacLaunchAgentAutostart() {
+	if (process.platform !== 'darwin' || !app.isPackaged) {
+		return;
+	}
+
+	try {
+		const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
+		const plistPath = path.join(launchAgentsDir, 'it.solenoid.reactor.plist');
+		const executablePath = app.getPath('exe');
+
+		await fs.mkdir(launchAgentsDir, { recursive: true });
+
+		const plist = [
+			'<?xml version="1.0" encoding="UTF-8"?>',
+			'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+			'<plist version="1.0">',
+			'<dict>',
+			'  <key>Label</key>',
+			'  <string>it.solenoid.reactor</string>',
+			'  <key>ProgramArguments</key>',
+			'  <array>',
+			`    <string>${executablePath}</string>`,
+			'    <string>--reactor-background-startup</string>',
+			'  </array>',
+			'  <key>RunAtLoad</key>',
+			'  <true/>',
+			'  <key>KeepAlive</key>',
+			'  <true/>',
+			'  <key>ProcessType</key>',
+			'  <string>Background</string>',
+			'</dict>',
+			'</plist>',
+		].join('\n');
+
+		await fs.writeFile(plistPath, `${plist}\n`, 'utf8');
+	} catch (error) {
+		if (runtime) {
+			runtime.log(`Autostart LaunchAgent setup failed: ${error.message}`);
+		}
 	}
 }
 
@@ -54,6 +140,7 @@ if (!gotSingleInstanceLock) {
 	app.on('second-instance', () => {
 		if (!mainWindow || mainWindow.isDestroyed()) {
 			mainWindow = createMainWindow();
+			wireBackgroundWindowBehavior(mainWindow);
 			return;
 		}
 
@@ -67,17 +154,19 @@ if (!gotSingleInstanceLock) {
 
 	// Main app lifecycle
 	app.whenReady().then(async () => {
+		await ensureMacLaunchAgentAutostart();
 		configureBackgroundMode();
 
 		if (SHOW_WINDOW) {
 			mainWindow = createMainWindow();
+			wireBackgroundWindowBehavior(mainWindow);
 		}
 
 		runtime = new ReactorRuntime(EXTERNAL_SCRIPTS_DIR, EVENT_LOG_PATH);
 		setupIpcHandlers(runtime);
 
 		await runtime.init();
-		runtime.log(`Background mode active (window=${SHOW_WINDOW ? 'visible' : 'hidden'})`);
+		runtime.log(`Background mode active (window=${SHOW_WINDOW ? 'visible' : 'hidden'}, persist=${PERSIST_BACKGROUND ? 'on' : 'off'})`);
 	});
 
 	app.on('window-all-closed', () => {
@@ -92,10 +181,31 @@ if (!gotSingleInstanceLock) {
 	app.on('activate', () => {
 		if (BrowserWindow.getAllWindows().length === 0) {
 			mainWindow = createMainWindow();
+			wireBackgroundWindowBehavior(mainWindow);
+			return;
+		}
+
+		if (mainWindow && !mainWindow.isDestroyed()) {
+			mainWindow.show();
+			mainWindow.focus();
 		}
 	});
 
-	app.on('before-quit', () => {
+	app.on('before-quit', (event) => {
+		if (PERSIST_BACKGROUND && !isQuitting) {
+			event.preventDefault();
+			if (mainWindow && !mainWindow.isDestroyed()) {
+				mainWindow.hide();
+			}
+			if (app.dock) {
+				app.dock.hide();
+			}
+			if (runtime) {
+				runtime.log('Quit intercepted: app remains active in background');
+			}
+			return;
+		}
+
 		isQuitting = true;
 	});
 }

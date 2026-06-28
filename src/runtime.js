@@ -346,6 +346,19 @@ class ReactorRuntime {
 		return this.getExchangeConfig();
 	}
 
+	async testExchangeClientConnection(timeoutMs = 5000) {
+		if (this.exchangeMode !== 'node') {
+			return {
+				connected: false,
+				skipped: true,
+				reason: 'exchange mode is not node/client',
+				elapsedMs: 0,
+			};
+		}
+
+		return this.exchangeManager.waitForClientConnection(timeoutMs);
+	}
+
 	async setHttpServerPort(port) {
 		const nextPort = Number(port);
 		if (!Number.isInteger(nextPort) || nextPort < 1 || nextPort > 65535) {
