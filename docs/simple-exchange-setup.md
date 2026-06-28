@@ -56,7 +56,7 @@ Use this token on clients that need to connect to the exchange.
 Generate a self-signed cert.pem/key.pem directly via CLI:
 
 ```bash
-docker compose -f docker-compose.exchange.yml exec reactor-exchange node daemonctl.js generate-tls-cert
+docker compose -f docker-compose.exchange.yml exec reactor-exchange node daemonctl.js generate-tls-cert --bits 4096 --days 3650
 ```
 
 This creates:

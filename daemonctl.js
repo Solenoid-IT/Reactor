@@ -32,9 +32,46 @@ function usage() {
 	console.log('  node daemonctl.js get-exchange');
 	console.log('  node daemonctl.js get-exchange-token');
 	console.log('  node daemonctl.js generate-exchange-token');
-	console.log('  node daemonctl.js generate-tls-cert');
+	console.log('  node daemonctl.js generate-tls-cert [--bits <1024-8192>] [--days <1-36500>]');
 	console.log('  node daemonctl.js stop');
 	process.exit(1);
+}
+
+function extractTlsCertFlags(args) {
+	const values = [...args];
+	let bits;
+	let days;
+
+	for (let index = 0; index < values.length; index += 1) {
+		const value = String(values[index] || '').trim();
+		if (value === '--bits') {
+			bits = Number(values[index + 1]);
+			values.splice(index, 2);
+			index -= 1;
+			continue;
+		}
+		if (value === '--days') {
+			days = Number(values[index + 1]);
+			values.splice(index, 2);
+			index -= 1;
+		}
+	}
+
+	if (values.length > 0) {
+		usage();
+	}
+
+	if (bits !== undefined && (!Number.isInteger(bits) || bits < 1024 || bits > 8192)) {
+		console.error('[daemonctl] generate-tls-cert: --bits must be an integer between 1024 and 8192');
+		process.exit(1);
+	}
+
+	if (days !== undefined && (!Number.isInteger(days) || days < 1 || days > 36500)) {
+		console.error('[daemonctl] generate-tls-cert: --days must be an integer between 1 and 36500');
+		process.exit(1);
+	}
+
+	return { bits, days };
 }
 
 function extractExchangeFlags(args) {
@@ -268,7 +305,8 @@ async function main() {
 	}
 
 	if (command === 'generate-tls-cert') {
-		const response = await sendCommand({ command: 'generate-tls-cert' });
+		const { bits, days } = extractTlsCertFlags(rest);
+		const response = await sendCommand({ command: 'generate-tls-cert', bits, days });
 		if (!response.ok) {
 			console.error(`[daemonctl] ${response.error || 'generate-tls-cert failed'}`);
 			process.exit(1);
@@ -277,6 +315,8 @@ async function main() {
 		console.log('Self-signed TLS certificate generated');
 		console.log(`cert.pem: ${tls.certPath || '-'}`);
 		console.log(`key.pem:  ${tls.keyPath || '-'}`);
+		if (tls.bits) console.log(`Bits:    ${tls.bits}`);
+		if (tls.days) console.log(`Days:    ${tls.days}`);
 		if (tls.subject) console.log(`Subject: ${tls.subject}`);
 		if (tls.notAfter) console.log(`NotAfter:${tls.notAfter}`);
 		if (tls.fingerprint) console.log(`SHA256:  ${tls.fingerprint}`);

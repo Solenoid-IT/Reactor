@@ -95,7 +95,7 @@ async function deleteScriptFromRuntime(runtime, script) {
 	await runtime.reloadScripts('daemonctl-delete-script');
 }
 
-async function createControlServer(runtime, socketPath, onStopRequested) {
+async function createControlServer(runtime, socketPath, onStopRequested, saveExchangeConfig) {
 	if (process.platform !== 'win32') {
 		try {
 			await fs.unlink(socketPath);
@@ -192,7 +192,9 @@ async function createControlServer(runtime, socketPath, onStopRequested) {
 					await saveExchangeConfig(runtime.exchangeMode, runtime.exchangeHost, runtime.exchangePort, runtime.exchangeManager.tls, exchangeToken.token);
 					response = { ok: true, exchangeToken };
 				} else if (command === 'generate-tls-cert') {
-					const tls = await runtime.generateTlsCert();
+					const tlsBits = payload.bits;
+					const tlsDays = payload.days;
+					const tls = await runtime.generateTlsCert(tlsBits, tlsDays);
 					const tlsDir = path.join(runtime.reactorRootDir, 'tls');
 					response = {
 						ok: true,
@@ -371,7 +373,7 @@ async function main() {
 	});
 
 	await runtime.init();
-	controlServer = await createControlServer(runtime, daemonSocketPath, shutdown);
+	controlServer = await createControlServer(runtime, daemonSocketPath, shutdown, saveExchangeConfig);
 	runtime.log(`Daemon mode active (scriptsDir=${scriptsDir}, eventLogPath=${eventLogPath}, socket=${daemonSocketPath})`);
 }
 

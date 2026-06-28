@@ -48,12 +48,25 @@ class TlsManager {
 	}
 
 	/**
-	 * Genera un certificato self-signed RSA-2048 valido 10 anni.
+	 * Genera un certificato self-signed RSA con bit depth e durata configurabili.
 	 * Richiede openssl nel PATH (disponibile su macOS, Linux, e Windows con Git/OpenSSL).
 	 * @param {string} reactorName - CN del certificato (nome del reactor)
+	 * @param {{ bits?: number, days?: number }} options
 	 */
-	async generateCert(reactorName = 'reactor') {
+	async generateCert(reactorName = 'reactor', options = {}) {
 		await fs.mkdir(this.tlsDir, { recursive: true });
+
+		const rawBits = Number(options.bits);
+		const bits = Number.isInteger(rawBits) ? rawBits : 2048;
+		if (bits < 1024 || bits > 8192) {
+			throw new Error('TLS key bits must be between 1024 and 8192');
+		}
+
+		const rawDays = Number(options.days);
+		const days = Number.isInteger(rawDays) ? rawDays : 3650;
+		if (days < 1 || days > 36500) {
+			throw new Error('TLS certificate days must be between 1 and 36500');
+		}
 
 		const safeCN = String(reactorName || 'reactor')
 			.replace(/[^a-zA-Z0-9._-]/g, '-')
@@ -64,10 +77,10 @@ class TlsManager {
 				'openssl',
 				[
 					'req', '-x509',
-					'-newkey', 'rsa:2048',
+					'-newkey', `rsa:${bits}`,
 					'-keyout', this.keyPath,
 					'-out', this.certPath,
-					'-days', '3650',
+					'-days', String(days),
 					'-nodes',
 					'-subj', `/CN=${safeCN}`,
 				],
@@ -78,7 +91,12 @@ class TlsManager {
 			throw new Error(`openssl non disponibile o generazione fallita: ${msg}`);
 		}
 
-		return this.getCertInfo();
+		const info = await this.getCertInfo();
+		return {
+			...info,
+			bits,
+			days,
+		};
 	}
 
 	/** Rimuove i file del certificato. */

@@ -309,9 +309,9 @@ class ReactorRuntime {
 		return this.tlsManager.getCertInfo();
 	}
 
-	async generateTlsCert() {
+	async generateTlsCert(bits, days) {
 		const reactorName = await this.getReactorName();
-		const info = await this.tlsManager.generateCert(reactorName || 'reactor');
+		const info = await this.tlsManager.generateCert(reactorName || 'reactor', { bits, days });
 		// Riavvia il server HTTP con TLS attivo
 		await this.restartHttpServer();
 		return info;
