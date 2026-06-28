@@ -51,6 +51,7 @@
 	let reactorName = '';
 	let httpPort = 7070;
 	let exchangeMode = 'node';
+	let exchangeEnabled = false;
 	let exchangeHost = '';
 	let exchangePort = 7070;
 	let exchangeTls = false;
@@ -152,6 +153,7 @@
 			exchangeToken = ec.token || '';
 			exchangeActive = Boolean(ec.active);
 			exchangeClients = Array.isArray(ec.connectedClients) ? ec.connectedClients : [];
+			exchangeEnabled = Boolean((ec.host || '').trim());
 		}
 
 		if (exchangeTokenResult?.ok && exchangeTokenResult?.exchangeToken?.token) {
@@ -368,13 +370,15 @@
 		status = result?.ok ? `Server status opened: ${result.url}` : `Error: ${result?.error || 'unknown'}`;
 	}
 
-	async function saveExchangeConfigValue(mode, host, port, tls, token) {
+	async function saveExchangeConfigValue(mode, host, port, tls, token, enabled = true) {
 		const numericPort = Number(port);
 		if (!Number.isFinite(numericPort) || numericPort < 1 || numericPort > 65535) {
 			status = 'Error: invalid Exchange port';
 			return;
 		}
-		const result = await setExchangeConfig(mode, host || '', numericPort, Boolean(tls), token || '');
+		const safeEnabled = Boolean(enabled);
+		const effectiveHost = mode === 'node' && !safeEnabled ? '' : host || '';
+		const result = await setExchangeConfig(mode, effectiveHost, numericPort, Boolean(tls), token || '');
 		if (!result?.ok) {
 			status = `Error: ${result?.error || 'unknown'}`;
 			await refreshAll();
@@ -382,7 +386,9 @@
 		}
 
 		const connectionTest = result?.connectionTest || null;
-		if (mode === 'node' && connectionTest) {
+		if (mode === 'node' && !safeEnabled) {
+			status = 'Exchange client disabled for node mode';
+		} else if (mode === 'node' && connectionTest) {
 			status = connectionTest.connected
 				? `Exchange config saved and connected (${Boolean(tls) ? 'WSS' : 'WS'})`
 				: `Exchange config saved but not connected (${connectionTest.reason || 'connection test failed'})`;
@@ -661,6 +667,7 @@
 			{messageQueueExchangePending}
 			{messageQueueTtlDays}
 			{exchangeMode}
+			{exchangeEnabled}
 			{exchangeHost}
 			{exchangePort}
 			{exchangeTls}

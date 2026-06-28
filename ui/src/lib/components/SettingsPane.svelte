@@ -8,6 +8,7 @@
 	export let tlsNotAfter = '';
 	export let tlsFingerprint = '';
 	export let exchangeMode = 'node';
+	export let exchangeEnabled = false;
 	export let exchangeHost = '';
 	export let exchangePort = 7070;
 	export let exchangeTls = false;
@@ -58,6 +59,7 @@
 			exchangeValues.port ?? exchangePort,
 			exchangeValues.tls ?? exchangeTls,
 			exchangeValues.token ?? exchangeToken,
+			exchangeValues.enabled ?? exchangeEnabled,
 		);
 	}
 
@@ -159,17 +161,26 @@
 				<fieldset class="mt-3 settings-exchange-fieldset" style="border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 10px;">
 					<legend>Exchange</legend>
 
-					<div class="row settings-host-port-row">
+					<div class="row mt-1">
+						<div class="col">
+							<label class="d-flex align-items-center m-0">
+								<input type="checkbox" class="input me-2" name="exchange.enabled" data-type="bool" bind:checked={exchangeEnabled} />
+								Use Exchange
+							</label>
+						</div>
+					</div>
+
+					<div class="row settings-host-port-row mt-2">
 						<div class="col">
 							<label class="d-block m-0">
 								<span class="detail-label">Host</span>
-								<input type="text" class="input" name="exchange.host" data-required data-type="string" bind:value={exchangeHost} placeholder="192.168.1.10" />
+								<input type="text" class="input" name="exchange.host" data-required={exchangeEnabled ? 'true' : 'false'} data-type="string" bind:value={exchangeHost} placeholder="192.168.1.10" disabled={!exchangeEnabled} />
 							</label>
 						</div>
 						<div class="col-2 settings-port-col">
 							<label class="d-block m-0">
 								<span class="detail-label">Port</span>
-								<input type="number" class="input" name="exchange.port" data-required data-type="int" min="1" max="65535" bind:value={exchangePort} />
+								<input type="number" class="input" name="exchange.port" data-required={exchangeEnabled ? 'true' : 'false'} data-type="int" min="1" max="65535" bind:value={exchangePort} disabled={!exchangeEnabled} />
 							</label>
 						</div>
 					</div>
@@ -178,7 +189,7 @@
 						<div class="col">
 							<label class="d-block m-0">
 								<span class="detail-label">Token</span>
-								<input type="text" class="input" name="exchange.token" data-required data-type="string" bind:value={exchangeToken} />
+								<input type="text" class="input" name="exchange.token" data-required={exchangeEnabled ? 'true' : 'false'} data-type="string" bind:value={exchangeToken} disabled={!exchangeEnabled} />
 							</label>
 						</div>
 					</div>
@@ -186,13 +197,15 @@
 					<div class="row mt-3">
 						<div class="col">
 							<label class="d-flex align-items-center m-0">
-								<input type="checkbox" class="input me-2" name="exchange.tls" data-type="bool" bind:checked={exchangeTls} />
+								<input type="checkbox" class="input me-2" name="exchange.tls" data-type="bool" bind:checked={exchangeTls} disabled={!exchangeEnabled} />
 								TLS
 							</label>
 						</div>
 					</div>
 
-					{#if exchangeActive}
+					{#if !exchangeEnabled}
+						<div class="detail-value mt-4" style="opacity:0.6;"><i class="fa-solid fa-pause me-1"></i>Disabled</div>
+					{:else if exchangeActive}
 						<div class="detail-value mt-4" style="color: var(--color-success, #4caf50);"><i class="fa-solid fa-plug me-1"></i>Connected{exchangeTls ? ' (WSS)' : ' (WS)'}</div>
 					{:else}
 						<div class="detail-value mt-4" style="opacity:0.5;"><i class="fa-solid fa-plug-circle-xmark me-1"></i>Not connected</div>

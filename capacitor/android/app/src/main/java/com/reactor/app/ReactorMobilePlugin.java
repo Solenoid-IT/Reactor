@@ -148,6 +148,14 @@ public class ReactorMobilePlugin extends Plugin {
         return config;
     }
 
+    private String sanitizeWorkingMode(String rawMode) {
+        String mode = String.valueOf(rawMode == null ? "" : rawMode).trim().toLowerCase();
+        if ("exchange".equals(mode)) {
+            return "exchange";
+        }
+        return "node";
+    }
+
     private JSObject readWorkingModeConfig() {
         try {
             File file = getWorkingModeFile();
@@ -162,7 +170,7 @@ public class ReactorMobilePlugin extends Plugin {
 
             JSONObject parsed = new JSONObject(raw);
             JSObject config = getDefaultWorkingModeConfig();
-            config.put("mode", String.valueOf(parsed.optString("mode", "node")));
+            config.put("mode", sanitizeWorkingMode(parsed.optString("mode", "node")));
             config.put("host", String.valueOf(parsed.optString("host", "")));
             config.put("port", parsed.optInt("port", ReactorHttpService.DEFAULT_PORT));
             config.put("tls", parsed.optBoolean("tls", false));
@@ -1198,13 +1206,13 @@ public class ReactorMobilePlugin extends Plugin {
 
     @PluginMethod
     public void setExchangeConfig(PluginCall call) {
-        String mode = call.getString("mode", "node");
+        String mode = sanitizeWorkingMode(call.getString("mode", "node"));
         String host = call.getString("host", "");
         int port = call.getInt("port", ReactorHttpService.DEFAULT_PORT);
         boolean tls = call.getBoolean("tls", false);
         String token = call.getString("token", "");
 
-        if ("client".equals(mode) || "disabled".equals(mode)) {
+        if ("client".equals(mode)) {
             mode = "node";
         }
 

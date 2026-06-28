@@ -229,9 +229,6 @@ public class ReactorHttpService extends Service {
             if ("exchange".equals(mode)) {
                 return "exchange";
             }
-            if ("client".equals(mode) || "disabled".equals(mode) || mode.isEmpty()) {
-                return "node";
-            }
             return "node";
         }
 

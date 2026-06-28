@@ -8,9 +8,20 @@ const DEFAULT_WORKING_MODE_CONFIG = {
 	token: '',
 };
 
+function normalizeMode(rawMode) {
+	const mode = String(rawMode || '').trim().toLowerCase();
+	if (mode === 'exchange') {
+		return 'exchange';
+	}
+	if (mode === 'node') {
+		return 'node';
+	}
+	return 'node';
+}
+
 function normalizeWorkingModeConfig(rawConfig = {}) {
 	return {
-		type: String(rawConfig.type || rawConfig.exchangeMode || rawConfig.mode || 'node'),
+		type: normalizeMode(rawConfig.type || rawConfig.exchangeMode || rawConfig.mode || 'node'),
 		host: String(rawConfig.host || rawConfig.exchangeHost || ''),
 		port: Number(rawConfig.port || rawConfig.exchangePort) > 0 ? Number(rawConfig.port || rawConfig.exchangePort) : 7070,
 		tls: Boolean(rawConfig.tls ?? rawConfig.exchangeTls),
@@ -22,7 +33,7 @@ function normalizeWorkingModeUpdate(rawConfig = {}) {
 	const normalized = {};
 
 	if (Object.prototype.hasOwnProperty.call(rawConfig, 'type') || Object.prototype.hasOwnProperty.call(rawConfig, 'exchangeMode') || Object.prototype.hasOwnProperty.call(rawConfig, 'mode')) {
-		normalized.type = String(rawConfig.type || rawConfig.exchangeMode || rawConfig.mode || 'node');
+		normalized.type = normalizeMode(rawConfig.type || rawConfig.exchangeMode || rawConfig.mode || 'node');
 	}
 
 	if (Object.prototype.hasOwnProperty.call(rawConfig, 'host') || Object.prototype.hasOwnProperty.call(rawConfig, 'exchangeHost')) {
