@@ -443,6 +443,15 @@ public class ReactorHttpService extends Service {
             }
 
             if ("POST".equals(method) && "/message".equals(path)) {
+                if (!"node".equals(currentExchangeMode)) {
+                    JSONObject payload = new JSONObject();
+                    payload.put("ok", false);
+                    payload.put("error", "endpoint disabled in current working mode");
+                    payload.put("mode", currentExchangeMode);
+                    writeJsonResponse(client, 403, payload.toString());
+                    return;
+                }
+
                 String senderName = headers.getOrDefault("reactor-name", "");
                 String senderId = headers.getOrDefault("reactor-sender", "");
                 String remoteHost = client.getInetAddress() != null ? String.valueOf(client.getInetAddress().getHostAddress()) : "";

@@ -683,6 +683,19 @@ class ReactorRuntime {
 		}
 
 		if (method === 'POST' && pathname === '/message') {
+			if (this.exchangeMode !== 'node') {
+				this.addHttpServerLog(`POST /message -> 403 (disabled in mode=${this.exchangeMode})`);
+				res.writeHead(403, { 'content-type': 'application/json' });
+				res.end(
+					JSON.stringify({
+						ok: false,
+						error: 'endpoint disabled in current working mode',
+						mode: this.exchangeMode,
+					}),
+				);
+				return;
+			}
+
 			const bodyChunks = [];
 			for await (const chunk of req) {
 				bodyChunks.push(chunk);
