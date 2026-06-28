@@ -5,7 +5,7 @@ const config: CapacitorConfig = {
   appName: 'Reactor',
   webDir: 'ui/build',
   android: {
-    path: 'dist/mobile/android'
+    path: 'capacitor/android'
   }
 };
 

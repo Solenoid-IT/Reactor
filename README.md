@@ -447,10 +447,10 @@ What they do:
 - `npm run mobile:open`: opens the Android project in Android Studio.
 
 Android project path:
-- `dist/mobile/android`
+- `capacitor/android`
 
 Debug APK output path:
-- `dist/mobile/android/app/build/outputs/apk/debug/app-debug.apk`
+- `capacitor/android/app/build/outputs/apk/debug/app-debug.apk`
 
 If Gradle fails due to Java version, use Java 11+ (recommended Java 17).
 On macOS with Android Studio installed:

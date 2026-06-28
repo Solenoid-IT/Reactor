@@ -24,7 +24,7 @@
     "ui:dev": "npm --prefix ui run dev",
     "ui:build": "npm --prefix ui run build && node scripts/patch-svelte-file-protocol.js",
     "mobile:sync": "npm run ui:build && npx cap sync android",
-    "mobile:build": "npm run mobile:sync && cd dist/mobile/android && ./gradlew assembleDebug",
+    "mobile:build": "npm run mobile:sync && cd capacitor/android && ./gradlew assembleDebug",
     "mobile:open": "npx cap open android",
     "pack": "npm run ui:build && electron-builder --dir",
     "build": "npm run ui:build && electron-builder",

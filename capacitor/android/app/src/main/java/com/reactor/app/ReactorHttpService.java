@@ -1,0 +1,1649 @@
+package com.reactor.app;
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.Service;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.os.Build;
+import android.os.IBinder;
+import android.util.Base64;
+
+import androidx.core.app.NotificationCompat;
+
+import com.getcapacitor.JSObject;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedInputStream;
+import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.WebSocket;
+import okhttp3.WebSocketListener;
+
+public class ReactorHttpService extends Service {
+    public static final String ACTION_START = "com.reactor.app.http.START";
+    public static final String ACTION_STOP = "com.reactor.app.http.STOP";
+    public static final String EXTRA_PORT = "port";
+
+    public static final String PREFS_NAME = "reactor_mobile";
+    public static final String PREF_HTTP_PORT = "httpServerPort";
+    public static final String PREF_REACTOR_NAME = "reactorName";
+    public static final String PREF_EXCHANGE_MODE = "exchangeMode";
+    public static final String PREF_EXCHANGE_HOST = "exchangeHost";
+    public static final String PREF_EXCHANGE_PORT = "exchangePort";
+    public static final String PREF_EXCHANGE_TLS = "exchangeTls";
+    public static final String PREF_EXCHANGE_TOKEN = "exchangeToken";
+    public static final int DEFAULT_PORT = 7070;
+    private static final String WORKING_MODE_FILE = "working-mode.json";
+
+    private static final String CHANNEL_ID = "reactor_http_channel";
+    private static final int NOTIFICATION_ID = 4242;
+    private static final String WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    private static final long WS_HEARTBEAT_INTERVAL_MS = 15000L;
+    private static final long WS_HEARTBEAT_TIMEOUT_MS = 45000L;
+
+    private static volatile boolean running = false;
+    private static volatile int currentPort = DEFAULT_PORT;
+
+    // Exchange state
+    private static volatile String currentExchangeMode = "node";
+    private static volatile String currentExchangeHost = "";
+    private static volatile int currentExchangePort = DEFAULT_PORT;
+    private static volatile boolean currentExchangeTls = false;
+    private static volatile String currentExchangeToken = "";
+    private static volatile WebSocket wsExchangeClientSocket = null;
+    private static ReactorHttpService instance = null;
+    private static volatile boolean stopRequestedByUser = false;
+
+    private final ExecutorService clientPool = Executors.newCachedThreadPool();
+    private ServerSocket serverSocket;
+    private Thread acceptThread;
+    private long startedAtMs = 0L;
+
+    // Exchange server: gestito tramite handleClient (WS upgrade detection)
+    private final ConcurrentHashMap<String, WsConnection> wsExchangeClients = new ConcurrentHashMap<>();
+
+    // Exchange client
+    private OkHttpClient okHttpClient;
+    private volatile boolean wsClientRunning = false;
+    private Thread wsClientThread;
+
+    private static final Pattern SEND_MESSAGE_CALL_PATTERN = Pattern.compile(
+            "Node\\.sendMessage\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\1\\s*,\\s*(['\"])\\s*(.*?)\\s*\\3",
+            Pattern.DOTALL
+    );
+
+    private static class MessageScript {
+        File scriptFile;
+        String scriptName;
+        String scriptPath;
+        String scriptState;
+        String source;
+        boolean enabled;
+        boolean messageFromAnySender;
+        List<String> messageSenders;
+    }
+
+    public static boolean isRunning() {
+        return running;
+    }
+
+    public static int getCurrentPort() {
+        return currentPort;
+    }
+
+    public static String getCurrentExchangeMode() { return currentExchangeMode; }
+    public static String getCurrentExchangeHost() { return currentExchangeHost; }
+    public static int getCurrentExchangePort() { return currentExchangePort; }
+    public static boolean getCurrentExchangeTls() { return currentExchangeTls; }
+    public static boolean isExchangeServerActive() {
+        // Exchange server è attivo se il service HTTP è running in modalità exchange
+        return "exchange".equals(currentExchangeMode) && running;
+    }
+    public static boolean isExchangeClientConnected() { return wsExchangeClientSocket != null; }
+        private String normalizeExchangeMode(String rawMode) {
+            String mode = String.valueOf(rawMode).trim().toLowerCase(Locale.ROOT);
+            if ("exchange".equals(mode)) {
+                return "exchange";
+            }
+            if ("client".equals(mode) || "disabled".equals(mode) || mode.isEmpty()) {
+                return "node";
+            }
+            return "node";
+        }
+
+        private File getWorkingModeFile() {
+            return new File(getFilesDir(), WORKING_MODE_FILE);
+        }
+
+        private String readExchangeToken() {
+            try {
+                File workingModeFile = getWorkingModeFile();
+                if (!workingModeFile.exists()) {
+                    return "";
+                }
+                ByteArrayOutputStream output = new ByteArrayOutputStream();
+                try (FileInputStream input = new FileInputStream(workingModeFile)) {
+                    byte[] buffer = new byte[1024];
+                    int read;
+                    while ((read = input.read(buffer)) >= 0) {
+                        output.write(buffer, 0, read);
+                    }
+                }
+                JSONObject parsed = new JSONObject(output.toString(StandardCharsets.UTF_8.name()).trim());
+                return String.valueOf(parsed.optString("token", "")).trim();
+            } catch (Exception ignored) {
+                return "";
+            }
+        }
+
+        private String readBearerToken(Map<String, String> headers) {
+            String authorization = headers.getOrDefault("authorization", "").trim();
+            if (authorization.isEmpty()) {
+                return "";
+            }
+            String prefix = "bearer ";
+            String lower = authorization.toLowerCase(Locale.ROOT);
+            if (!lower.startsWith(prefix)) {
+                return "";
+            }
+            return authorization.substring(prefix.length()).trim();
+        }
+
+        private void writeUnauthorizedResponse(Socket client) {
+            try {
+                OutputStream output = client.getOutputStream();
+                String body = "Unauthorized";
+                String response = "HTTP/1.1 401 Unauthorized\r\n"
+                        + "Content-Type: text/plain; charset=utf-8\r\n"
+                        + "Connection: close\r\n"
+                        + "Content-Length: " + body.getBytes(StandardCharsets.UTF_8).length + "\r\n\r\n"
+                        + body;
+                output.write(response.getBytes(StandardCharsets.UTF_8));
+                output.flush();
+            } catch (Exception ignored) {
+                // ignore response write failures
+            }
+        }
+
+    public static List<String> getExchangeConnectedClients() {
+        if (instance != null) {
+            return new ArrayList<>(instance.wsExchangeClients.keySet());
+        }
+        return new ArrayList<>();
+    }
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        instance = this;
+        createNotificationChannel();
+        ReactorServiceWatchdogWorker.schedule(getApplicationContext());
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        String action = intent != null ? intent.getAction() : ACTION_START;
+        if (ACTION_STOP.equals(action)) {
+            stopRequestedByUser = true;
+            stopServer();
+            stopForeground(true);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        stopRequestedByUser = false;
+
+        int requestedPort = readConfiguredPort(intent);
+        currentPort = requestedPort;
+
+        Notification notification = buildNotification(currentPort);
+        startForeground(NOTIFICATION_ID, notification);
+
+        try {
+            if (!running || currentPort != readActivePort()) {
+                startServer(currentPort);
+            }
+        } catch (Exception e) {
+            stopServer();
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        startExchange();
+
+        return START_STICKY;
+    }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        super.onTaskRemoved(rootIntent);
+        if (!stopRequestedByUser) {
+            appendGlobalLog(buildExchangeLog("SERVICE_TASK_REMOVED", "task removed, keeping foreground service alive"));
+            requestSelfRestart();
+        }
+    }
+
+    @Override
+    public void onDestroy() {
+        stopExchange();
+        stopServer();
+        clientPool.shutdownNow();
+        instance = null;
+
+        if (!stopRequestedByUser) {
+            appendGlobalLog(buildExchangeLog("SERVICE_RESTART", "service destroyed unexpectedly, requesting restart"));
+            requestSelfRestart();
+        }
+
+        super.onDestroy();
+    }
+
+    private void requestSelfRestart() {
+        try {
+            Intent restartIntent = new Intent(getApplicationContext(), ReactorHttpService.class);
+            restartIntent.setAction(ACTION_START);
+            restartIntent.putExtra(EXTRA_PORT, currentPort > 0 ? currentPort : DEFAULT_PORT);
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                getApplicationContext().startForegroundService(restartIntent);
+            } else {
+                getApplicationContext().startService(restartIntent);
+            }
+        } catch (Exception restartError) {
+            appendGlobalLog(buildExchangeLog("SERVICE_RESTART_ERROR", restartError.getMessage() != null ? restartError.getMessage() : "restart failed"));
+        }
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+
+    private int readConfiguredPort(Intent intent) {
+        int requestedPort = intent != null ? intent.getIntExtra(EXTRA_PORT, DEFAULT_PORT) : DEFAULT_PORT;
+        if (requestedPort < 1 || requestedPort > 65535) {
+            requestedPort = DEFAULT_PORT;
+        }
+
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        int savedPort = prefs.getInt(PREF_HTTP_PORT, DEFAULT_PORT);
+        if (savedPort >= 1 && savedPort <= 65535) {
+            requestedPort = savedPort;
+        }
+
+        return requestedPort;
+    }
+
+    private int readActivePort() {
+        return this.serverSocket != null ? this.serverSocket.getLocalPort() : -1;
+    }
+
+    private synchronized void startServer(int port) throws IOException {
+        stopServer();
+
+        serverSocket = new ServerSocket(port);
+        serverSocket.setReuseAddress(true);
+        currentPort = port;
+        running = true;
+        startedAtMs = System.currentTimeMillis();
+
+        acceptThread = new Thread(() -> {
+            while (running && serverSocket != null && !serverSocket.isClosed()) {
+                try {
+                    Socket client = serverSocket.accept();
+                    clientPool.submit(() -> handleClient(client));
+                } catch (IOException ignored) {
+                    if (!running) {
+                        return;
+                    }
+                }
+            }
+        }, "reactor-http-accept");
+        acceptThread.setDaemon(true);
+        acceptThread.start();
+
+        appendGlobalLog(buildServerLifecycleLog("START", "listening on port " + port));
+    }
+
+    private synchronized void stopServer() {
+        running = false;
+
+        if (serverSocket != null) {
+            try {
+                serverSocket.close();
+            } catch (IOException ignored) {
+                // Ignore close failures.
+            }
+            serverSocket = null;
+        }
+
+        if (acceptThread != null) {
+            acceptThread.interrupt();
+            acceptThread = null;
+        }
+
+        appendGlobalLog(buildServerLifecycleLog("STOP", "server stopped"));
+    }
+
+    private void handleClient(Socket client) {
+        boolean socketHandedOff = false;
+        try {
+            client.setSoTimeout(10000);
+            BufferedInputStream input = new BufferedInputStream(client.getInputStream());
+
+            String requestLine = readLine(input);
+            if (requestLine == null || requestLine.isEmpty()) {
+                return;
+            }
+
+            Map<String, String> headers = new HashMap<>();
+            String headerLine;
+            while ((headerLine = readLine(input)) != null) {
+                if (headerLine.isEmpty()) {
+                    break;
+                }
+                int sep = headerLine.indexOf(':');
+                if (sep > 0) {
+                    String key = headerLine.substring(0, sep).trim().toLowerCase();
+                    String value = headerLine.substring(sep + 1).trim();
+                    headers.put(key, value);
+                }
+            }
+
+            // Rileva WebSocket upgrade: gestito dall'Exchange se siamo in modalità exchange
+            String upgradeHeader = headers.getOrDefault("upgrade", "");
+            String wsKey = headers.get("sec-websocket-key");
+            if ("websocket".equalsIgnoreCase(upgradeHeader) && wsKey != null
+                    && "exchange".equals(currentExchangeMode)) {
+                String expectedToken = readExchangeToken();
+                String providedToken = readBearerToken(headers);
+                if (!expectedToken.isEmpty() && !expectedToken.equals(providedToken)) {
+                    appendGlobalLog(buildExchangeLog("AUTH_REJECTED", "invalid bearer token on websocket upgrade"));
+                    writeUnauthorizedResponse(client);
+                    return;
+                }
+                socketHandedOff = true;
+                final Socket socketRef = client;
+                final String wsKeyRef = wsKey;
+                final InputStream inputRef = input;
+                clientPool.submit(() -> handleWsExchangeConnection(socketRef, wsKeyRef, inputRef));
+                return;
+            }
+
+            int contentLength = 0;
+            try {
+                contentLength = Integer.parseInt(headers.getOrDefault("content-length", "0"));
+            } catch (NumberFormatException ignored) {
+                contentLength = 0;
+            }
+
+            byte[] bodyBytes = readBody(input, contentLength);
+            String bodyText = new String(bodyBytes, StandardCharsets.UTF_8);
+
+            String[] firstParts = requestLine.split("\\s+");
+            String method = firstParts.length > 0 ? firstParts[0].toUpperCase() : "GET";
+            String target = firstParts.length > 1 ? firstParts[1] : "/";
+            String path = target.split("\\?")[0];
+
+            if ("GET".equals(method) && "/".equals(path)) {
+                List<MessageScript> listeners = collectMessageListeners();
+                JSONObject payload = new JSONObject();
+                payload.put("ok", true);
+                payload.put("service", "reactor");
+                payload.put("status", "healthy");
+                payload.put("timestamp", Instant.now().toString());
+                payload.put("uptimeSec", Math.max(0L, (System.currentTimeMillis() - startedAtMs) / 1000L));
+                payload.put("httpPort", currentPort);
+                payload.put("scriptsCount", listeners.size());
+                writeJsonResponse(client, 200, payload.toString());
+                return;
+            }
+
+            if ("POST".equals(method) && "/message".equals(path)) {
+                String senderName = headers.getOrDefault("reactor-name", "");
+                String senderId = headers.getOrDefault("reactor-sender", "");
+                String remoteHost = client.getInetAddress() != null ? String.valueOf(client.getInetAddress().getHostAddress()) : "";
+
+                JSONObject entry = new JSONObject();
+                entry.put("timestamp", Instant.now().toString());
+                entry.put("type", "MESSAGE_RECEIVED");
+                entry.put("scope", "GLOBAL");
+                entry.put("phase", "RECEIVED");
+                entry.put("senderName", senderName);
+                entry.put("senderId", senderId);
+                entry.put("remoteHost", remoteHost);
+                entry.put("contentType", headers.getOrDefault("content-type", ""));
+                entry.put("rawBody", bodyText);
+                appendGlobalLog(entry.toString());
+
+                List<MessageScript> listeners = collectMessageListeners();
+                Set<String> senderCandidates = resolveSenderCandidates(senderName, senderId, remoteHost);
+                JSONArray deliveredScripts = new JSONArray();
+                int deliveredCount = 0;
+
+                for (MessageScript script : listeners) {
+                    if (!matchesMessageSender(script, senderCandidates)) {
+                        continue;
+                    }
+
+                    try {
+                        writeExecutionStart(script, "MESSAGE", "MESSAGE");
+                        executeScriptActions(script, bodyText, headers);
+                        deliveredScripts.put(script.scriptName);
+                        deliveredCount += 1;
+                    } catch (Exception executionError) {
+                        writeExecutionError(script, "MESSAGE", "MESSAGE", executionError.getMessage());
+                    }
+                }
+
+                JSONObject payload = new JSONObject();
+                payload.put("ok", true);
+                payload.put("trigger", "MESSAGE");
+                payload.put("delivered", deliveredCount > 0);
+                payload.put("scripts", deliveredScripts);
+                payload.put("deliveredCount", deliveredCount);
+                payload.put("senderCandidates", new JSONArray(senderCandidates));
+
+                if (deliveredCount > 0) {
+                    writeJsonResponse(client, 200, payload.toString());
+                } else {
+                    payload.put("reason", "no listeners");
+                    writeJsonResponse(client, 202, payload.toString());
+                }
+                return;
+            }
+
+            JSONObject payload = new JSONObject();
+            payload.put("ok", false);
+            payload.put("error", "endpoint not found");
+            payload.put("method", method);
+            payload.put("path", path);
+            writeJsonResponse(client, 404, payload.toString());
+        } catch (Exception ignored) {
+            // Best-effort request handling.
+        } finally {
+            if (!socketHandedOff) {
+                try { client.close(); } catch (IOException ignored) {}
+            }
+        }
+    }
+
+    private List<MessageScript> collectMessageListeners() {
+        List<MessageScript> listeners = new ArrayList<>();
+        File projectsDir = new File(getFilesDir(), "projects");
+        if (!projectsDir.exists() || !projectsDir.isDirectory()) {
+            return listeners;
+        }
+
+        File[] children = projectsDir.listFiles();
+        if (children == null) {
+            return listeners;
+        }
+
+        for (File child : children) {
+            if (child == null || !child.isDirectory()) {
+                continue;
+            }
+
+            File scriptFile = resolveScriptFileFromProject(child);
+            if (scriptFile == null || !scriptFile.exists()) {
+                continue;
+            }
+
+            MessageScript script = parseMessageScript(scriptFile, child.getName());
+            if (script == null || !script.enabled) {
+                continue;
+            }
+
+            listeners.add(script);
+        }
+
+        return listeners;
+    }
+
+    private File resolveScriptFileFromProject(File projectDir) {
+        File bootTs = new File(projectDir, "boot.ts");
+        if (bootTs.exists()) {
+            return bootTs;
+        }
+
+        File bootJs = new File(projectDir, "boot.js");
+        if (bootJs.exists()) {
+            return bootJs;
+        }
+
+        return null;
+    }
+
+    private MessageScript parseMessageScript(File scriptFile, String projectName) {
+        try {
+            String source = readTextFile(scriptFile);
+            String[] lines = source.split("\\r?\\n", -1);
+
+            String state = "DISABLED";
+            boolean enabled = false;
+            boolean hasMessageEvent = false;
+            boolean messageFromAnySender = false;
+            List<String> messageSenders = new ArrayList<>();
+
+            for (String rawLine : lines) {
+                String line = rawLine.trim();
+                if (!line.startsWith("// @")) {
+                    continue;
+                }
+
+                if (line.startsWith("// @state")) {
+                    boolean isEnabled = line.toUpperCase(Locale.ROOT).contains("ENABLED");
+                    state = isEnabled ? "ENABLED" : "DISABLED";
+                    enabled = isEnabled;
+                    continue;
+                }
+
+                if (line.startsWith("// @on")) {
+                    String value = line.replace("// @on", "").trim();
+                    List<String> tokens = splitDirectiveTokens(value);
+                    for (String token : tokens) {
+                        String normalizedToken = token.trim();
+                        if (!normalizedToken.toUpperCase(Locale.ROOT).startsWith("MESSAGE")) {
+                            continue;
+                        }
+
+                        hasMessageEvent = true;
+                        int open = normalizedToken.indexOf('(');
+                        int close = normalizedToken.lastIndexOf(')');
+                        if (open < 0 || close <= open) {
+                            messageFromAnySender = true;
+                            continue;
+                        }
+
+                        String sendersRaw = normalizedToken.substring(open + 1, close).trim();
+                        if (sendersRaw.isEmpty()) {
+                            messageFromAnySender = true;
+                            continue;
+                        }
+
+                        for (String senderCandidate : sendersRaw.split(",")) {
+                            String normalizedSender = normalizeMessageSender(senderCandidate);
+                            if (normalizedSender != null && !messageSenders.contains(normalizedSender)) {
+                                messageSenders.add(normalizedSender);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!hasMessageEvent) {
+                return null;
+            }
+
+            MessageScript script = new MessageScript();
+            script.scriptFile = scriptFile;
+            script.scriptName = projectName;
+            script.scriptPath = scriptFile.getAbsolutePath();
+            script.scriptState = state;
+            script.source = source;
+            script.enabled = enabled;
+            script.messageFromAnySender = messageFromAnySender || messageSenders.isEmpty();
+            script.messageSenders = messageSenders;
+            return script;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private List<String> splitDirectiveTokens(String rawValue) {
+        List<String> out = new ArrayList<>();
+        StringBuilder token = new StringBuilder();
+        int parenDepth = 0;
+        String value = String.valueOf(rawValue);
+
+        for (int i = 0; i < value.length(); i += 1) {
+            char ch = value.charAt(i);
+
+            if (ch == '(') {
+                parenDepth += 1;
+                token.append(ch);
+                continue;
+            }
+
+            if (ch == ')') {
+                parenDepth = Math.max(0, parenDepth - 1);
+                token.append(ch);
+                continue;
+            }
+
+            if ((ch == ',' || Character.isWhitespace(ch)) && parenDepth == 0) {
+                String trimmed = token.toString().trim();
+                if (!trimmed.isEmpty()) {
+                    out.add(trimmed);
+                }
+                token.setLength(0);
+                continue;
+            }
+
+            token.append(ch);
+        }
+
+        String tail = token.toString().trim();
+        if (!tail.isEmpty()) {
+            out.add(tail);
+        }
+
+        return out;
+    }
+
+    private String normalizeMessageSender(String rawSender) {
+        String sender = String.valueOf(rawSender).trim().toLowerCase(Locale.ROOT);
+        if (sender.isEmpty()) {
+            return null;
+        }
+
+        if (sender.startsWith("http://") || sender.startsWith("https://")) {
+            try {
+                URL parsed = new URL(sender);
+                String host = String.valueOf(parsed.getHost()).trim().toLowerCase(Locale.ROOT);
+                int port = parsed.getPort() > 0 ? parsed.getPort() : DEFAULT_PORT;
+                if (host.isEmpty() || port < 1 || port > 65535) {
+                    return null;
+                }
+                return host + ":" + port;
+            } catch (Exception ignored) {
+                return null;
+            }
+        }
+
+        if (sender.matches("^[^:]+:[0-9]{1,5}$")) {
+            String[] parts = sender.split(":", 2);
+            int port;
+            try {
+                port = Integer.parseInt(parts[1]);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+
+            if (parts[0].trim().isEmpty() || port < 1 || port > 65535) {
+                return null;
+            }
+            return parts[0].trim() + ":" + port;
+        }
+
+        boolean looksLikeHost = sender.matches("^\\d+\\.\\d+\\.\\d+\\.\\d+$") || sender.contains(".") || sender.endsWith(".local");
+        if (looksLikeHost) {
+            return sender + ":" + DEFAULT_PORT;
+        }
+
+        return sender;
+    }
+
+    private Set<String> resolveSenderCandidates(String senderName, String senderId, String remoteHost) {
+        Set<String> candidates = new HashSet<>();
+
+        String normalizedName = String.valueOf(senderName).trim().toLowerCase(Locale.ROOT);
+        if (!normalizedName.isEmpty()) {
+            candidates.add(normalizedName);
+        }
+
+        String normalizedSender = normalizeMessageSender(senderId);
+        if (normalizedSender != null) {
+            candidates.add(normalizedSender);
+        }
+
+        String normalizedRemoteHost = String.valueOf(remoteHost).trim().toLowerCase(Locale.ROOT);
+        if (!normalizedRemoteHost.isEmpty()) {
+            candidates.add(normalizedRemoteHost + ":" + DEFAULT_PORT);
+        }
+
+        return candidates;
+    }
+
+    private boolean matchesMessageSender(MessageScript script, Set<String> senderCandidates) {
+        if (script == null || script.messageFromAnySender) {
+            return script != null;
+        }
+
+        for (String expected : script.messageSenders) {
+            if (senderCandidates.contains(expected)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void writeExecutionStart(MessageScript script, String trigger, String event) {
+        try {
+            JSONObject entry = new JSONObject();
+            JSONObject scriptNode = new JSONObject();
+            scriptNode.put("name", script.scriptName);
+            scriptNode.put("path", script.scriptPath);
+            scriptNode.put("state", script.scriptState);
+
+            entry.put("timestamp", Instant.now().toString());
+            entry.put("type", "SCRIPT_EXECUTION");
+            entry.put("scope", "PROJECT");
+            entry.put("phase", "START");
+            entry.put("script", scriptNode);
+            entry.put("trigger", trigger);
+            entry.put("event", event);
+            entry.put("expression", JSONObject.NULL);
+            entry.put("watchPath", JSONObject.NULL);
+            entry.put("watchType", JSONObject.NULL);
+            entry.put("durationMs", JSONObject.NULL);
+            entry.put("output", JSONObject.NULL);
+            entry.put("error", JSONObject.NULL);
+            appendProjectLog(script, entry.toString());
+
+            JSONObject globalEntry = new JSONObject(entry.toString());
+            globalEntry.put("scope", "GLOBAL");
+            appendGlobalLog(globalEntry.toString());
+        } catch (Exception ignored) {
+            // Ignore JSON logging failures.
+        }
+    }
+
+    private void writeExecutionError(MessageScript script, String trigger, String event, String errorMessage) {
+        try {
+            JSONObject entry = new JSONObject();
+            JSONObject scriptNode = new JSONObject();
+            scriptNode.put("name", script.scriptName);
+            scriptNode.put("path", script.scriptPath);
+            scriptNode.put("state", script.scriptState);
+
+            entry.put("timestamp", Instant.now().toString());
+            entry.put("type", "SCRIPT_EXECUTION");
+            entry.put("scope", "PROJECT");
+            entry.put("phase", "ERROR");
+            entry.put("script", scriptNode);
+            entry.put("trigger", trigger);
+            entry.put("event", event);
+            entry.put("expression", JSONObject.NULL);
+            entry.put("watchPath", JSONObject.NULL);
+            entry.put("watchType", JSONObject.NULL);
+            entry.put("durationMs", JSONObject.NULL);
+            entry.put("output", JSONObject.NULL);
+            entry.put("error", String.valueOf(errorMessage));
+            appendProjectLog(script, entry.toString());
+        } catch (Exception ignored) {
+            // Ignore JSON logging failures.
+        }
+    }
+
+    private void appendProjectLog(MessageScript script, String line) {
+        try {
+            File projectLogFile = new File(script.scriptFile.getParentFile(), "activity.log");
+            try (FileOutputStream stream = new FileOutputStream(projectLogFile, true)) {
+                stream.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Exception ignored) {
+            // Ignore per-project logging failures.
+        }
+    }
+
+    private void executeScriptActions(MessageScript script, String messageBody, Map<String, String> incomingHeaders) {
+        Matcher matcher = SEND_MESSAGE_CALL_PATTERN.matcher(script.source);
+        while (matcher.find()) {
+            String target = matcher.group(2) != null ? matcher.group(2).trim() : "";
+            String content = matcher.group(4) != null ? matcher.group(4) : "";
+            if (target.isEmpty()) {
+                continue;
+            }
+
+            Map<String, String> extraHeaders = new HashMap<>();
+            String incomingContentType = incomingHeaders.getOrDefault("content-type", "");
+            if (!incomingContentType.isEmpty()) {
+                extraHeaders.put("X-Reactor-Message-Content-Type", incomingContentType);
+            }
+            if (messageBody != null && !messageBody.isEmpty()) {
+                extraHeaders.put("X-Reactor-Message-Body", messageBody);
+            }
+
+            sendNodeMessage(target, content, extraHeaders);
+        }
+    }
+
+    private void sendNodeMessage(String target, String content, Map<String, String> extraHeaders) {
+        String targetValue = String.valueOf(target).trim();
+        if (targetValue.isEmpty()) {
+            return;
+        }
+
+        List<String> normalizedTargets = buildTargetCandidates(targetValue);
+        if (normalizedTargets.isEmpty()) {
+            return;
+        }
+
+        String reactorName = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(PREF_REACTOR_NAME, "mobile-reactor");
+        String senderId = String.valueOf(reactorName) + ":" + currentPort;
+
+        RuntimeException lastError = null;
+        for (String normalizedTarget : normalizedTargets) {
+            String[] hostPort = normalizedTarget.split(":", 2);
+            if (hostPort.length < 2) {
+                continue;
+            }
+
+            String endpoint = "http://" + hostPort[0] + ":" + hostPort[1] + "/message";
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(endpoint).openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(2000);
+                connection.setReadTimeout(4000);
+                connection.setDoOutput(true);
+                connection.setRequestProperty("content-type", "text/plain; charset=utf-8");
+                connection.setRequestProperty("Reactor-Name", String.valueOf(reactorName));
+                connection.setRequestProperty("Reactor-Sender", senderId);
+
+                for (Map.Entry<String, String> header : extraHeaders.entrySet()) {
+                    connection.setRequestProperty(header.getKey(), header.getValue());
+                }
+
+                byte[] payload = String.valueOf(content).getBytes(StandardCharsets.UTF_8);
+                connection.setRequestProperty("content-length", String.valueOf(payload.length));
+                connection.getOutputStream().write(payload);
+
+                int status = connection.getResponseCode();
+                if (status >= 200 && status < 300) {
+                    return;
+                }
+                lastError = new RuntimeException("message dispatch failed with HTTP " + status);
+            } catch (Exception error) {
+                lastError = new RuntimeException(error.getMessage());
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+        }
+
+        if (lastError != null) {
+            // Fallback via Exchange se siamo in modalità client
+            if ("node".equals(currentExchangeMode) && wsExchangeClientSocket != null) {
+                try {
+                    JSONObject packet = new JSONObject();
+                    packet.put("type", "message");
+                    packet.put("to", targetValue.toLowerCase(Locale.ROOT));
+                    packet.put("content", String.valueOf(content));
+                    packet.put("contentType", "text/plain");
+                    wsExchangeClientSocket.send(packet.toString());
+                    return;
+                } catch (Exception exchangeError) {
+                    throw new RuntimeException("direct and exchange both failed: " + exchangeError.getMessage());
+                }
+            }
+            throw lastError;
+        }
+
+        // Nessun target diretto disponibile, prova exchange se client
+        if ("node".equals(currentExchangeMode) && wsExchangeClientSocket != null) {
+            try {
+                JSONObject packet = new JSONObject();
+                packet.put("type", "message");
+                packet.put("to", targetValue.toLowerCase(Locale.ROOT));
+                packet.put("content", String.valueOf(content));
+                packet.put("contentType", "text/plain");
+                wsExchangeClientSocket.send(packet.toString());
+            } catch (Exception exchangeError) {
+                throw new RuntimeException("exchange failed: " + exchangeError.getMessage());
+            }
+        }
+    }
+
+    private List<String> buildTargetCandidates(String targetValue) {
+        List<String> candidates = new ArrayList<>();
+
+        String normalized = normalizeMessageSender(targetValue);
+        if (normalized == null) {
+            return candidates;
+        }
+
+        if (normalized.matches("^[^:]+:[0-9]{1,5}$")) {
+            candidates.add(normalized);
+            if (!normalized.endsWith(":" + DEFAULT_PORT)) {
+                String host = normalized.split(":", 2)[0];
+                candidates.add(host + ":" + DEFAULT_PORT);
+            }
+            return candidates;
+        }
+
+        String host = normalized;
+        candidates.add(host + ":" + currentPort);
+        if (currentPort != DEFAULT_PORT) {
+            candidates.add(host + ":" + DEFAULT_PORT);
+        }
+
+        return candidates;
+    }
+
+    // =========================================================================
+    // EXCHANGE — configurazione e lifecycle
+    // =========================================================================
+
+    private void startExchange() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String mode = normalizeExchangeMode(prefs.getString(PREF_EXCHANGE_MODE, "node"));
+        String host = prefs.getString(PREF_EXCHANGE_HOST, "");
+        int port = prefs.getInt(PREF_EXCHANGE_PORT, DEFAULT_PORT);
+        boolean tls = prefs.getBoolean(PREF_EXCHANGE_TLS, false);
+        String token = readExchangeToken();
+        if (token.isEmpty()) {
+            token = prefs.getString(PREF_EXCHANGE_TOKEN, "");
+        }
+
+        currentExchangeMode = mode;
+        currentExchangeHost = host;
+        currentExchangePort = port;
+        currentExchangeTls = tls;
+        currentExchangeToken = token != null ? token : "";
+
+        stopExchange();
+
+        // In EXCHANGE mode the WS server is integrated into the HTTP server:
+        // handleClient() detects upgrade requests and handles WS connections.
+        if ("exchange".equals(mode)) {
+            wsExchangeClients.clear();
+            appendGlobalLog(buildExchangeLog("SERVER_START", "Exchange server active on HTTP port " + currentPort));
+        } else if ("node".equals(mode) && !host.isEmpty()) {
+            startWsExchangeClient();
+        }
+    }
+
+    private void stopExchange() {
+        if ("exchange".equals(currentExchangeMode)) {
+            wsExchangeClients.clear();
+        }
+        stopWsExchangeClient();
+    }
+
+    // =========================================================================
+    // EXCHANGE SERVER — gestito in handleClient via WS upgrade detection
+    // =========================================================================
+
+    /** Chiamato da handleClient quando rileva un WebSocket upgrade in modalità EXCHANGE. */
+    private void handleWsExchangeConnection(Socket socket, String wsKey, InputStream inputStream) {
+        String clientName = null;
+        WsConnection conn = null;
+        Thread heartbeatThread = null;
+        try {
+            socket.setSoTimeout(0);
+            OutputStream output = socket.getOutputStream();
+
+            // Invia 101 Switching Protocols
+            String acceptKey = computeWsAccept(wsKey);
+            String handshake = "HTTP/1.1 101 Switching Protocols\r\n"
+                    + "Upgrade: websocket\r\n"
+                    + "Connection: Upgrade\r\n"
+                    + "Sec-WebSocket-Accept: " + acceptKey + "\r\n\r\n";
+            output.write(handshake.getBytes(StandardCharsets.UTF_8));
+            output.flush();
+
+            conn = new WsConnection(socket, output);
+            heartbeatThread = startWsServerHeartbeat(conn);
+
+            // Frame loop
+            while (!socket.isClosed() && "exchange".equals(currentExchangeMode)) {
+                WsFrame frame = readWsFrame(inputStream);
+                conn.markSeen();
+
+                if (frame.opcode == 0x8) break; // Close
+                if (frame.opcode == 0x9) { conn.sendPong(frame.payload); continue; } // Ping→Pong
+                if (frame.opcode == 0xA) { conn.markPong(); continue; } // Pong
+                if (frame.opcode != 0x1 && frame.opcode != 0x2) continue;
+
+                String text = new String(frame.payload, StandardCharsets.UTF_8);
+                try {
+                    JSONObject packet = new JSONObject(text);
+                    String type = packet.optString("type", "");
+
+                    if ("register".equals(type)) {
+                        String name = packet.optString("name", "").trim().toLowerCase(Locale.ROOT);
+                        String providedToken = packet.optString("token", "").trim();
+                        String expectedToken = readExchangeToken();
+                        if (!expectedToken.isEmpty() && !expectedToken.equals(providedToken)) {
+                            conn.send("{\"type\":\"auth-error\",\"error\":\"invalid exchange token\"}");
+                            appendGlobalLog(buildExchangeLog("AUTH_REJECTED", "invalid token for client " + name));
+                            break;
+                        }
+                        if (!name.isEmpty()) {
+                            if (clientName != null) wsExchangeClients.remove(clientName);
+                            clientName = name;
+                            wsExchangeClients.put(clientName, conn);
+                            appendGlobalLog(buildExchangeLog("CLIENT_REGISTERED", "client: " + clientName));
+                            conn.send("{\"type\":\"registered\",\"name\":\"" + clientName + "\"}");
+                        }
+                    } else if ("message".equals(type)) {
+                        routeExchangeMessage(
+                                packet.optString("to", "").trim().toLowerCase(Locale.ROOT),
+                                clientName != null ? clientName : "unknown",
+                                packet.optString("content", ""),
+                                packet.optString("contentType", "text/plain"));
+                    }
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (heartbeatThread != null) {
+                heartbeatThread.interrupt();
+            }
+            if (clientName != null) {
+                wsExchangeClients.remove(clientName);
+                appendGlobalLog(buildExchangeLog("CLIENT_DISCONNECTED", clientName));
+            }
+            try { socket.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    private Thread startWsServerHeartbeat(WsConnection conn) {
+        Thread thread = new Thread(() -> {
+            while (!conn.socket.isClosed() && "exchange".equals(currentExchangeMode)) {
+                try {
+                    Thread.sleep(WS_HEARTBEAT_INTERVAL_MS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+
+                long idleMs = System.currentTimeMillis() - conn.getLastSeenAt();
+                if (idleMs > WS_HEARTBEAT_TIMEOUT_MS) {
+                    appendGlobalLog(buildExchangeLog("HEARTBEAT_TIMEOUT", "closing stale websocket client"));
+                    try { conn.socket.close(); } catch (IOException ignored) {}
+                    return;
+                }
+
+                try {
+                    conn.sendPing();
+                } catch (Exception pingError) {
+                    appendGlobalLog(buildExchangeLog("HEARTBEAT_ERROR", pingError.getMessage() != null ? pingError.getMessage() : "ping failed"));
+                    try { conn.socket.close(); } catch (IOException ignored) {}
+                    return;
+                }
+            }
+        }, "reactor-ws-exchange-heartbeat");
+        thread.setDaemon(true);
+        thread.start();
+        return thread;
+    }
+
+    private void routeExchangeMessage(String to, String from, String content, String contentType) {
+        WsConnection target = wsExchangeClients.get(to);
+        if (target == null) {
+            appendGlobalLog(buildExchangeLog("ROUTE_MISS", "target not connected: " + to));
+            return;
+        }
+        try {
+            JSONObject packet = new JSONObject();
+            packet.put("type", "message");
+            packet.put("from", from);
+            packet.put("content", content);
+            packet.put("contentType", contentType);
+            target.send(packet.toString());
+            appendGlobalLog(buildExchangeLog("ROUTED", from + " → " + to));
+        } catch (Exception e) {
+            appendGlobalLog(buildExchangeLog("ROUTE_ERROR", "error: " + e.getMessage()));
+        }
+    }
+
+    // =========================================================================
+    // EXCHANGE CLIENT — OkHttp WebSocket
+    // =========================================================================
+
+    private void startWsExchangeClient() {
+        okHttpClient = buildExchangeWsClient(currentExchangeTls);
+        wsClientRunning = true;
+
+        wsClientThread = new Thread(() -> {
+            while (wsClientRunning) {
+                connectToExchangeServer();
+                if (!wsClientRunning) break;
+                try { Thread.sleep(5000); } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }, "reactor-ws-exchange-client");
+        wsClientThread.setDaemon(true);
+        wsClientThread.start();
+    }
+
+    private void stopWsExchangeClient() {
+        wsClientRunning = false;
+        WebSocket ws = wsExchangeClientSocket;
+        if (ws != null) {
+            ws.close(1000, "stopping");
+            wsExchangeClientSocket = null;
+        }
+        if (wsClientThread != null) {
+            wsClientThread.interrupt();
+            wsClientThread = null;
+        }
+    }
+
+    private void connectToExchangeServer() {
+        final Object lock = new Object();
+        ExchangeEndpoint endpoint = normalizeExchangeEndpoint(currentExchangeHost, currentExchangePort);
+        if (endpoint == null) {
+            appendGlobalLog(buildExchangeLog("CLIENT_FAILURE", "invalid exchange host or port"));
+            return;
+        }
+
+        String url = (currentExchangeTls ? "wss://" : "ws://") + endpoint.host + ":" + endpoint.port;
+        appendGlobalLog(buildExchangeLog("CLIENT_CONNECTING", "connecting to " + url));
+        Request.Builder requestBuilder = new Request.Builder().url(url);
+        String token = readExchangeToken();
+        if (token.isEmpty()) {
+            token = currentExchangeToken != null ? currentExchangeToken.trim() : "";
+        }
+        if (!token.isEmpty()) {
+            requestBuilder.addHeader("Authorization", "Bearer " + token);
+        }
+        Request request = requestBuilder.build();
+
+        okHttpClient.newWebSocket(request, new WebSocketListener() {
+            @Override
+            public void onOpen(WebSocket webSocket, Response response) {
+                wsExchangeClientSocket = webSocket;
+                String reactorName = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .getString(PREF_REACTOR_NAME, "mobile-reactor");
+                String registerToken = readExchangeToken();
+                if (registerToken.isEmpty()) {
+                    registerToken = currentExchangeToken != null ? currentExchangeToken.trim() : "";
+                }
+                try {
+                    JSONObject packet = new JSONObject();
+                    packet.put("type", "register");
+                    packet.put("name", reactorName);
+                    packet.put("token", registerToken);
+                    webSocket.send(packet.toString());
+                } catch (Exception ignored) {
+                    webSocket.send("{\"type\":\"register\",\"name\":\"mobile-reactor\",\"token\":\"\"}");
+                }
+                appendGlobalLog(buildExchangeLog("CLIENT_CONNECTED", "connected to " + url + " as " + reactorName));
+            }
+
+            @Override
+            public void onMessage(WebSocket webSocket, String text) {
+                handleIncomingExchangeMessage(text);
+            }
+
+            @Override
+            public void onClosing(WebSocket webSocket, int code, String reason) {
+                webSocket.close(1000, null);
+            }
+
+            @Override
+            public void onClosed(WebSocket webSocket, int code, String reason) {
+                wsExchangeClientSocket = null;
+                appendGlobalLog(buildExchangeLog("CLIENT_DISCONNECTED", "disconnected from exchange"));
+                synchronized (lock) { lock.notifyAll(); }
+            }
+
+            @Override
+            public void onFailure(WebSocket webSocket, Throwable t, Response response) {
+                wsExchangeClientSocket = null;
+                String detail = t.getMessage() != null ? t.getMessage() : "unknown error";
+                if (response != null) {
+                    detail += " (HTTP " + response.code() + ")";
+                }
+                appendGlobalLog(buildExchangeLog("CLIENT_FAILURE", detail));
+                synchronized (lock) { lock.notifyAll(); }
+            }
+        });
+
+        synchronized (lock) {
+            try { lock.wait(); } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private OkHttpClient buildExchangeWsClient(boolean tls) {
+        OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                .retryOnConnectionFailure(false)
+                .pingInterval(WS_HEARTBEAT_INTERVAL_MS, TimeUnit.MILLISECONDS);
+
+        if (tls) {
+            try {
+                X509TrustManager trustAll = new X509TrustManager() {
+                    @Override
+                    public void checkClientTrusted(X509Certificate[] chain, String authType) {
+                        // Intentionally permissive to support self-signed Reactor exchange certs.
+                    }
+
+                    @Override
+                    public void checkServerTrusted(X509Certificate[] chain, String authType) {
+                        // Intentionally permissive to support self-signed Reactor exchange certs.
+                    }
+
+                    @Override
+                    public X509Certificate[] getAcceptedIssuers() {
+                        return new X509Certificate[0];
+                    }
+                };
+
+                SSLContext sslContext = SSLContext.getInstance("TLS");
+                sslContext.init(null, new TrustManager[]{trustAll}, new SecureRandom());
+                builder.sslSocketFactory(sslContext.getSocketFactory(), trustAll);
+                builder.hostnameVerifier((hostname, session) -> true);
+                appendGlobalLog(buildExchangeLog("CLIENT_TLS", "TLS enabled (certificate validation disabled for exchange client)"));
+            } catch (Exception error) {
+                appendGlobalLog(buildExchangeLog("CLIENT_TLS_ERROR", "unable to configure permissive TLS: " + error.getMessage()));
+            }
+        }
+
+        return builder.build();
+    }
+
+    private ExchangeEndpoint normalizeExchangeEndpoint(String rawHost, int rawPort) {
+        String hostValue = String.valueOf(rawHost != null ? rawHost : "").trim();
+        int portValue = rawPort >= 1 && rawPort <= 65535 ? rawPort : DEFAULT_PORT;
+        if (hostValue.isEmpty()) {
+            return null;
+        }
+
+        try {
+            if (hostValue.startsWith("ws://") || hostValue.startsWith("wss://")
+                    || hostValue.startsWith("http://") || hostValue.startsWith("https://")) {
+                URL parsed = new URL(hostValue.replace("ws://", "http://").replace("wss://", "https://"));
+                String parsedHost = String.valueOf(parsed.getHost()).trim();
+                int parsedPort = parsed.getPort() > 0 ? parsed.getPort() : portValue;
+                if (!parsedHost.isEmpty()) {
+                    return new ExchangeEndpoint(parsedHost, parsedPort);
+                }
+            }
+        } catch (Exception ignored) {
+            // Fallback to host:port parsing below.
+        }
+
+        if (hostValue.contains("/")) {
+            hostValue = hostValue.substring(0, hostValue.indexOf('/')).trim();
+        }
+
+        String host = hostValue;
+        int port = portValue;
+        int colonIndex = hostValue.lastIndexOf(':');
+        if (colonIndex > 0 && colonIndex < hostValue.length() - 1) {
+            String maybeHost = hostValue.substring(0, colonIndex).trim();
+            String maybePort = hostValue.substring(colonIndex + 1).trim();
+            try {
+                int parsedPort = Integer.parseInt(maybePort);
+                if (parsedPort >= 1 && parsedPort <= 65535 && !maybeHost.isEmpty()) {
+                    host = maybeHost;
+                    port = parsedPort;
+                }
+            } catch (NumberFormatException ignored) {
+                // Keep default port.
+            }
+        }
+
+        if (host.isEmpty()) {
+            return null;
+        }
+
+        return new ExchangeEndpoint(host, port);
+    }
+
+    private static class ExchangeEndpoint {
+        final String host;
+        final int port;
+
+        ExchangeEndpoint(String host, int port) {
+            this.host = host;
+            this.port = port;
+        }
+    }
+
+    private void handleIncomingExchangeMessage(String text) {
+        try {
+            JSONObject packet = new JSONObject(text);
+            if (!"message".equals(packet.optString("type", ""))) return;
+
+            String from = packet.optString("from", "unknown");
+            String content = packet.optString("content", "");
+            String contentType = packet.optString("contentType", "text/plain");
+
+            appendGlobalLog(buildExchangeLog("MESSAGE_RECEIVED", "message from " + from + " via exchange"));
+
+            List<MessageScript> listeners = collectMessageListeners();
+            Set<String> senderCandidates = new HashSet<>();
+            senderCandidates.add(from.toLowerCase(Locale.ROOT));
+
+            Map<String, String> headers = new HashMap<>();
+            headers.put("content-type", contentType);
+            headers.put("x-exchange-from", from);
+
+            for (MessageScript script : listeners) {
+                if (!matchesMessageSender(script, senderCandidates)) continue;
+                try {
+                    writeExecutionStart(script, "MESSAGE", "MESSAGE");
+                    executeScriptActions(script, content, headers);
+                } catch (Exception e) {
+                    writeExecutionError(script, "MESSAGE", "MESSAGE", e.getMessage());
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    // =========================================================================
+    // EXCHANGE — WebSocket frame utilities e inner classes
+    // =========================================================================
+
+    private static class WsConnection {
+        final Socket socket;
+        final OutputStream output;
+        volatile String name = null;
+        volatile long lastSeenAt = System.currentTimeMillis();
+        volatile long lastPongAt = System.currentTimeMillis();
+
+        WsConnection(Socket socket, OutputStream output) {
+            this.socket = socket;
+            this.output = output;
+        }
+
+        synchronized void send(String message) throws IOException {
+            byte[] payload = message.getBytes(StandardCharsets.UTF_8);
+            writeWsFrame(output, 0x1, payload);
+            markSeen();
+        }
+
+        synchronized void sendPing() throws IOException {
+            writeWsFrame(output, 0x9, new byte[0]);
+        }
+
+        synchronized void sendPong(byte[] payload) throws IOException {
+            writeWsFrame(output, 0xA, payload != null ? payload : new byte[0]);
+            markSeen();
+            markPong();
+        }
+
+        void markSeen() {
+            lastSeenAt = System.currentTimeMillis();
+        }
+
+        void markPong() {
+            long now = System.currentTimeMillis();
+            lastPongAt = now;
+            lastSeenAt = now;
+        }
+
+        long getLastSeenAt() {
+            return lastSeenAt;
+        }
+    }
+
+    private static class WsFrame {
+        int opcode;
+        byte[] payload;
+    }
+
+    private static void writeWsFrame(OutputStream output, int opcode, byte[] payload) throws IOException {
+        ByteArrayOutputStream frame = new ByteArrayOutputStream();
+        frame.write(0x80 | (opcode & 0x0F)); // FIN=1
+        int len = payload.length;
+        if (len <= 125) {
+            frame.write(len);
+        } else if (len <= 65535) {
+            frame.write(126);
+            frame.write((len >> 8) & 0xFF);
+            frame.write(len & 0xFF);
+        } else {
+            frame.write(127);
+            for (int i = 7; i >= 0; i--) {
+                frame.write((int) ((len >> (8 * i)) & 0xFF));
+            }
+        }
+        frame.write(payload);
+        output.write(frame.toByteArray());
+        output.flush();
+    }
+
+    private static WsFrame readWsFrame(InputStream input) throws IOException {
+        int b0 = input.read();
+        int b1 = input.read();
+        if (b0 < 0 || b1 < 0) throw new IOException("connection closed");
+
+        int opcode = b0 & 0x0F;
+        boolean masked = (b1 & 0x80) != 0;
+        long payloadLen = b1 & 0x7F;
+
+        if (payloadLen == 126) {
+            int hi = input.read(), lo = input.read();
+            if (hi < 0 || lo < 0) throw new IOException("truncated length");
+            payloadLen = ((hi & 0xFF) << 8) | (lo & 0xFF);
+        } else if (payloadLen == 127) {
+            payloadLen = 0;
+            for (int i = 0; i < 8; i++) {
+                int b = input.read();
+                if (b < 0) throw new IOException("truncated length");
+                payloadLen = (payloadLen << 8) | (b & 0xFF);
+            }
+        }
+
+        byte[] maskKey = new byte[4];
+        if (masked) {
+            for (int i = 0; i < 4; i++) {
+                int b = input.read();
+                if (b < 0) throw new IOException("truncated mask");
+                maskKey[i] = (byte) b;
+            }
+        }
+
+        int safeLen = (int) Math.min(payloadLen, 2 * 1024 * 1024L); // max 2 MB
+        byte[] payload = new byte[safeLen];
+        int offset = 0;
+        while (offset < safeLen) {
+            int read = input.read(payload, offset, safeLen - offset);
+            if (read < 0) throw new IOException("connection closed during payload");
+            offset += read;
+        }
+
+        if (masked) {
+            for (int i = 0; i < payload.length; i++) {
+                payload[i] ^= maskKey[i % 4];
+            }
+        }
+
+        WsFrame frame = new WsFrame();
+        frame.opcode = opcode;
+        frame.payload = payload;
+        return frame;
+    }
+
+    private static String computeWsAccept(String key) {
+        try {
+            String combined = key.trim() + WS_MAGIC;
+            MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
+            byte[] hash = sha1.digest(combined.getBytes(StandardCharsets.UTF_8));
+            return Base64.encodeToString(hash, Base64.NO_WRAP);
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("SHA-1 not available", e);
+        }
+    }
+
+    private String buildExchangeLog(String phase, String message) {
+        JSObject entry = new JSObject();
+        entry.put("timestamp", Instant.now().toString());
+        entry.put("type", "EXCHANGE");
+        entry.put("scope", "GLOBAL");
+        entry.put("phase", phase);
+        entry.put("message", message);
+        entry.put("exchangeMode", currentExchangeMode);
+        return entry.toString();
+    }
+
+    private String readTextFile(File file) throws IOException {
+        StringBuilder content = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                content.append(line).append('\n');
+            }
+        }
+        return content.toString();
+    }
+
+    private String readLine(BufferedInputStream input) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        int previous = -1;
+        int next;
+        while ((next = input.read()) != -1) {
+            if (previous == '\r' && next == '\n') {
+                break;
+            }
+            if (previous != -1) {
+                buffer.write(previous);
+            }
+            previous = next;
+        }
+
+        if (next == -1 && previous == -1 && buffer.size() == 0) {
+            return null;
+        }
+
+        if (previous != -1 && previous != '\r') {
+            buffer.write(previous);
+        }
+
+        return buffer.toString(StandardCharsets.UTF_8.name()).trim();
+    }
+
+    private byte[] readBody(BufferedInputStream input, int contentLength) throws IOException {
+        if (contentLength <= 0) {
+            return new byte[0];
+        }
+
+        byte[] body = new byte[contentLength];
+        int offset = 0;
+        while (offset < contentLength) {
+            int read = input.read(body, offset, contentLength - offset);
+            if (read == -1) {
+                break;
+            }
+            offset += read;
+        }
+
+        if (offset == contentLength) {
+            return body;
+        }
+
+        byte[] truncated = new byte[offset];
+        System.arraycopy(body, 0, truncated, 0, offset);
+        return truncated;
+    }
+
+    private void writeJsonResponse(Socket socket, int statusCode, String jsonBody) throws IOException {
+        byte[] bytes = jsonBody.getBytes(StandardCharsets.UTF_8);
+        String reason = statusCode == 200 ? "OK" : statusCode == 202 ? "Accepted" : statusCode == 404 ? "Not Found" : "Error";
+
+        String headers = "HTTP/1.1 " + statusCode + " " + reason + "\r\n"
+                + "Content-Type: application/json; charset=utf-8\r\n"
+                + "Content-Length: " + bytes.length + "\r\n"
+                + "Connection: close\r\n"
+                + "\r\n";
+
+        socket.getOutputStream().write(headers.getBytes(StandardCharsets.UTF_8));
+        socket.getOutputStream().write(bytes);
+        socket.getOutputStream().flush();
+    }
+
+    private String buildServerLifecycleLog(String phase, String message) {
+        JSObject entry = new JSObject();
+        entry.put("timestamp", Instant.now().toString());
+        entry.put("type", "HTTP_SERVER");
+        entry.put("scope", "GLOBAL");
+        entry.put("phase", phase);
+        entry.put("message", message);
+        entry.put("port", currentPort);
+        return entry.toString();
+    }
+
+    private void appendGlobalLog(String line) {
+        try {
+            File logFile = new File(getFilesDir(), "activity.log");
+            File parent = logFile.getParentFile();
+            if (parent != null && !parent.exists()) {
+                parent.mkdirs();
+            }
+            try (FileOutputStream stream = new FileOutputStream(logFile, true)) {
+                stream.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Exception ignored) {
+            // Logging should never crash the service.
+        }
+    }
+
+    private Notification buildNotification(int port) {
+        String title = "Reactor HTTP server";
+        String text = "Listening on port " + port;
+
+        return new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build();
+    }
+
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return;
+        }
+
+        NotificationChannel channel = new NotificationChannel(
+                CHANNEL_ID,
+                "Reactor HTTP",
+                NotificationManager.IMPORTANCE_LOW
+        );
+        channel.setDescription("Keeps Reactor HTTP server running in background");
+
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) {
+            manager.createNotificationChannel(channel);
+        }
+    }
+}
