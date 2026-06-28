@@ -8,7 +8,7 @@
 	export let tlsSubject = '';
 	export let tlsNotAfter = '';
 	export let tlsFingerprint = '';
-	export let exchangeMode = 'node';
+	export let workingMode = 'node';
 	export let exchangeHost = '';
 	export let exchangePort = 7070;
 	export let exchangeTls = false;
@@ -100,42 +100,35 @@
 	<section class="detail-card">
 		<h3><i class="fa-solid fa-arrows-left-right me-2"></i>Working Mode</h3>
 		<div class="exchange-mode-group mt-2">
-			<select class="form-control input" id="exchangeModeSelect" bind:value={exchangeMode}>
+			<select class="input" bind:value={ workingMode }>
 				<option value="node">Node</option>
 				<option value="exchange">Exchange</option>
 			</select>
 		</div>
-		{#if exchangeMode === 'exchange'}
-			<div class="detail-value mt-2" style="font-size:0.85em; opacity:0.7;">
-				<i class="fa-solid fa-info-circle me-1"></i>WebSocket attivo sulla porta HTTP ({httpPort}{tlsEnabled ? ' · WSS' : ''})
-			</div>
+		{#if workingMode === 'exchange'}
 			{#if exchangeActive}
-				<div class="detail-value mt-1" style="color: var(--color-success, #4caf50);">
+				<div class="detail-value mt-4" style="color: var(--color-success, #4caf50);">
 					<i class="fa-solid fa-circle me-1"></i>Active — {exchangeClients.length} client(s)
 				</div>
 				{#if exchangeClients.length > 0}
 					<div class="detail-value" style="font-size:0.8em; opacity:0.7;">{exchangeClients.join(', ')}</div>
 				{/if}
 			{:else}
-				<div class="detail-value mt-1" style="opacity:0.5;"><i class="fa-solid fa-circle me-1"></i>Not active</div>
+				<div class="detail-value mt-4" style="opacity:0.5;"><i class="fa-solid fa-circle me-1"></i>Not active</div>
 			{/if}
 		{/if}
-		{#if exchangeMode === 'node'}
-			<fieldset class="mt-2" style="border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 10px;">
+		{#if workingMode === 'node'}
+			<fieldset class="mt-3" style="border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 10px;">
 				<legend>Exchange</legend>
 
 				<div class="row">
 					<div class="col">
-						<label class="detail-label">
-							Host
-							<input type="text" class="form-control input" bind:value={exchangeHost} placeholder="192.168.1.10" />
-						</label>
+						<label class="detail-label" for="exchangeHostInput">Host</label>
+						<input id="exchangeHostInput" type="text" class="input" bind:value={exchangeHost} placeholder="192.168.1.10" />
 					</div>
 					<div class="col">
-						<label class="detail-label">
-							Port
-							<input type="number" class="form-control input" min="1" max="65535" bind:value={exchangePort} />
-						</label>
+						<label class="detail-label" for="exchangePortInput">Port</label>
+						<input id="exchangePortInput" type="number" class="input" min="1" max="65535" bind:value={exchangePort} />
 					</div>
 				</div>
 
@@ -158,7 +151,7 @@
 
 		<div class="row mt-3">
 			<div class="col text-center">
-				<button class="btn-primary" on:click={() => onSaveExchangeConfig(exchangeMode, exchangeHost, exchangePort, exchangeTls)}>
+				<button class="btn-primary" on:click={() => onSaveExchangeConfig(workingMode, exchangeHost, exchangePort, exchangeTls)}>
 					<i class="fa-solid fa-floppy-disk me-2"></i>
 					Save
 				</button>
