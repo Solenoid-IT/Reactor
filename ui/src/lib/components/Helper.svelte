@@ -49,6 +49,7 @@
 		visibility: hidden;
 		pointer-events: none;
 		transition: opacity 0.15s ease, visibility 0.15s ease;
+		text-transform: none;
 	}
 
 	.helper-tooltip::after {
