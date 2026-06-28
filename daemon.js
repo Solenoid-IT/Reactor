@@ -106,7 +106,7 @@ async function createControlServer(runtime, socketPath, onStopRequested) {
 		}
 	}
 
-	const server = net.createServer((socket) => {
+	const server = net.createServer({ allowHalfOpen: true }, (socket) => {
 		let buffer = '';
 
 		socket.on('data', (chunk) => {
