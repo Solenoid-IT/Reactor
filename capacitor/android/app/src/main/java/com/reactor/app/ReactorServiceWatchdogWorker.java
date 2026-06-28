@@ -8,7 +8,6 @@ import android.os.Build;
 import androidx.annotation.NonNull;
 import androidx.work.ExistingPeriodicWorkPolicy;
 import androidx.work.PeriodicWorkRequest;
-import androidx.work.PeriodicWorkRequestBuilder;
 import androidx.work.WorkManager;
 import androidx.work.Worker;
 import androidx.work.WorkerParameters;
@@ -50,7 +49,7 @@ public class ReactorServiceWatchdogWorker extends Worker {
     }
 
     public static void schedule(Context context) {
-        PeriodicWorkRequest request = new PeriodicWorkRequestBuilder<ReactorServiceWatchdogWorker>(15, TimeUnit.MINUTES)
+        PeriodicWorkRequest request = new PeriodicWorkRequest.Builder(ReactorServiceWatchdogWorker.class, 15, TimeUnit.MINUTES)
                 .setInitialDelay(1, TimeUnit.MINUTES)
                 .build();
 
