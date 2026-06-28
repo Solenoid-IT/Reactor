@@ -13,28 +13,14 @@
 	export let onBackdropMouseUp = () => {};
 	export let onBackdropMouseLeave = () => {};
 
-	$: backdropRole = closeOnBackdrop ? 'button' : 'presentation';
-	$: backdropTabIndex = closeOnBackdrop ? 0 : -1;
-
 	function handleBackdropClick() {
 		if (closeOnBackdrop) {
 			onClose();
 		}
 	}
 
-	function handleBackdropKeydown(event) {
-		if (!closeOnBackdrop) {
-			return;
-		}
-
-		if (event.key === 'Escape' || event.key === 'Enter' || event.key === ' ') {
-			event.preventDefault();
-			onClose();
-		}
-	}
-
-	function handleCardKeydown(event) {
-		if (!closeOnEscape) {
+	function handleWindowKeydown(event) {
+		if (!open || !closeOnEscape) {
 			return;
 		}
 
@@ -45,25 +31,31 @@
 	}
 </script>
 
+<svelte:window on:keydown={handleWindowKeydown} />
+
 {#if open}
 	<div
 		class={backdropClass}
-		role={backdropRole}
-		tabindex={backdropTabIndex}
-		on:click={handleBackdropClick}
-		on:keydown={handleBackdropKeydown}
+		role="presentation"
 		on:mousemove={onBackdropMouseMove}
 		on:mouseup={onBackdropMouseUp}
 		on:mouseleave={onBackdropMouseLeave}
 	>
+		{#if closeOnBackdrop}
+			<button
+				type="button"
+				class="modal-backdrop-hitbox"
+				aria-label="Close dialog"
+				on:click={handleBackdropClick}
+			></button>
+		{/if}
 		<div
 			class={cardClass}
+			style="position: relative; z-index: 1;"
 			role="dialog"
 			aria-modal="true"
 			aria-label={ariaLabel}
 			tabindex="-1"
-			on:click|stopPropagation
-			on:keydown={handleCardKeydown}
 		>
 			{#if title}
 				<h3>{title}</h3>
@@ -80,3 +72,15 @@
 		</div>
 	</div>
 {/if}
+
+<style>
+	.modal-backdrop-hitbox {
+		position: absolute;
+		inset: 0;
+		z-index: 0;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		cursor: pointer;
+	}
+</style>

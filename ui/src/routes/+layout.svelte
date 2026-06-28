@@ -468,11 +468,18 @@
 	}
 	:global(.modal-card) {
 		width: min(460px, 100%);
+		max-width: 100%;
 		background: linear-gradient(175deg, #1f2733, #1a222d);
 		border: 1px solid #3a4759;
 		border-radius: 14px;
 		box-shadow: 0 22px 40px rgba(0, 0, 0, 0.42);
 		padding: 16px;
+	}
+	:global(.settings-modal-card) {
+		width: min(960px, calc(100vw - 40px));
+		max-height: calc(100vh - 40px);
+		overflow: auto;
+		padding: 18px;
 	}
 	:global(.modal-card h3) {
 		margin: 0 0 8px;
@@ -562,6 +569,15 @@
 		:global(.list-pane),
 		:global(.detail-pane) {
 			padding: 12px;
+		}
+		:global(.modal-backdrop) {
+			padding: 12px;
+		}
+		:global(.settings-modal-card) {
+			width: min(100%, calc(100vw - 24px));
+			max-height: calc(100vh - 24px);
+			padding: 14px;
+			border-radius: 12px;
 		}
 		:global(.file-header) {
 			flex-direction: column;

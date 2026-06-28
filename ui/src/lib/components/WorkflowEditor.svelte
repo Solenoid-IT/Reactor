@@ -255,7 +255,7 @@
 </Modal>
 
 <style>
-	.workflow-overlay {
+	:global(.workflow-overlay) {
 		position: fixed;
 		inset: 0;
 		z-index: 140;
@@ -263,10 +263,12 @@
 		backdrop-filter: blur(4px);
 		padding: 14px;
 	}
-	.workflow-shell {
+	:global(.workflow-shell) {
 		display: flex;
 		flex-direction: column;
 		height: 100%;
+		width: min(100%, 1600px);
+		max-height: 100%;
 		border: 1px solid #3a4657;
 		border-radius: 14px;
 		overflow: hidden;
@@ -419,6 +421,14 @@
 		font-size: 12px;
 	}
 	@media (max-width: 1200px) {
+		:global(.workflow-overlay) {
+			padding: 10px;
+		}
+
+		:global(.workflow-shell) {
+			width: 100%;
+		}
+
 		.workflow-body {
 			grid-template-columns: 1fr;
 			grid-template-rows: 190px 1fr 220px;
@@ -430,6 +440,37 @@
 		.workflow-body .workflow-sidebar:last-child {
 			border-left: 0;
 			border-top: 1px solid #313c4c;
+		}
+	}
+
+	@media (max-width: 760px) {
+		:global(.workflow-overlay) {
+			padding: 0;
+		}
+
+		:global(.workflow-shell) {
+			border-radius: 0;
+			border-left: 0;
+			border-right: 0;
+		}
+
+		.workflow-header {
+			flex-direction: column;
+			align-items: stretch;
+			gap: 10px;
+		}
+
+		.workflow-header-actions {
+			width: 100%;
+			justify-content: stretch;
+		}
+
+		.workflow-header-actions :global(button) {
+			flex: 1;
+		}
+
+		.workflow-body {
+			grid-template-rows: 170px 1fr 200px;
 		}
 	}
 </style>

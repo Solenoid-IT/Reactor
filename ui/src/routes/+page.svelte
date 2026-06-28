@@ -3,6 +3,7 @@
 	import HeaderActions from '$lib/components/HeaderActions.svelte';
 	import ScriptList from '$lib/components/ScriptList.svelte';
 	import DetailPane from '$lib/components/DetailPane.svelte';
+	import SettingsPane from '$lib/components/SettingsPane.svelte';
 	import WorkflowEditor from '$lib/components/WorkflowEditor.svelte';
 	import Modal from '$lib/components/Modal.svelte';
 	import {
@@ -55,6 +56,7 @@
 	let tlsNotAfter = '';
 	let tlsFingerprint = '';
 	let status = 'Ready';
+	let settingsOpen = false;
 	let renameOpen = false;
 	let renameScriptPath = '';
 	let renameOriginalName = '';
@@ -486,6 +488,14 @@
 		}
 		status = `Error: ${result?.error || 'unable to save workflow'}`;
 	}
+
+	function openSettings() {
+		settingsOpen = true;
+	}
+
+	function closeSettings() {
+		settingsOpen = false;
+	}
 </script>
 
 <svelte:head>
@@ -496,6 +506,7 @@
 	<HeaderActions
 		onRefresh={refreshAll}
 		onOpenFolder={openScriptsFolder}
+		onOpenSettings={openSettings}
 		onOpenWorkflow={openWorkflowEditor}
 		onPickProgram={pickProgram}
 		onOpenGlobalLog={openGlobalLog}
@@ -528,6 +539,20 @@
 			{selectedScript}
 			{scriptsPath}
 			{defaultProgramPath}
+			onOpenWorkflow={openWorkflowEditor}
+			{status}
+		/>
+	</main>
+
+	<Modal
+		open={settingsOpen}
+		title="Settings"
+		ariaLabel="Reactor settings"
+		cardClass="modal-card settings-modal-card"
+		onClose={closeSettings}
+		showActions={false}
+	>
+		<SettingsPane
 			{reactorName}
 			{httpPort}
 			{tlsEnabled}
@@ -544,14 +569,12 @@
 			onSaveReactorName={saveReactorNameValue}
 			onSaveHttpServerData={saveHttpPortValue}
 			onOpenServerStatus={openServerStatusPage}
-			onOpenWorkflow={openWorkflowEditor}
 			onGenerateTlsCert={generateTlsCertHandler}
 			onDeleteTlsCert={deleteTlsCertHandler}
 			onGenerateExchangeToken={generateExchangeTokenHandler}
 			onSaveExchangeConfig={saveExchangeConfigValue}
-			{status}
 		/>
-	</main>
+	</Modal>
 
 	<WorkflowEditor
 		open={workflowOpen}
