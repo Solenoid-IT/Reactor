@@ -368,8 +368,6 @@
 		status = result?.ok ? 'Certificato eliminato' : `Error: ${result?.error || 'unknown'}`;
 		await refreshAll();
 	}
-		await refreshAll();
-	}
 
 	async function openLog(index) {
 		const script = scripts[index];
