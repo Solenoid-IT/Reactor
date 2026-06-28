@@ -1,5 +1,6 @@
 <script>
 	import Form from './Form.svelte';
+	import Helper from './Helper.svelte';
 
 	export let reactorName = '';
 	export let httpPort = 7070;
@@ -94,9 +95,13 @@
 
 <div class="settings-pane">
 	<section class="detail-card settings-name-card">
-		<h3>
+		<h3 class="d-flex align-items-center">
 			<i class="fa-solid fa-tag me-2"></i>
-			Name
+			<span>Name</span>
+			<Helper ariaLabel="Spiegazione Name Reactor">
+				<div>Il nome identifica univocamente questo Reactor come nodo nella rete.</div>
+				<div class="mt-1">Nel contesto multi-nodo, gli script possono inviare messaggi a un altro nodo usando proprio questo identificatore.</div>
+			</Helper>
 		</h3>
 		<Form on:submit={onNameSubmit}>
 			<div class="row settings-inline-row">
@@ -114,7 +119,16 @@
 	</section>
 
 	<section class="detail-card settings-mode-card">
-		<h3><i class="fa-solid fa-arrows-left-right me-2"></i>Working Mode</h3>
+		<h3 class="d-flex align-items-center">
+			<i class="fa-solid fa-arrows-left-right me-2"></i>
+			<span>Working Mode</span>
+			<Helper ariaLabel="Spiegazione Working Mode">
+				<div><strong>Node</strong>: esegue script locali e puo usare direttamente <code>Node.sendMessage</code> nella stessa LAN.</div>
+				<div class="mt-1"><strong>Use Exchange</strong>: collega il nodo a un Exchange remoto per instradare messaggi.</div>
+				<div class="mt-1"><strong>Exchange</strong>: avvia questo Reactor come hub centrale.</div>
+				<div class="mt-1">Tipicamente Exchange serve quando i nodi sono su reti diverse (internet/VPN), non nella stessa LAN.</div>
+			</Helper>
+		</h3>
 		<Form on:submit={onWorkingModeSubmit}>
 			<div class="exchange-mode-group mt-2">
 				<select class="input" name="type" data-required="true" data-type="string" bind:value={exchangeMode}>
@@ -293,7 +307,14 @@
 	</section>
 
 	<section class="detail-card settings-queue-card">
-		<h3><i class="fa-solid fa-list-check me-2"></i>Message Queue</h3>
+		<h3 class="d-flex align-items-center">
+			<i class="fa-solid fa-list-check me-2"></i>
+			<span>Message Queue</span>
+			<Helper ariaLabel="Spiegazione Message Queue">
+				<div>Se <code>Node.sendMessage()</code> non riesce a contattare Exchange o un nodo target, il messaggio non viene perso.</div>
+				<div class="mt-1">I dati finiscono in una coda temporanea locale e vengono reinviati automaticamente quando la rete torna disponibile.</div>
+			</Helper>
+		</h3>
 		<div class="detail-value" style="font-size:0.82em; opacity:0.75; margin-bottom:10px;">
 			Queued messages are retried automatically when connectivity is restored.
 		</div>
