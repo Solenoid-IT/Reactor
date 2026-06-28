@@ -98,7 +98,7 @@
 		</div>
 	</section>
 	<section class="detail-card">
-		<h3><i class="fa-solid fa-arrows-left-right me-2"></i>Mode</h3>
+		<h3><i class="fa-solid fa-arrows-left-right me-2"></i>Working Mode</h3>
 		<div class="exchange-mode-group mt-2">
 			<select class="form-control input" id="exchangeModeSelect" bind:value={exchangeMode}>
 				<option value="node">Node</option>
@@ -122,7 +122,7 @@
 		{/if}
 		{#if exchangeMode === 'node'}
 			<fieldset class="mt-2" style="border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 10px;">
-				<legend style="padding: 0; margin-left: -4px; font-size:0.85em; color:rgba(255,255,255,0.7);">Exchange</legend>
+				<legend>Exchange</legend>
 
 				<div class="row">
 					<div class="col">
