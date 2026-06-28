@@ -6,6 +6,27 @@ const path = require('path');
 const { ReactorRuntime } = require('./src/runtime');
 const { readWorkingModeConfig, writeWorkingModeConfig } = require('./src/workingModeConfig');
 
+function installTimestampedConsoleLogging() {
+	if (process.env.REACTOR_LOG_TIMESTAMPS === '0' || process.env.REACTOR_LOG_TIMESTAMPS === 'false') {
+		return;
+	}
+
+	const methods = ['log', 'info', 'warn', 'error', 'debug'];
+	for (const method of methods) {
+		const original = console[method];
+		if (typeof original !== 'function') {
+			continue;
+		}
+
+		console[method] = (...args) => {
+			const timestamp = new Date().toISOString();
+			original.call(console, `[${timestamp}]`, ...args);
+		};
+	}
+}
+
+installTimestampedConsoleLogging();
+
 function getDefaultDataDir() {
 	switch (process.platform) {
 		case 'darwin':
