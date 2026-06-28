@@ -363,27 +363,27 @@
 	}
 
 	async function generateExchangeTokenHandler() {
-		status = 'Generando token Exchange...';
+		status = 'Generating Exchange token...';
 		const result = await generateExchangeToken();
-		status = result?.ok ? 'Token Exchange generato' : `Error: ${result?.error || 'unknown'}`;
+		status = result?.ok ? 'Exchange token generated' : `Error: ${result?.error || 'unknown'}`;
 		await refreshAll();
 	}
 
 	async function generateTlsCertHandler() {
-		status = 'Generando certificato TLS...';
+		status = 'Generating TLS certificate...';
 		const result = await generateTlsCert();
 		status = result?.ok
-			? `Certificato generato: ${result.tls?.subject || 'OK'}`
+			? `Certificate generated: ${result.tls?.subject || 'OK'}`
 			: `Error: ${result?.error || 'unknown'}`;
 		await refreshAll();
 	}
 
 	async function deleteTlsCertHandler() {
-		const confirm = window.confirm('Sei sicuro di voler eliminare il certificato TLS?');
+		const confirm = window.confirm('Are you sure you want to delete the TLS certificate?');
 		if (!confirm) return;
-		status = 'Eliminando certificato TLS...';
+		status = 'Deleting TLS certificate...';
 		const result = await deleteTlsCert();
-		status = result?.ok ? 'Certificato eliminato' : `Error: ${result?.error || 'unknown'}`;
+		status = result?.ok ? 'Certificate deleted' : `Error: ${result?.error || 'unknown'}`;
 		await refreshAll();
 	}
 

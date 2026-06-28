@@ -762,7 +762,8 @@ class ReactorRuntime {
 				this.httpServer = server;
 				this.tlsEnabled = Boolean(tlsCert);
 				const proto = tlsCert ? 'HTTPS' : 'HTTP';
-				this.addHttpServerLog(`listening on port ${this.httpServerPort} (${proto})`);
+				const tlsLabel = tlsCert ? 'TLS enabled (certificate loaded)' : 'TLS disabled (no certificate found)';
+				this.addHttpServerLog(`listening on port ${this.httpServerPort} (${proto}) - ${tlsLabel}`);
 				resolve();
 			});
 		});

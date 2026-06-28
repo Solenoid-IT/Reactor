@@ -26,13 +26,13 @@ REACTOR_EXCHANGE_TOKEN=
 From the project root:
 
 ```bash
-docker compose -f docker-compose.exchange.yml --profile exchange up -d --build
+docker compose --profile exchange up -d --build
 ```
 
 Check status:
 
 ```bash
-docker compose -f docker-compose.exchange.yml ps
+docker compose ps
 ```
 
 ## 4) Generate token via CLI
@@ -40,13 +40,13 @@ docker compose -f docker-compose.exchange.yml ps
 Generate the token inside the running container:
 
 ```bash
-docker compose -f docker-compose.exchange.yml exec reactor-exchange node daemonctl.js generate-exchange-token
+docker compose exec reactor-exchange node daemonctl.js generate-exchange-token
 ```
 
 Show the current token:
 
 ```bash
-docker compose -f docker-compose.exchange.yml exec reactor-exchange node daemonctl.js get-exchange-token
+docker compose exec reactor-exchange node daemonctl.js get-exchange-token
 ```
 
 Use this token on clients that need to connect to the exchange.
@@ -56,7 +56,7 @@ Use this token on clients that need to connect to the exchange.
 Generate a self-signed cert.pem/key.pem directly via CLI:
 
 ```bash
-docker compose -f docker-compose.exchange.yml exec reactor-exchange node daemonctl.js generate-tls-cert --bits 4096 --days 3650
+docker compose exec reactor-exchange node daemonctl.js generate-tls-cert --bits 4096 --days 3650
 ```
 
 This creates:

@@ -231,7 +231,7 @@ class ExchangeManager {
 				const providedToken = this._readBearerToken(request);
 
 				if (expectedToken && providedToken !== expectedToken) {
-					this.runtime.log('[Exchange] Upgrade rifiutato: Authorization Bearer token non valido');
+					this.runtime.log('[Exchange] Upgrade rejected: invalid Authorization Bearer token');
 					this._appendConnectionLog('AUTH_REJECTED_UPGRADE', {
 						address: this._resolveClientAddress(request),
 						reason: 'invalid bearer token',
@@ -250,7 +250,11 @@ class ExchangeManager {
 
 		httpServer.on('upgrade', this._upgradeHandler);
 		void this._writeActiveConnectionsSnapshot();
-		this.runtime.log('[Exchange] Server WebSocket attivo sulla porta HTTP');
+		const httpProto = this.runtime && this.runtime.tlsEnabled ? 'HTTPS' : 'HTTP';
+		const wsProto = this.runtime && this.runtime.tlsEnabled ? 'WSS' : 'WS';
+		const tlsLabel = this.runtime && this.runtime.tlsEnabled ? 'TLS enabled (certificate loaded)' : 'TLS disabled (no certificate found)';
+		const portLabel = this.runtime && this.runtime.httpServerPort ? ` ${this.runtime.httpServerPort}` : '';
+		this.runtime.log(`[Exchange] WebSocket server active on ${httpProto}/${wsProto}${portLabel} - ${tlsLabel}`);
 	}
 
 	_handleClientConnection(ws, request) {
@@ -285,7 +289,7 @@ class ExchangeManager {
 				const expectedToken = String(this.runtime.exchangeAuthToken || '').trim();
 
 				if (expectedToken && providedToken !== expectedToken) {
-					this.runtime.log(`[Exchange] Registrazione rifiutata per ${name || 'unknown'}: token non valido`);
+					this.runtime.log(`[Exchange] Registration rejected for ${name || 'unknown'}: invalid token`);
 					this._appendConnectionLog('AUTH_REJECTED_REGISTER', {
 						name: name || 'unknown',
 						address,
@@ -318,7 +322,7 @@ class ExchangeManager {
 						port,
 						userAgent,
 					});
-					this.runtime.log(`[Exchange] Client registrato: ${clientName}`);
+					this.runtime.log(`[Exchange] Client registered: ${clientName}`);
 					ws.send(JSON.stringify({ type: 'registered', name: clientName }));
 				}
 			} else if (packet.type === 'message') {
@@ -345,12 +349,12 @@ class ExchangeManager {
 					ip,
 					port,
 				});
-				this.runtime.log(`[Exchange] Client disconnesso: ${clientName}`);
+				this.runtime.log(`[Exchange] Client disconnected: ${clientName}`);
 			}
 		});
 
 		ws.on('error', (err) => {
-			this.runtime.log(`[Exchange] Errore client ${clientName || 'unknown'}: ${err.message}`);
+			this.runtime.log(`[Exchange] Client error ${clientName || 'unknown'}: ${err.message}`);
 		});
 	}
 
@@ -360,7 +364,7 @@ class ExchangeManager {
 
 		const targetWs = this.connectedClients.get(to);
 		if (!targetWs || targetWs.readyState !== WebSocket.OPEN) {
-			this.runtime.log(`[Exchange] Target non trovato o disconnesso: ${to}`);
+			this.runtime.log(`[Exchange] Target not found or disconnected: ${to}`);
 			return;
 		}
 
@@ -371,9 +375,9 @@ class ExchangeManager {
 				content: packet.content !== undefined ? packet.content : '',
 				contentType: String(packet.contentType || 'text/plain'),
 			}));
-			this.runtime.log(`[Exchange] Instradato: ${fromName || 'unknown'} → ${to}`);
+			this.runtime.log(`[Exchange] Routed: ${fromName || 'unknown'} -> ${to}`);
 		} catch (err) {
-			this.runtime.log(`[Exchange] Errore routing verso ${to}: ${err.message}`);
+			this.runtime.log(`[Exchange] Routing error to ${to}: ${err.message}`);
 		}
 	}
 
@@ -386,7 +390,7 @@ class ExchangeManager {
 
 		const scheme = this.tls ? 'wss' : 'ws';
 		const url = `${scheme}://${this.host}:${this.port}`;
-		this.runtime.log(`[Exchange] Connessione all'exchange: ${url}`);
+		this.runtime.log(`[Exchange] Connecting to exchange: ${url}`);
 
 		let ws;
 		try {
@@ -395,7 +399,7 @@ class ExchangeManager {
 			const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
 			ws = new WebSocket(url, { rejectUnauthorized: false, headers });
 		} catch (err) {
-			this.runtime.log(`[Exchange] Impossibile creare il client: ${err.message}`);
+			this.runtime.log(`[Exchange] Unable to create client: ${err.message}`);
 			this._scheduleReconnect();
 			return;
 		}
@@ -410,9 +414,9 @@ class ExchangeManager {
 				const safeName = String(name || '').trim() || 'unnamed';
 				const token = String(this.runtime.exchangeAuthToken || '').trim();
 				ws.send(JSON.stringify({ type: 'register', name: safeName, token }));
-				this.runtime.log(`[Exchange] Connesso come: ${safeName}`);
+				this.runtime.log(`[Exchange] Connected as: ${safeName}`);
 			} catch (err) {
-				this.runtime.log(`[Exchange] Errore registrazione: ${err.message}`);
+				this.runtime.log(`[Exchange] Registration error: ${err.message}`);
 			}
 		});
 
@@ -422,7 +426,7 @@ class ExchangeManager {
 			try { packet = JSON.parse(String(data)); } catch { return; }
 			if (packet && packet.type === 'message') this._handleIncomingMessage(packet);
 			if (packet && packet.type === 'auth-error') {
-				this.runtime.log(`[Exchange] Autenticazione fallita: ${packet.error || 'invalid exchange token'}`);
+				this.runtime.log(`[Exchange] Authentication failed: ${packet.error || 'invalid exchange token'}`);
 			}
 		});
 
@@ -433,13 +437,13 @@ class ExchangeManager {
 		ws.on('close', () => {
 			this._stopClientHeartbeat();
 			if (this.wsClient === ws) this.wsClient = null;
-			this.runtime.log('[Exchange] Connessione chiusa, riconnessione...');
+			this.runtime.log('[Exchange] Connection closed, reconnecting...');
 			this._scheduleReconnect();
 		});
 
 		ws.on('error', (err) => {
 			this._stopClientHeartbeat();
-			this.runtime.log(`[Exchange] Errore: ${err.message}`);
+			this.runtime.log(`[Exchange] Error: ${err.message}`);
 		});
 	}
 
@@ -490,7 +494,7 @@ class ExchangeManager {
 
 			if (Date.now() - this._clientLastPongAt > this._heartbeatTimeoutMs) {
 				this._clientLastTimeoutAt = Date.now();
-				this.runtime.log('[Exchange] Heartbeat timeout: chiusura connessione client WS');
+				this.runtime.log('[Exchange] Heartbeat timeout: closing client WS connection');
 				try { ws.terminate(); } catch { /* ignore */ }
 				return;
 			}
@@ -520,7 +524,7 @@ class ExchangeManager {
 		const content = packet.content !== undefined ? String(packet.content) : '';
 		const contentType = String(packet.contentType || 'text/plain');
 
-		this.runtime.log(`[Exchange] Messaggio da: ${from}`);
+		this.runtime.log(`[Exchange] Message from: ${from}`);
 		const listeners = this.runtime.findMessageListeners([from.toLowerCase()]);
 
 		Promise.allSettled(
@@ -545,9 +549,9 @@ class ExchangeManager {
 	// ---------------------------------------------------------------------------
 
 	async sendViaExchange(target, content) {
-		if (this.mode !== 'client') throw new Error('non in modalità client');
+		if (this.mode !== 'client') throw new Error('not in client mode');
 		if (!this.wsClient || this.wsClient.readyState !== WebSocket.OPEN) {
-			throw new Error('exchange client non connesso');
+			throw new Error('exchange client not connected');
 		}
 
 		let serializedContent, contentType;
@@ -566,7 +570,7 @@ class ExchangeManager {
 		}
 
 		const to = String(target || '').trim().toLowerCase();
-		if (!to) throw new Error('target exchange non valido');
+		if (!to) throw new Error('invalid exchange target');
 
 		this.wsClient.send(JSON.stringify({ type: 'message', to, content: serializedContent, contentType }));
 		return {

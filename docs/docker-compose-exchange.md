@@ -9,7 +9,7 @@ You can run:
 ## Files included
 
 - `Dockerfile.daemon`
-- `docker-compose.exchange.yml`
+- `docker-compose.yml`
 - `.env.example`
 
 The services run `daemon.js` in headless mode and use `REACTOR_WORKING_MODE`.
@@ -39,13 +39,13 @@ Edit `.env` for your setup:
 Start only Exchange profile:
 
 ```bash
-docker compose -f docker-compose.exchange.yml --profile exchange up -d --build
+docker compose --profile exchange up -d --build
 ```
 
 Start only Client profile:
 
 ```bash
-docker compose -f docker-compose.exchange.yml --profile client up -d --build
+docker compose --profile client up -d --build
 ```
 
 Start both profiles:
@@ -53,14 +53,14 @@ Start both profiles:
 From project root:
 
 ```bash
-docker compose -f docker-compose.exchange.yml --profile exchange --profile client up -d --build
+docker compose --profile exchange --profile client up -d --build
 ```
 
 Check status:
 
 ```bash
-docker compose -f docker-compose.exchange.yml ps
-docker compose -f docker-compose.exchange.yml logs -f
+docker compose ps
+docker compose logs -f
 ```
 
 ## Configure name, token, and verify
@@ -68,31 +68,31 @@ docker compose -f docker-compose.exchange.yml logs -f
 Set node name:
 
 ```bash
-docker compose -f docker-compose.exchange.yml exec reactor-exchange node daemonctl.js set-name reactor-exchange-1
+docker compose exec reactor-exchange node daemonctl.js set-name reactor-exchange-1
 ```
 
 Generate token:
 
 ```bash
-docker compose -f docker-compose.exchange.yml exec reactor-exchange node daemonctl.js generate-exchange-token
+docker compose exec reactor-exchange node daemonctl.js generate-exchange-token
 ```
 
 Read token and keep it for client nodes:
 
 ```bash
-docker compose -f docker-compose.exchange.yml exec reactor-exchange node daemonctl.js get-exchange-token
+docker compose exec reactor-exchange node daemonctl.js get-exchange-token
 ```
 
 Verify Exchange config:
 
 ```bash
-docker compose -f docker-compose.exchange.yml exec reactor-exchange node daemonctl.js get-exchange
+docker compose exec reactor-exchange node daemonctl.js get-exchange
 ```
 
 If you run the client profile too, verify client config:
 
 ```bash
-docker compose -f docker-compose.exchange.yml exec reactor-client node daemonctl.js get-exchange
+docker compose exec reactor-client node daemonctl.js get-exchange
 ```
 
 ## Data persistence
@@ -116,19 +116,19 @@ To enable WSS, place TLS files in `/data/tls` inside the container.
 Generate self-signed cert directly in container:
 
 ```bash
-docker compose -f docker-compose.exchange.yml exec reactor-exchange sh -lc 'mkdir -p /data/tls && openssl req -x509 -newkey rsa:2048 -keyout /data/tls/key.pem -out /data/tls/cert.pem -days 3650 -nodes -subj "/CN=reactor-exchange-1"'
+docker compose exec reactor-exchange sh -lc 'mkdir -p /data/tls && openssl req -x509 -newkey rsa:2048 -keyout /data/tls/key.pem -out /data/tls/cert.pem -days 3650 -nodes -subj "/CN=reactor-exchange-1"'
 ```
 
 Enable TLS in Exchange config:
 
 ```bash
-docker compose -f docker-compose.exchange.yml exec reactor-exchange node daemonctl.js set-exchange exchange 7070 --tls
+docker compose exec reactor-exchange node daemonctl.js set-exchange exchange 7070 --tls
 ```
 
 Restart service:
 
 ```bash
-docker compose -f docker-compose.exchange.yml restart
+docker compose restart
 ```
 
 ## Configure a node client to connect
@@ -151,11 +151,11 @@ node daemonctl.js set-exchange node EXCHANGE_HOST_OR_IP 7070 --tls --token YOUR_
 Stop:
 
 ```bash
-docker compose -f docker-compose.exchange.yml down
+docker compose down
 ```
 
 Stop and remove persisted data volume:
 
 ```bash
-docker compose -f docker-compose.exchange.yml down -v
+docker compose down -v
 ```
