@@ -2,6 +2,9 @@
 
 This guide explains how to install Reactor on an Ubuntu or Debian-like server, run it as a headless daemon, configure it as an Exchange server, and generate the shared authentication token used by Reactor nodes.
 
+If you prefer containerized deployment, use the Docker Compose guide:
+- `docs/docker-compose-exchange.md`
+
 ## What Exchange mode does
 
 When Reactor runs in `exchange` mode it acts as a WebSocket router for other Reactor nodes.
@@ -112,7 +115,7 @@ sudo journalctl -u reactor -f
 The daemon supports Exchange configuration from environment variables, but they have higher priority than the configuration saved at runtime.
 
 That means:
-- if you set `REACTOR_EXCHANGE_MODE`, `REACTOR_EXCHANGE_HOST`, `REACTOR_EXCHANGE_PORT`, `REACTOR_EXCHANGE_TLS`, or `REACTOR_EXCHANGE_TOKEN` inside the service file
+- if you set `REACTOR_WORKING_MODE`, `REACTOR_EXCHANGE_HOST`, `REACTOR_EXCHANGE_PORT`, `REACTOR_EXCHANGE_TLS`, or `REACTOR_EXCHANGE_TOKEN` inside the service file
 - then later changes done with `daemonctl.js` may appear ignored after a restart
 
 Recommended approach:

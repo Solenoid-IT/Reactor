@@ -203,7 +203,7 @@ Nodo A (Node)              Nodo EXCHANGE            Nodo B (Node)
 ### Variabili d'ambiente (priorità massima su tutte le piattaforme Node.js)
 
 ```bash
-REACTOR_EXCHANGE_MODE=exchange          # oppure: node
+REACTOR_WORKING_MODE=exchange           # oppure: node
 REACTOR_EXCHANGE_HOST=192.168.1.10     # solo per modalità node
 REACTOR_EXCHANGE_PORT=7070             # porta HTTP dell'exchange
 REACTOR_EXCHANGE_TLS=true              # usa WSS
@@ -236,10 +236,10 @@ node daemon.js
 REACTOR_DATA_DIR=/var/lib/reactor node daemon.js
 
 # Come EXCHANGE server
-REACTOR_EXCHANGE_MODE=exchange REACTOR_DATA_DIR=/var/lib/reactor node daemon.js
+REACTOR_WORKING_MODE=exchange REACTOR_DATA_DIR=/var/lib/reactor node daemon.js
 
 # Come CLIENT
-REACTOR_EXCHANGE_MODE=client REACTOR_EXCHANGE_HOST=10.0.0.1 node daemon.js
+REACTOR_WORKING_MODE=node REACTOR_EXCHANGE_HOST=10.0.0.1 node daemon.js
 ```
 
 ### Variabili d'ambiente del daemon
@@ -250,7 +250,7 @@ REACTOR_EXCHANGE_MODE=client REACTOR_EXCHANGE_HOST=10.0.0.1 node daemon.js
 | `REACTOR_SCRIPTS_DIR` | `$DATA_DIR/projects` | Cartella script |
 | `REACTOR_EVENT_LOG_PATH` | `$DATA_DIR/activity.log` | Log attività globale |
 | `REACTOR_HTTP_PORT` | `7070` | Porta HTTP server |
-| `REACTOR_EXCHANGE_MODE` | `disabled` | Modalità exchange |
+| `REACTOR_WORKING_MODE` | `node` | Modalità di lavoro (`node` oppure `exchange`) |
 | `REACTOR_EXCHANGE_HOST` | `''` | Host exchange (client) |
 | `REACTOR_EXCHANGE_PORT` | `7070` | Porta exchange (client) |
 
@@ -295,7 +295,7 @@ journalctl -u reactor -f
 sudo systemctl edit reactor
 # → aggiungi:
 #   [Service]
-#   Environment=REACTOR_EXCHANGE_MODE=exchange
+#   Environment=REACTOR_WORKING_MODE=exchange
 
 # 5. Configurazione exchange (opzione B: daemonctl a runtime)
 node /opt/reactor/daemonctl.js set-exchange exchange

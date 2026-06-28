@@ -1,0 +1,28 @@
+FROM node:20-bookworm-slim
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends openssl tini ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+COPY daemon.js daemonctl.js ./
+COPY src ./src
+COPY bin ./bin
+
+ENV NODE_ENV=production \
+	REACTOR_DATA_DIR=/data \
+	REACTOR_HTTP_PORT=7070 \
+	REACTOR_WORKING_MODE=exchange
+
+RUN mkdir -p /data /data/projects && chown -R node:node /app /data
+
+USER node
+EXPOSE 7070
+VOLUME ["/data"]
+
+ENTRYPOINT ["tini", "--"]
+CMD ["node", "daemon.js"]

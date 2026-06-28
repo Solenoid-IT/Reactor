@@ -1,0 +1,9 @@
+node_modules
+ui/node_modules
+dist
+ui/build
+.git
+.gitignore
+.vscode
+*.log
+activity.log

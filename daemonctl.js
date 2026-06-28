@@ -32,6 +32,7 @@ function usage() {
 	console.log('  node daemonctl.js get-exchange');
 	console.log('  node daemonctl.js get-exchange-token');
 	console.log('  node daemonctl.js generate-exchange-token');
+	console.log('  node daemonctl.js generate-tls-cert');
 	console.log('  node daemonctl.js stop');
 	process.exit(1);
 }
@@ -209,8 +210,34 @@ async function main() {
 		console.log(`TLS:    ${ex.tls ? 'yes' : 'no'}`);
 		console.log(`Active: ${ex.active ? 'yes' : 'no'}`);
 		console.log(`Token:  ${ex.token ? 'configured' : 'missing'}`);
+		if (ex.connectionLogPath) {
+			console.log(`ConnLog:${ex.connectionLogPath}`);
+		}
+		if (ex.activeConnectionsPath) {
+			console.log(`ConnJSN:${ex.activeConnectionsPath}`);
+		}
+		if (ex.heartbeat) {
+			console.log(`HB Int: ${ex.heartbeat.intervalMs}ms`);
+			console.log(`HB T/O: ${ex.heartbeat.timeoutMs}ms`);
+			if (ex.heartbeat.server) {
+				console.log(`HB Srv: pings=${ex.heartbeat.server.pingsSent || 0}, pongs=${ex.heartbeat.server.pongsReceived || 0}, terminated=${ex.heartbeat.server.terminatedClients || 0}`);
+			}
+			if (ex.heartbeat.client) {
+				const lastPong = ex.heartbeat.client.lastPongAt || '-';
+				const sincePong = ex.heartbeat.client.timeSinceLastPongMs;
+				console.log(`HB Cli: lastPong=${lastPong}${Number.isFinite(sincePong) ? ` (${sincePong}ms ago)` : ''}`);
+			}
+		}
 		if (Array.isArray(ex.connectedClients) && ex.connectedClients.length > 0) {
 			console.log(`Clients: ${ex.connectedClients.join(', ')}`);
+		}
+		if (Array.isArray(ex.connectedClientsDetails) && ex.connectedClientsDetails.length > 0) {
+			for (const detail of ex.connectedClientsDetails) {
+				const name = detail?.name || 'unknown';
+				const address = detail?.address || '-';
+				const since = detail?.connectedAt || '-';
+				console.log(`Client : ${name} @ ${address} (since ${since})`);
+			}
 		}
 		return;
 	}
@@ -237,6 +264,22 @@ async function main() {
 		const token = response.exchangeToken || {};
 		console.log(`Generated token at: ${token.path || '-'}`);
 		console.log(token.token || '');
+		return;
+	}
+
+	if (command === 'generate-tls-cert') {
+		const response = await sendCommand({ command: 'generate-tls-cert' });
+		if (!response.ok) {
+			console.error(`[daemonctl] ${response.error || 'generate-tls-cert failed'}`);
+			process.exit(1);
+		}
+		const tls = response.tls || {};
+		console.log('Self-signed TLS certificate generated');
+		console.log(`cert.pem: ${tls.certPath || '-'}`);
+		console.log(`key.pem:  ${tls.keyPath || '-'}`);
+		if (tls.subject) console.log(`Subject: ${tls.subject}`);
+		if (tls.notAfter) console.log(`NotAfter:${tls.notAfter}`);
+		if (tls.fingerprint) console.log(`SHA256:  ${tls.fingerprint}`);
 		return;
 	}
 

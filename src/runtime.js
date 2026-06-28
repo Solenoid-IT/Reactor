@@ -192,7 +192,9 @@ class ReactorRuntime {
 		this.reactorNamePath = path.join(this.reactorRootDir, 'name');
 		this.cachedReactorName = null;
 		this.exchangeManager = new ExchangeManager(this);
-		this.exchangeMode = String(options.exchangeMode || process.env.REACTOR_EXCHANGE_MODE || 'node');
+		const envWorkingMode = process.env.REACTOR_WORKING_MODE || '';
+		const requestedWorkingMode = String(options.exchangeMode || envWorkingMode || 'node').trim().toLowerCase();
+		this.exchangeMode = requestedWorkingMode === 'exchange' ? 'exchange' : 'node';
 		this.exchangeHost = String(options.exchangeHost || process.env.REACTOR_EXCHANGE_HOST || '');
 		this.exchangePort = Number(options.exchangePort || process.env.REACTOR_EXCHANGE_PORT || 7070);
 		this.exchangeTls = Boolean(options.exchangeTls || process.env.REACTOR_EXCHANGE_TLS === '1' || process.env.REACTOR_EXCHANGE_TLS === 'true');

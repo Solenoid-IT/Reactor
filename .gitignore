@@ -5,3 +5,7 @@
 /ui/node_modules
 /ui/build
 /ui/.svelte-kit
+
+.env
+.env.*
+!.env.example

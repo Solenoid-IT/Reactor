@@ -191,6 +191,17 @@ async function createControlServer(runtime, socketPath, onStopRequested) {
 					const exchangeToken = await runtime.generateExchangeToken();
 					await saveExchangeConfig(runtime.exchangeMode, runtime.exchangeHost, runtime.exchangePort, runtime.exchangeManager.tls, exchangeToken.token);
 					response = { ok: true, exchangeToken };
+				} else if (command === 'generate-tls-cert') {
+					const tls = await runtime.generateTlsCert();
+					const tlsDir = path.join(runtime.reactorRootDir, 'tls');
+					response = {
+						ok: true,
+						tls: {
+							...tls,
+							certPath: path.join(tlsDir, 'cert.pem'),
+							keyPath: path.join(tlsDir, 'key.pem'),
+						},
+					};
 				} else if (command === 'get-exchange') {
 					response = { ok: true, exchange: runtime.getExchangeConfig() };
 				} else if (command === 'delete') {
@@ -257,10 +268,13 @@ async function main() {
 
 	// Carica la configurazione exchange (env vars hanno priorità > file > default)
 	async function loadExchangeConfig() {
+		const envWorkingMode = String(process.env.REACTOR_WORKING_MODE || '').trim().toLowerCase();
+		const normalizedWorkingMode = envWorkingMode === 'exchange' ? 'exchange' : envWorkingMode ? 'node' : '';
+
 		// Env vars hanno la priorità massima
-		if (process.env.REACTOR_EXCHANGE_MODE) {
+		if (normalizedWorkingMode) {
 			return {
-				mode: process.env.REACTOR_EXCHANGE_MODE,
+				mode: normalizedWorkingMode,
 				host: process.env.REACTOR_EXCHANGE_HOST || '',
 				port: Number(process.env.REACTOR_EXCHANGE_PORT) || 7070,
 				tls: process.env.REACTOR_EXCHANGE_TLS === '1' || process.env.REACTOR_EXCHANGE_TLS === 'true',
