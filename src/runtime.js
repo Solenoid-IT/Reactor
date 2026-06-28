@@ -190,7 +190,7 @@ class ReactorRuntime {
 		this.reactorNamePath = path.join(this.reactorRootDir, 'name');
 		this.cachedReactorName = null;
 		this.exchangeManager = new ExchangeManager(this);
-		this.exchangeMode = String(options.exchangeMode || process.env.REACTOR_EXCHANGE_MODE || 'disabled');
+		this.exchangeMode = String(options.exchangeMode || process.env.REACTOR_EXCHANGE_MODE || 'node');
 		this.exchangeHost = String(options.exchangeHost || process.env.REACTOR_EXCHANGE_HOST || '');
 		this.exchangePort = Number(options.exchangePort || process.env.REACTOR_EXCHANGE_PORT || 7070);
 		this.tlsManager = new TlsManager(path.join(this.reactorRootDir, 'tls'));
@@ -497,31 +497,11 @@ class ReactorRuntime {
 		}
 
 		if (lastError) {
-			// Fallback via Exchange se siamo in modalità client
-			if (this.exchangeMode === 'client') {
-				try {
-					await this.exchangeManager.sendViaExchange(targetId, content);
-					return { target: targetId, endpoint: 'exchange', status: 200 };
-				} catch (exchangeError) {
-					throw new Error(
-						`direct failed (${lastError.message}); exchange failed (${exchangeError.message})`,
-					);
-				}
-			}
 			throw lastError;
 		}
 
-		// Se nessun target diretto era disponibile e siamo in modalità client, prova exchange
-		if (this.exchangeMode === 'client') {
-			try {
-				await this.exchangeManager.sendViaExchange(targetId, content);
-				return { target: targetId, endpoint: 'exchange', status: 200 };
-			} catch (exchangeError) {
-				throw new Error(`exchange failed: ${exchangeError.message}`);
-			}
-		}
-
-		throw new Error('failed to dispatch node message');
+		// Se nessun target diretto era disponibile, il messaggio fallisce
+		throw new Error(`No direct route found for ${targetId}`);
 	}
 
 	/**
@@ -814,7 +794,7 @@ class ReactorRuntime {
 		await this.startHttpServer();
 		this.setupScriptsWatcher();
 		this.setupNetworkWatcher();
-		if (this.exchangeMode !== 'disabled') {
+		if (this.exchangeMode === 'exchange') {
 			this.exchangeManager.configure(this.exchangeMode, this.exchangeHost, this.exchangePort);
 			await this.exchangeManager.start(this.httpServer).catch((err) => {
 				this.log(`[Exchange] Avvio fallito: ${err.message}`);

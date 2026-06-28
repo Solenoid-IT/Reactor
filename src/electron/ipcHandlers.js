@@ -59,7 +59,7 @@ function setupIpcHandlers(runtime) {
 			if (runtime && runtime.setHttpServerPort && Number(settings.httpServerPort)) {
 				await runtime.setHttpServerPort(Number(settings.httpServerPort));
 			}
-			if (runtime && runtime.setExchangeConfig && settings.exchangeMode && settings.exchangeMode !== 'disabled') {
+			if (runtime && runtime.setExchangeConfig && settings.exchangeMode && settings.exchangeMode === 'exchange') {
 				await runtime
 					.setExchangeConfig(
 						settings.exchangeMode,

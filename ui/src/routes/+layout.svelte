@@ -1,4 +1,5 @@
 <script>
+	import '../app.css';
 	import 'bootstrap/dist/css/bootstrap.min.css';
 	import '@fortawesome/fontawesome-free/css/all.min.css';
 </script>
@@ -428,15 +429,6 @@
 		text-transform: uppercase;
 		color: #a7b4c8;
 	}
-	:global(.detail-card input) {
-		width: 100%;
-		background: #12161c;
-		color: #eef2fb;
-		border: 1px solid #313a46;
-		border-radius: 8px;
-		padding: 8px;
-		margin: 6px 0 8px;
-	}
 	:global(.http-server-card) {
 		border-color: #3a556a;
 		background: linear-gradient(170deg, #202a37, #1d2632);
@@ -447,9 +439,6 @@
 		border: 1px solid #3a4657;
 		border-radius: 10px;
 		background: rgba(14, 20, 28, 0.55);
-	}
-	:global(.http-port-group input) {
-		margin: 0;
 	}
 	:global(.http-server-actions) {
 		display: grid;

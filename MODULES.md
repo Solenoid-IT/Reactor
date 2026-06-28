@@ -147,38 +147,50 @@ Dipendenza: pacchetto npm `ws`.
 
 ### Concetto
 
-Ogni nodo Reactor può essere `CLIENT`, `EXCHANGE` o `disabled`.
+Ogni nodo Reactor può essere in modalità `node` o `exchange`.
+
+**Node**
+- Ha un **HTTP server** (default port 7070) che riceve messaggi diretti da altri nodi in LAN
+- Ha un **WebSocket client** che si connette a un Exchange remoto per messaggi extra-LAN
+- Modalità: riceve e invia messaggi
+
+**Exchange**
+- Ha un **WebSocket server** sulla stessa porta HTTP (default 7070) che funge da router
+- I nodi si connettono, si registrano per nome e ricevono i messaggi diretti a loro
+- Modalità: inoltra messaggi da sorgente a destinazione
 
 ```
-Nodo A (CLIENT)          Nodo EXCHANGE            Nodo B (CLIENT)
-      │                        │                        │
-      │── ws://exchange:7070 ──▶│                        │
-      │   { register: 'a' }    │◀─ ws://exchange:7070 ──│
-      │                        │   { register: 'b' }    │
-      │── { to:'b', msg:'hi' }─▶│                        │
-      │                        │── { from:'a', msg:'hi'}─▶│
+Nodo A (Node)              Nodo EXCHANGE            Nodo B (Node)
+      │                         │                         │
+      │◀──── HTTP diretta ──────▶│◀────── HTTP diretta ───▶│
+      │     (se in LAN)         │     (se in LAN)        │
+      │                         │                         │
+      │── wss://exchange:7070 ──▶│ WebSocket server       │
+      │   { register: 'a' }     │                        │
+      │                         │◀─ wss://exchange:7070 ──│
+      │                         │   { register: 'b' }    │
+      │                         │                         │
+      │── { to:'b', msg:'hi' }──▶│                         │
+      │                         │── { from:'a', msg:'hi'}──▶│
 ```
-
-- **EXCHANGE**: fa da router. Il WebSocket server gira sulla **stessa porta HTTP** (default 7070). I client si connettono, si registrano per nome e ricevono i messaggi diretti a loro.
-- **CLIENT**: si connette all'exchange via `ws://host:port`. `Node.sendMessage('b', 'hello')` prima tenta HTTP diretto (LAN), poi cade sull'exchange se non raggiungibile.
-- Un nodo può essere in LAN **e** connesso a un exchange — il fallback è automatico.
 
 ### Protocollo WebSocket (JSON)
 
 | Direzione | Tipo | Payload |
 |-----------|------|---------|
-| client → exchange | `register` | `{ type, name }` |
-| exchange → client | `registered` | `{ type, name }` |
-| client → exchange | `message` | `{ type, to, content, contentType }` |
-| exchange → client | `message` | `{ type, from, content, contentType }` |
+| node → exchange | `register` | `{ type, name }` |
+| exchange → node | `registered` | `{ type, name }` |
+| node → exchange | `message` | `{ type, to, content, contentType }` |
+| exchange → node | `message` | `{ type, from, content, contentType }` |
 
 ### Configurazione
 
 | Campo | Descrizione | Default |
 |-------|-------------|---------|
-| `exchangeMode` | `disabled` \| `exchange` \| `client` | `disabled` |
-| `exchangeHost` | Host dell'exchange (solo client) | `''` |
-| `exchangePort` | Porta HTTP dell'exchange (stesso server) | `7070` |
+| `exchangeMode` | `node` \| `exchange` | `node` |
+| `exchangeHost` | Host dell'exchange remoto (solo modalità node) | `''` |
+| `exchangePort` | Porta HTTP dell'exchange (default 7070) | `7070` |
+| `exchangeTls` | Usa WSS anzichè WS | `false` |
 
 ### Persistenza per piattaforma
 
@@ -186,14 +198,15 @@ Nodo A (CLIENT)          Nodo EXCHANGE            Nodo B (CLIENT)
 |-------------|------|
 | Electron (macOS/Win/Linux desktop) | `ui-settings.json` in userData |
 | Daemon headless (Linux server) | `$REACTOR_DATA_DIR/exchange-config.json` |
-| Android | SharedPreferences (`exchangeMode`, `exchangeHost`, `exchangePort`) |
+| Android | SharedPreferences (`exchangeMode`, `exchangeHost`, `exchangePort`, `exchangeTls`) |
 
 ### Variabili d'ambiente (priorità massima su tutte le piattaforme Node.js)
 
 ```bash
-REACTOR_EXCHANGE_MODE=exchange          # oppure: client, disabled
-REACTOR_EXCHANGE_HOST=192.168.1.10     # solo per modalità client
+REACTOR_EXCHANGE_MODE=exchange          # oppure: node
+REACTOR_EXCHANGE_HOST=192.168.1.10     # solo per modalità node
 REACTOR_EXCHANGE_PORT=7070             # porta HTTP dell'exchange
+REACTOR_EXCHANGE_TLS=true              # usa WSS
 ```
 
 ### Android

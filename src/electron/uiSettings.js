@@ -15,13 +15,13 @@ async function readUiSettings() {
 		return {
 			defaultProgramPath: parsed.defaultProgramPath || '',
 			httpServerPort: Number(parsed.httpServerPort) || 7070,
-			exchangeMode: parsed.exchangeMode || 'disabled',
+			exchangeMode: parsed.exchangeMode || 'node',
 			exchangeHost: parsed.exchangeHost || '',
 			exchangePort: Number(parsed.exchangePort) || 7070,
 			exchangeTls: Boolean(parsed.exchangeTls),
 		};
 	} catch (error) {
-		return { defaultProgramPath: '', httpServerPort: 7070, exchangeMode: 'disabled', exchangeHost: '', exchangePort: 7070, exchangeTls: false };
+		return { defaultProgramPath: '', httpServerPort: 7070, exchangeMode: 'node', exchangeHost: '', exchangePort: 7070, exchangeTls: false };
 	}
 }
 

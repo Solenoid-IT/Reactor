@@ -8,7 +8,7 @@
 	export let tlsSubject = '';
 	export let tlsNotAfter = '';
 	export let tlsFingerprint = '';
-	export let exchangeMode = 'disabled';
+	export let exchangeMode = 'node';
 	export let exchangeHost = '';
 	export let exchangePort = 7070;
 	export let exchangeTls = false;
@@ -35,19 +35,41 @@
 		<div class="detail-value">{defaultProgramPath || 'System default (not set)'}</div>
 	</section>
 	<section class="detail-card">
-		<h3><i class="fa-solid fa-tag me-2"></i>Name</h3>
-		<input type="text" bind:value={reactorName} placeholder="sender_1" />
-		<button class="btn-primary" on:click={() => onSaveReactorName(reactorName)}><i class="fa-solid fa-floppy-disk me-2"></i>Save Name</button>
+		<h3>
+			<i class="fa-solid fa-tag me-2"></i>
+			Name
+		</h3>
+		<div class="row">
+			<div class="col">
+				<input type="text" class="input" placeholder="reactor_name" bind:value={ reactorName } />
+			</div>
+			<div class="col">
+				<button class="btn-primary" on:click={ () => onSaveReactorName( reactorName ) }>
+					<i class="fa-solid fa-floppy-disk me-2"></i>
+					Save
+				</button>
+			</div>
+		</div>
 	</section>
 	<section class="detail-card http-server-card">
-		<h3><i class="fa-solid fa-network-wired me-2"></i>Server</h3>
+		<h3>
+			<i class="fa-solid fa-network-wired me-2"></i>Server
+		</h3>
+
 		<button class="btn-secondary mt-2" on:click={onOpenServerStatus}><i class="fa-solid fa-heart-pulse me-2"></i>View Status</button>
+
 		<div class="http-port-group mt-2">
 			<label class="detail-label" for="httpServerPortInput">Port</label>
-			<input id="httpServerPortInput" type="number" min="1" max="65535" bind:value={httpPort} />
+			<input class="input" id="httpServerPortInput" type="number" min="1" max="65535" bind:value={httpPort} />
 		</div>
-		<div class="http-server-actions">
-			<button class="btn-primary" on:click={() => onSaveHttpServerData(httpPort)}><i class="fa-solid fa-floppy-disk me-2"></i>Save</button>
+
+		<div class="row mt-2">
+			<div class="col text-center">
+				<button class="btn-primary" on:click={() => onSaveHttpServerData(httpPort)}>
+					<i class="fa-solid fa-floppy-disk me-2"></i>
+					Save
+				</button>
+			</div>
 		</div>
 		<!-- TLS -->
 		<div class="mt-3" style="border-top: 1px solid rgba(255,255,255,0.1); padding-top: 10px;">
@@ -76,13 +98,11 @@
 		</div>
 	</section>
 	<section class="detail-card">
-		<h3><i class="fa-solid fa-arrows-left-right me-2"></i>Exchange</h3>
+		<h3><i class="fa-solid fa-arrows-left-right me-2"></i>Mode</h3>
 		<div class="exchange-mode-group mt-2">
-			<label class="detail-label" for="exchangeModeSelect">Mode</label>
-			<select id="exchangeModeSelect" bind:value={exchangeMode}>
-				<option value="disabled">Disabled</option>
-				<option value="exchange">Exchange (server)</option>
-				<option value="client">Client</option>
+			<select class="form-control input" id="exchangeModeSelect" bind:value={exchangeMode}>
+				<option value="node">Node</option>
+				<option value="exchange">Exchange</option>
 			</select>
 		</div>
 		{#if exchangeMode === 'exchange'}
@@ -100,41 +120,50 @@
 				<div class="detail-value mt-1" style="opacity:0.5;"><i class="fa-solid fa-circle me-1"></i>Not active</div>
 			{/if}
 		{/if}
-		{#if exchangeMode === 'client'}
-			<div class="mt-2">
-				<label class="detail-label" for="exchangeHostInput">Exchange Host</label>
-				<input id="exchangeHostInput" type="text" bind:value={exchangeHost} placeholder="192.168.1.10" />
-			</div>
-			<div class="http-port-group mt-1">
-				<label class="detail-label" for="exchangePortInput">Exchange Port</label>
-				<input id="exchangePortInput" type="number" min="1" max="65535" bind:value={exchangePort} />
-			</div>
-			<div class="detail-value mt-1" style="font-size:0.8em; opacity:0.6;">
-				Porta HTTP del nodo Exchange (default 7070)
-			</div>
-			<label class="detail-label mt-2" style="display:flex; align-items:center; gap:6px; cursor:pointer;">
-				<input type="checkbox" bind:checked={exchangeTls} />
-				<span>Exchange usa TLS (WSS)</span>
-			</label>
-			{#if exchangeActive}
-				<div class="detail-value mt-1" style="color: var(--color-success, #4caf50);"><i class="fa-solid fa-plug me-1"></i>Connected{exchangeTls ? ' (WSS)' : ''}</div>
-			{:else}
-				<div class="detail-value mt-1" style="opacity:0.5;"><i class="fa-solid fa-plug-circle-xmark me-1"></i>Not connected</div>
-			{/if}
+		{#if exchangeMode === 'node'}
+			<fieldset class="mt-2" style="border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 10px;">
+				<legend style="padding: 0; margin-left: -4px; font-size:0.85em; color:rgba(255,255,255,0.7);">Exchange</legend>
+
+				<div class="row">
+					<div class="col">
+						<label class="detail-label">
+							Host
+							<input type="text" class="form-control input" bind:value={exchangeHost} placeholder="192.168.1.10" />
+						</label>
+					</div>
+					<div class="col">
+						<label class="detail-label">
+							Port
+							<input type="number" class="form-control input" min="1" max="65535" bind:value={exchangePort} />
+						</label>
+					</div>
+				</div>
+
+				<div class="row mt-2">
+					<div class="col">
+						<label class="d-flex align-items-center m-0">
+							<input type="checkbox" class="input me-2" bind:checked={ exchangeTls } />
+							TLS
+						</label>
+					</div>
+				</div>
+
+				{#if exchangeActive}
+					<div class="detail-value mt-4" style="color: var(--color-success, #4caf50);"><i class="fa-solid fa-plug me-1"></i>Connected{exchangeTls ? ' (WSS)' : ' (WS)'}</div>
+				{:else}
+					<div class="detail-value mt-4" style="opacity:0.5;"><i class="fa-solid fa-plug-circle-xmark me-1"></i>Not connected</div>
+				{/if}
+			</fieldset>
 		{/if}
-		{#if exchangeMode !== 'disabled'}
-			<div class="http-server-actions mt-2">
+
+		<div class="row mt-3">
+			<div class="col text-center">
 				<button class="btn-primary" on:click={() => onSaveExchangeConfig(exchangeMode, exchangeHost, exchangePort, exchangeTls)}>
-					<i class="fa-solid fa-floppy-disk me-2"></i>Save
+					<i class="fa-solid fa-floppy-disk me-2"></i>
+					Save
 				</button>
 			</div>
-		{:else}
-			<div class="http-server-actions mt-2">
-				<button class="btn-secondary" on:click={() => onSaveExchangeConfig('disabled', '', 7070, false)}>
-					<i class="fa-solid fa-floppy-disk me-2"></i>Save
-				</button>
-			</div>
-		{/if}
+		</div>
 	</section>
 	<section class="detail-card">
 		<h3><i class="fa-solid fa-file-code me-2"></i>Selected Script</h3>

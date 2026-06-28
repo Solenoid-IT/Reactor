@@ -41,7 +41,7 @@
 	let defaultProgramPath = '';
 	let reactorName = '';
 	let httpPort = 7070;
-	let exchangeMode = 'disabled';
+	let exchangeMode = 'node';
 	let exchangeHost = '';
 	let exchangePort = 7070;
 	let exchangeTls = false;
@@ -128,7 +128,7 @@
 
 		if (exchangeConfigResult?.ok && exchangeConfigResult?.config) {
 			const ec = exchangeConfigResult.config;
-			exchangeMode = ec.mode || 'disabled';
+			exchangeMode = ec.mode || 'node';
 			exchangeHost = ec.host || '';
 			exchangePort = Number(ec.port) || 7070;
 			exchangeTls = Boolean(ec.tls);
