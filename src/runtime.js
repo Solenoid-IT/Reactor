@@ -510,7 +510,11 @@ class ReactorRuntime {
 			if (this.tlsEnabled) {
 				try {
 					const result = await this._sendHttpsMessage(host, port, payload, contentType, reactorName, senderId, extraHeaders, shortTimeout || 3000);
-					return { target: normalizedTarget, endpoint: `https://${host}:${port}/message`, ...result };
+					return {
+						target: normalizedTarget,
+						endpoint: `https://${host}:${port}/message`,
+						...result,
+					};
 				} catch {
 					// Fallback a HTTP
 				}
@@ -611,6 +615,14 @@ class ReactorRuntime {
 					const headers = normalizedOptions.headers || {};
 					return this.sendNodeMessage(target, content, headers);
 				},
+				exchange: () => ({
+					sendMessage: async (target, content) => {
+						if (this.exchangeMode !== 'node') {
+							throw new Error('exchange routing is available only when REACTOR_WORKING_MODE=node');
+						}
+						return this.exchangeManager.sendViaExchange(target, content);
+					},
+				}),
 			},
 			api: this.runtimeApi,
 			FileSystem: this.runtimeApi.FileSystem,

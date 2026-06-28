@@ -135,12 +135,26 @@ declare module 'core' {
 		body: string;
 	}
 
+	export interface NodeExchangeSendMessageResponse {
+		target: string;
+		via: 'exchange';
+		queued: true;
+	}
+
+	export interface NodeExchangeApi {
+		sendMessage: (
+			target: string,
+			content: string | Uint8Array | Buffer | Record<string, unknown>,
+		) => Promise<NodeExchangeSendMessageResponse>;
+	}
+
 	export interface NodeApi {
 		sendMessage: (
 			target: string,
 			content: string | Uint8Array | Buffer | Record<string, unknown>,
 			options?: NodeSendMessageOptions,
 		) => Promise<NodeSendMessageResponse>;
+		exchange: () => NodeExchangeApi;
 	}
 
 	export interface RuntimeApi {

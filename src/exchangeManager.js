@@ -569,6 +569,11 @@ class ExchangeManager {
 		if (!to) throw new Error('target exchange non valido');
 
 		this.wsClient.send(JSON.stringify({ type: 'message', to, content: serializedContent, contentType }));
+		return {
+			target: to,
+			via: 'exchange',
+			queued: true,
+		};
 	}
 
 	getConfig() {
