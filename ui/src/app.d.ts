@@ -24,6 +24,10 @@ declare global {
 			setReactorName?: (name: string) => Promise<any>;
 			getWorkflow?: () => Promise<any>;
 			saveWorkflow?: (workflow: any) => Promise<any>;
+			getMessageQueueStatus?: () => Promise<any>;
+			setMessageQueueTtlDays?: (ttlDays: number) => Promise<any>;
+			flushMessageQueue?: () => Promise<any>;
+			clearMessageQueue?: () => Promise<any>;
 			exportBackup?: () => Promise<any>;
 			importBackup?: () => Promise<any>;
 		};

@@ -5,6 +5,8 @@ const path = require('path');
 const RECONNECT_DELAY_MS = 5000;
 const DEFAULT_WS_HEARTBEAT_INTERVAL_MS = 15000;
 const DEFAULT_WS_HEARTBEAT_TIMEOUT_MS = 45000;
+const DEFAULT_UNDELIVERED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_UNDELIVERED_RETRY_MS = 30 * 1000;
 
 /**
  * ExchangeManager — due modalità:
@@ -54,6 +56,11 @@ class ExchangeManager {
 		this._heartbeatTimeoutMs = this._readHeartbeatValue('REACTOR_EXCHANGE_HEARTBEAT_TIMEOUT_MS', DEFAULT_WS_HEARTBEAT_TIMEOUT_MS, this._heartbeatIntervalMs + 1000);
 		this._connectionLogPath = path.join(this.runtime.reactorRootDir || process.cwd(), 'exchange-connections.log');
 		this._activeConnectionsPath = path.join(this.runtime.reactorRootDir || process.cwd(), 'exchange-active-connections.json');
+		this._undeliveredQueuePath = path.join(this.runtime.reactorRootDir || process.cwd(), 'exchange-undelivered-queue.json');
+		this._undeliveredQueueTtlMs = this._readHeartbeatValue('REACTOR_MESSAGE_QUEUE_TTL_MS', DEFAULT_UNDELIVERED_TTL_MS, 60 * 1000);
+		this._undeliveredQueueRetryMs = this._readHeartbeatValue('REACTOR_MESSAGE_QUEUE_RETRY_MS', DEFAULT_UNDELIVERED_RETRY_MS, 5 * 1000);
+		this._undeliveredFlushTimer = null;
+		this._isFlushingUndelivered = false;
 	}
 
 	_readHeartbeatValue(envName, fallback, minValue) {
@@ -97,6 +104,127 @@ class ExchangeManager {
 			await fs.writeFile(this._activeConnectionsPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
 		} catch {
 			// Snapshot persistence should not impact runtime.
+		}
+	}
+
+	async _readUndeliveredQueue() {
+		try {
+			const raw = await fs.readFile(this._undeliveredQueuePath, 'utf8');
+			const parsed = JSON.parse(raw);
+			return Array.isArray(parsed) ? parsed : [];
+		} catch {
+			return [];
+		}
+	}
+
+	async _writeUndeliveredQueue(queue) {
+		await fs.writeFile(this._undeliveredQueuePath, `${JSON.stringify(queue, null, 2)}\n`, 'utf8');
+	}
+
+	async _enqueueUndeliveredMessage(to, from, content, contentType) {
+		const now = Date.now();
+		const queue = await this._readUndeliveredQueue();
+		queue.push({
+			id: `${now}-${Math.random().toString(16).slice(2)}`,
+			to,
+			from,
+			content,
+			contentType,
+			createdAt: now,
+			expiresAt: now + this._undeliveredQueueTtlMs,
+			nextAttemptAt: now + this._undeliveredQueueRetryMs,
+			attempts: 0,
+		});
+		await this._writeUndeliveredQueue(queue);
+		this.runtime.log(`[Exchange] Queued undelivered message for ${to}`);
+	}
+
+	_startUndeliveredFlushTimer() {
+		if (this._undeliveredFlushTimer) {
+			clearInterval(this._undeliveredFlushTimer);
+		}
+
+		this._undeliveredFlushTimer = setInterval(() => {
+			this._flushUndeliveredQueue().catch((error) => {
+				this.runtime.log(`[Exchange] Undelivered queue flush failed: ${error.message}`);
+			});
+		}, this._undeliveredQueueRetryMs);
+	}
+
+	_stopUndeliveredFlushTimer() {
+		if (this._undeliveredFlushTimer) {
+			clearInterval(this._undeliveredFlushTimer);
+			this._undeliveredFlushTimer = null;
+		}
+	}
+
+	async _flushUndeliveredQueue(recipientFilter = null) {
+		if (this._isFlushingUndelivered) {
+			return;
+		}
+
+		this._isFlushingUndelivered = true;
+		try {
+			const now = Date.now();
+			const queue = await this._readUndeliveredQueue();
+			if (queue.length === 0) {
+				return;
+			}
+
+			const nextQueue = [];
+			let delivered = 0;
+
+			for (const item of queue) {
+				if (!item || typeof item !== 'object') {
+					continue;
+				}
+				if (Number(item.expiresAt || 0) <= now) {
+					continue;
+				}
+				if (recipientFilter && item.to !== recipientFilter) {
+					nextQueue.push(item);
+					continue;
+				}
+				if (Number(item.nextAttemptAt || 0) > now) {
+					nextQueue.push(item);
+					continue;
+				}
+
+				const targetWs = this.connectedClients.get(String(item.to || '').toLowerCase());
+				if (!targetWs || targetWs.readyState !== WebSocket.OPEN) {
+					const attempts = Number(item.attempts || 0) + 1;
+					nextQueue.push({
+						...item,
+						attempts,
+						nextAttemptAt: now + Math.min(this._undeliveredQueueRetryMs * attempts, 30 * 60 * 1000),
+					});
+					continue;
+				}
+
+				try {
+					targetWs.send(JSON.stringify({
+						type: 'message',
+						from: item.from || 'unknown',
+						content: item.content !== undefined ? item.content : '',
+						contentType: String(item.contentType || 'text/plain'),
+					}));
+					delivered += 1;
+				} catch {
+					const attempts = Number(item.attempts || 0) + 1;
+					nextQueue.push({
+						...item,
+						attempts,
+						nextAttemptAt: now + Math.min(this._undeliveredQueueRetryMs * attempts, 30 * 60 * 1000),
+					});
+				}
+			}
+
+			await this._writeUndeliveredQueue(nextQueue);
+			if (delivered > 0) {
+				this.runtime.log(`[Exchange] Flushed ${delivered} queued message(s)`);
+			}
+		} finally {
+			this._isFlushingUndelivered = false;
 		}
 	}
 
@@ -174,6 +302,7 @@ class ExchangeManager {
 	async start(httpServer) {
 		await this.stop();
 		this._stopped = false;
+		await fs.mkdir(path.dirname(this._undeliveredQueuePath), { recursive: true });
 
 		if (this.mode === 'exchange') {
 			this._startServer(httpServer);
@@ -186,6 +315,7 @@ class ExchangeManager {
 		this._stopped = true;
 		this._stopServerHeartbeat();
 		this._stopClientHeartbeat();
+		this._stopUndeliveredFlushTimer();
 
 		if (this.reconnectTimer) {
 			clearTimeout(this.reconnectTimer);
@@ -222,6 +352,7 @@ class ExchangeManager {
 		this.wss = new WebSocketServer({ noServer: true });
 		this.wss.on('connection', (ws, request) => this._handleClientConnection(ws, request));
 		this._startServerHeartbeat();
+		this._startUndeliveredFlushTimer();
 
 		this._httpServer = httpServer;
 		this._upgradeHandler = (request, socket, head) => {
@@ -328,6 +459,7 @@ class ExchangeManager {
 					});
 					this.runtime.log(`[Exchange] Client registered: ${clientName}`);
 					ws.send(JSON.stringify({ type: 'registered', name: clientName }));
+					this._flushUndeliveredQueue(clientName).catch(() => {});
 				}
 			} else if (packet.type === 'message') {
 				if (clientName && this._connectedClientDetails.has(clientName)) {
@@ -369,6 +501,12 @@ class ExchangeManager {
 		const targetWs = this.connectedClients.get(to);
 		if (!targetWs || targetWs.readyState !== WebSocket.OPEN) {
 			this.runtime.log(`[Exchange] Target not found or disconnected: ${to}`);
+			this._enqueueUndeliveredMessage(
+				to,
+				fromName || 'unknown',
+				packet.content !== undefined ? packet.content : '',
+				String(packet.contentType || 'text/plain'),
+			).catch(() => {});
 			return;
 		}
 
@@ -382,6 +520,12 @@ class ExchangeManager {
 			this.runtime.log(`[Exchange] Routed: ${fromName || 'unknown'} -> ${to}`);
 		} catch (err) {
 			this.runtime.log(`[Exchange] Routing error to ${to}: ${err.message}`);
+			this._enqueueUndeliveredMessage(
+				to,
+				fromName || 'unknown',
+				packet.content !== undefined ? packet.content : '',
+				String(packet.contentType || 'text/plain'),
+			).catch(() => {});
 		}
 	}
 
@@ -627,7 +771,7 @@ class ExchangeManager {
 		return {
 			target: to,
 			via: 'exchange',
-			queued: true,
+			queued: false,
 		};
 	}
 

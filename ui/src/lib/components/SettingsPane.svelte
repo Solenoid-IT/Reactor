@@ -23,6 +23,13 @@
 	export let onSaveExchangeConfig = () => {};
 	export let onExportBackup = () => {};
 	export let onImportBackup = () => {};
+	export let messageQueuePending = 0;
+	export let messageQueueDirectPending = 0;
+	export let messageQueueExchangePending = 0;
+	export let messageQueueTtlDays = 7;
+	export let onSaveMessageQueueTtlDays = () => {};
+	export let onFlushMessageQueue = () => {};
+	export let onClearMessageQueue = () => {};
 
 	function onNameSubmit(event) {
 		if (!event.detail.valid) {
@@ -63,6 +70,23 @@
 		}
 
 		onGenerateExchangeToken();
+	}
+
+	function onQueuePolicySubmit(event) {
+		if (!event.detail.valid) {
+			return;
+		}
+		onSaveMessageQueueTtlDays(event.detail.values.queueTtlDays ?? messageQueueTtlDays);
+	}
+
+	function confirmClearQueue() {
+		if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+			const confirmed = window.confirm('Clear queued messages? This cannot be undone.');
+			if (!confirmed) {
+				return;
+			}
+		}
+		onClearMessageQueue();
 	}
 </script>
 
@@ -251,6 +275,53 @@
 			<button type="button" class="btn-primary" on:click={onImportBackup}>
 				<i class="fa-solid fa-file-import me-2"></i>
 				Import ZIP
+			</button>
+		</div>
+	</section>
+
+	<section class="detail-card settings-queue-card">
+		<h3><i class="fa-solid fa-list-check me-2"></i>Message Queue</h3>
+		<div class="detail-value" style="font-size:0.82em; opacity:0.75; margin-bottom:10px;">
+			Queued messages are retried automatically when connectivity is restored.
+		</div>
+		<div class="detail-value" style="font-size:0.82em; margin-bottom:10px;">
+			Pending: {messageQueuePending} (Direct: {messageQueueDirectPending}, Exchange: {messageQueueExchangePending})
+		</div>
+
+		<Form on:submit={onQueuePolicySubmit}>
+			<div class="row settings-inline-row">
+				<div class="col">
+					<label class="d-block m-0">
+						<span class="detail-label">TTL (days)</span>
+						<input
+							type="number"
+							class="input"
+							name="queueTtlDays"
+							data-required="true"
+							data-type="float"
+							min="0.01"
+							step="0.25"
+							bind:value={messageQueueTtlDays}
+						/>
+					</label>
+				</div>
+				<div class="col settings-submit-col">
+					<button type="submit" class="btn-primary">
+						<i class="fa-solid fa-floppy-disk me-2"></i>
+						Save TTL
+					</button>
+				</div>
+			</div>
+		</Form>
+
+		<div class="settings-backup-actions mt-2">
+			<button type="button" class="btn-secondary" on:click={onFlushMessageQueue}>
+				<i class="fa-solid fa-rotate me-2"></i>
+				Flush Now
+			</button>
+			<button type="button" class="btn-secondary" style="color:#e57373;" on:click={confirmClearQueue}>
+				<i class="fa-solid fa-trash me-2"></i>
+				Clear Queue
 			</button>
 		</div>
 	</section>

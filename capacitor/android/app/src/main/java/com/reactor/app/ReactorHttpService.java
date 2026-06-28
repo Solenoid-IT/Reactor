@@ -75,6 +75,8 @@ public class ReactorHttpService extends Service {
     public static final String PREF_EXCHANGE_PORT = "exchangePort";
     public static final String PREF_EXCHANGE_TLS = "exchangeTls";
     public static final String PREF_EXCHANGE_TOKEN = "exchangeToken";
+    public static final String PREF_MESSAGE_QUEUE_TTL_MS = "messageQueueTtlMs";
+    public static final String PREF_MESSAGE_QUEUE_RETRY_MS = "messageQueueRetryMs";
     public static final int DEFAULT_PORT = 7070;
     private static final String WORKING_MODE_FILE = "working-mode.json";
 
@@ -83,6 +85,8 @@ public class ReactorHttpService extends Service {
     private static final String WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     private static final long WS_HEARTBEAT_INTERVAL_MS = 15000L;
     private static final long WS_HEARTBEAT_TIMEOUT_MS = 45000L;
+    private static final long DEFAULT_MESSAGE_QUEUE_TTL_MS = 7L * 24L * 60L * 60L * 1000L;
+    private static final long DEFAULT_MESSAGE_QUEUE_RETRY_MS = 30000L;
 
     private static volatile boolean running = false;
     private static volatile int currentPort = DEFAULT_PORT;
@@ -109,11 +113,17 @@ public class ReactorHttpService extends Service {
     private OkHttpClient okHttpClient;
     private volatile boolean wsClientRunning = false;
     private Thread wsClientThread;
+        private volatile boolean outgoingQueueFlusherRunning = false;
+        private Thread outgoingQueueFlusherThread;
 
     private static final Pattern SEND_MESSAGE_CALL_PATTERN = Pattern.compile(
             "Node\\.sendMessage\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\1\\s*,\\s*(['\"])\\s*(.*?)\\s*\\3",
             Pattern.DOTALL
     );
+        private static final Pattern EXCHANGE_SEND_MESSAGE_CALL_PATTERN = Pattern.compile(
+            "Node\\.exchange\\s*\\(\\s*\\)\\s*\\.\\s*sendMessage\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\1\\s*,\\s*(['\"])\\s*(.*?)\\s*\\3",
+            Pattern.DOTALL
+        );
 
     private static class MessageScript {
         File scriptFile;
@@ -143,6 +153,77 @@ public class ReactorHttpService extends Service {
         return "exchange".equals(currentExchangeMode) && running;
     }
     public static boolean isExchangeClientConnected() { return wsExchangeClientSocket != null; }
+
+    public static JSObject getOutgoingQueueStatus() {
+        JSObject queue = new JSObject();
+        if (instance == null) {
+            queue.put("pending", 0);
+            queue.put("directPending", 0);
+            queue.put("exchangePending", 0);
+            queue.put("ttlMs", DEFAULT_MESSAGE_QUEUE_TTL_MS);
+            queue.put("ttlDays", 7.0);
+            queue.put("retryMs", DEFAULT_MESSAGE_QUEUE_RETRY_MS);
+            return queue;
+        }
+
+        List<JSONObject> entries = instance.readOutgoingQueueEntries();
+        long now = System.currentTimeMillis();
+        int pending = 0;
+        int directPending = 0;
+        int exchangePending = 0;
+        for (JSONObject item : entries) {
+            if (item == null) {
+                continue;
+            }
+            long expiresAt = item.optLong("expiresAt", 0L);
+            if (expiresAt > 0 && expiresAt <= now) {
+                continue;
+            }
+            pending += 1;
+            if ("exchange".equals(item.optString("channel", "direct"))) {
+                exchangePending += 1;
+            } else {
+                directPending += 1;
+            }
+        }
+
+        long ttlMs = instance.getQueueTtlMs();
+        queue.put("pending", pending);
+        queue.put("directPending", directPending);
+        queue.put("exchangePending", exchangePending);
+        queue.put("ttlMs", ttlMs);
+        queue.put("ttlDays", ((double) ttlMs) / (24.0 * 60.0 * 60.0 * 1000.0));
+        queue.put("retryMs", instance.getQueueRetryMs());
+        queue.put("path", instance.getOutgoingQueueFile().getAbsolutePath());
+        return queue;
+    }
+
+    public static void setOutgoingQueueTtlDays(double ttlDays) {
+        if (instance == null) {
+            return;
+        }
+        if (!Double.isFinite(ttlDays) || ttlDays <= 0.0) {
+            throw new IllegalArgumentException("invalid queue ttl days");
+        }
+
+        long ttlMs = Math.max(60000L, (long) Math.floor(ttlDays * 24.0 * 60.0 * 60.0 * 1000.0));
+        SharedPreferences prefs = instance.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        prefs.edit().putLong(PREF_MESSAGE_QUEUE_TTL_MS, ttlMs).apply();
+    }
+
+    public static void flushOutgoingQueueNow() {
+        if (instance != null) {
+            instance.flushOutgoingQueue();
+        }
+    }
+
+    public static void clearOutgoingQueueNow() {
+        if (instance == null) {
+            return;
+        }
+        instance.writeOutgoingQueueEntries(new ArrayList<>());
+    }
+
         private String normalizeExchangeMode(String rawMode) {
             String mode = String.valueOf(rawMode).trim().toLowerCase(Locale.ROOT);
             if ("exchange".equals(mode)) {
@@ -832,10 +913,10 @@ public class ReactorHttpService extends Service {
     }
 
     private void executeScriptActions(MessageScript script, String messageBody, Map<String, String> incomingHeaders) {
-        Matcher matcher = SEND_MESSAGE_CALL_PATTERN.matcher(script.source);
-        while (matcher.find()) {
-            String target = matcher.group(2) != null ? matcher.group(2).trim() : "";
-            String content = matcher.group(4) != null ? matcher.group(4) : "";
+        Matcher directMatcher = SEND_MESSAGE_CALL_PATTERN.matcher(script.source);
+        while (directMatcher.find()) {
+            String target = directMatcher.group(2) != null ? directMatcher.group(2).trim() : "";
+            String content = directMatcher.group(4) != null ? directMatcher.group(4) : "";
             if (target.isEmpty()) {
                 continue;
             }
@@ -850,6 +931,17 @@ public class ReactorHttpService extends Service {
             }
 
             sendNodeMessage(target, content, extraHeaders);
+        }
+
+        Matcher exchangeMatcher = EXCHANGE_SEND_MESSAGE_CALL_PATTERN.matcher(script.source);
+        while (exchangeMatcher.find()) {
+            String target = exchangeMatcher.group(2) != null ? exchangeMatcher.group(2).trim() : "";
+            String content = exchangeMatcher.group(4) != null ? exchangeMatcher.group(4) : "";
+            if (target.isEmpty()) {
+                continue;
+            }
+
+            sendExchangeMessage(target, content);
         }
     }
 
@@ -870,75 +962,38 @@ public class ReactorHttpService extends Service {
 
         RuntimeException lastError = null;
         for (String normalizedTarget : normalizedTargets) {
-            String[] hostPort = normalizedTarget.split(":", 2);
-            if (hostPort.length < 2) {
-                continue;
-            }
-
-            String endpoint = "http://" + hostPort[0] + ":" + hostPort[1] + "/message";
-            HttpURLConnection connection = null;
             try {
-                connection = (HttpURLConnection) new URL(endpoint).openConnection();
-                connection.setRequestMethod("POST");
-                connection.setConnectTimeout(2000);
-                connection.setReadTimeout(4000);
-                connection.setDoOutput(true);
-                connection.setRequestProperty("content-type", "text/plain; charset=utf-8");
-                connection.setRequestProperty("Reactor-Name", String.valueOf(reactorName));
-                connection.setRequestProperty("Reactor-Sender", senderId);
-
-                for (Map.Entry<String, String> header : extraHeaders.entrySet()) {
-                    connection.setRequestProperty(header.getKey(), header.getValue());
-                }
-
-                byte[] payload = String.valueOf(content).getBytes(StandardCharsets.UTF_8);
-                connection.setRequestProperty("content-length", String.valueOf(payload.length));
-                connection.getOutputStream().write(payload);
-
-                int status = connection.getResponseCode();
-                if (status >= 200 && status < 300) {
-                    return;
-                }
-                lastError = new RuntimeException("message dispatch failed with HTTP " + status);
+                sendDirectMessageNow(normalizedTarget, content, reactorName, senderId, extraHeaders);
+                return;
             } catch (Exception error) {
                 lastError = new RuntimeException(error.getMessage());
-            } finally {
-                if (connection != null) {
-                    connection.disconnect();
-                }
             }
         }
 
         if (lastError != null) {
-            // Fallback via Exchange se siamo in modalità client
-            if ("node".equals(currentExchangeMode) && wsExchangeClientSocket != null) {
-                try {
-                    JSONObject packet = new JSONObject();
-                    packet.put("type", "message");
-                    packet.put("to", targetValue.toLowerCase(Locale.ROOT));
-                    packet.put("content", String.valueOf(content));
-                    packet.put("contentType", "text/plain");
-                    wsExchangeClientSocket.send(packet.toString());
-                    return;
-                } catch (Exception exchangeError) {
-                    throw new RuntimeException("direct and exchange both failed: " + exchangeError.getMessage());
-                }
+            // Fallback via Exchange se siamo in modalità node/client.
+            try {
+                sendExchangeMessageNow(targetValue.toLowerCase(Locale.ROOT), String.valueOf(content), "text/plain");
+                return;
+            } catch (Exception ignored) {
+                enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), "text/plain", extraHeaders);
+                return;
             }
-            throw lastError;
         }
 
-        // Nessun target diretto disponibile, prova exchange se client
-        if ("node".equals(currentExchangeMode) && wsExchangeClientSocket != null) {
-            try {
-                JSONObject packet = new JSONObject();
-                packet.put("type", "message");
-                packet.put("to", targetValue.toLowerCase(Locale.ROOT));
-                packet.put("content", String.valueOf(content));
-                packet.put("contentType", "text/plain");
-                wsExchangeClientSocket.send(packet.toString());
-            } catch (Exception exchangeError) {
-                throw new RuntimeException("exchange failed: " + exchangeError.getMessage());
-            }
+        enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), "text/plain", extraHeaders);
+    }
+
+    private void sendExchangeMessage(String target, String content) {
+        String normalizedTarget = String.valueOf(target).trim().toLowerCase(Locale.ROOT);
+        if (normalizedTarget.isEmpty()) {
+            return;
+        }
+
+        try {
+            sendExchangeMessageNow(normalizedTarget, String.valueOf(content), "text/plain");
+        } catch (Exception error) {
+            enqueueOutgoingMessage("exchange", normalizedTarget, String.valueOf(content), "text/plain", new HashMap<>());
         }
     }
 
@@ -968,6 +1023,259 @@ public class ReactorHttpService extends Service {
         return candidates;
     }
 
+    private File getOutgoingQueueFile() {
+        return new File(getFilesDir(), "outgoing-message-queue.json");
+    }
+
+    private long getQueueTtlMs() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        long configured = prefs.getLong(PREF_MESSAGE_QUEUE_TTL_MS, DEFAULT_MESSAGE_QUEUE_TTL_MS);
+        if (configured < 60000L) {
+            return DEFAULT_MESSAGE_QUEUE_TTL_MS;
+        }
+        return configured;
+    }
+
+    private long getQueueRetryMs() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        long configured = prefs.getLong(PREF_MESSAGE_QUEUE_RETRY_MS, DEFAULT_MESSAGE_QUEUE_RETRY_MS);
+        if (configured < 5000L) {
+            return DEFAULT_MESSAGE_QUEUE_RETRY_MS;
+        }
+        return configured;
+    }
+
+    private synchronized List<JSONObject> readOutgoingQueueEntries() {
+        List<JSONObject> entries = new ArrayList<>();
+        try {
+            File queueFile = getOutgoingQueueFile();
+            if (!queueFile.exists()) {
+                return entries;
+            }
+
+            String raw = readTextFile(queueFile).trim();
+            if (raw.isEmpty()) {
+                return entries;
+            }
+
+            JSONArray parsed = new JSONArray(raw);
+            for (int i = 0; i < parsed.length(); i += 1) {
+                JSONObject item = parsed.optJSONObject(i);
+                if (item != null) {
+                    entries.add(item);
+                }
+            }
+        } catch (Exception ignored) {
+            // keep empty queue on parse failures
+        }
+        return entries;
+    }
+
+    private synchronized void writeOutgoingQueueEntries(List<JSONObject> entries) {
+        JSONArray out = new JSONArray();
+        for (JSONObject entry : entries) {
+            out.put(entry);
+        }
+
+        try {
+            writeTextFile(getOutgoingQueueFile(), out.toString() + "\n");
+        } catch (Exception ignored) {
+            // ignore queue persistence failures
+        }
+    }
+
+    private void enqueueOutgoingMessage(String channel, String target, String content, String contentType, Map<String, String> headers) {
+        long now = System.currentTimeMillis();
+        JSONObject entry = new JSONObject();
+        entry.put("id", now + "-" + Math.abs(new SecureRandom().nextInt()));
+        entry.put("channel", String.valueOf(channel));
+        entry.put("target", String.valueOf(target));
+        entry.put("content", String.valueOf(content));
+        entry.put("contentType", String.valueOf(contentType));
+        entry.put("createdAt", now);
+        entry.put("expiresAt", now + getQueueTtlMs());
+        entry.put("nextAttemptAt", now + getQueueRetryMs());
+        entry.put("attempts", 0);
+
+        JSONObject headersJson = new JSONObject();
+        for (Map.Entry<String, String> header : headers.entrySet()) {
+            headersJson.put(header.getKey(), String.valueOf(header.getValue()));
+        }
+        entry.put("headers", headersJson);
+
+        List<JSONObject> queue = readOutgoingQueueEntries();
+        queue.add(entry);
+        writeOutgoingQueueEntries(queue);
+        appendGlobalLog(buildExchangeLog("QUEUE_ENQUEUED", "channel=" + channel + " target=" + target));
+    }
+
+    private Map<String, String> jsonToHeaders(JSONObject headersJson) {
+        Map<String, String> headers = new HashMap<>();
+        if (headersJson == null) {
+            return headers;
+        }
+
+        JSONArray names = headersJson.names();
+        if (names == null) {
+            return headers;
+        }
+
+        for (int i = 0; i < names.length(); i += 1) {
+            String key = names.optString(i, "");
+            if (key.isEmpty()) {
+                continue;
+            }
+            headers.put(key, String.valueOf(headersJson.optString(key, "")));
+        }
+
+        return headers;
+    }
+
+    private void flushOutgoingQueue() {
+        List<JSONObject> queue = readOutgoingQueueEntries();
+        if (queue.isEmpty()) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        List<JSONObject> nextQueue = new ArrayList<>();
+        int delivered = 0;
+
+        for (JSONObject item : queue) {
+            if (item == null) {
+                continue;
+            }
+
+            long expiresAt = item.optLong("expiresAt", 0L);
+            if (expiresAt > 0 && expiresAt <= now) {
+                continue;
+            }
+
+            long nextAttemptAt = item.optLong("nextAttemptAt", 0L);
+            if (nextAttemptAt > now) {
+                nextQueue.add(item);
+                continue;
+            }
+
+            String channel = item.optString("channel", "direct");
+            String target = item.optString("target", "");
+            String content = item.optString("content", "");
+            String contentType = item.optString("contentType", "text/plain");
+            JSONObject headersJson = item.optJSONObject("headers");
+
+            try {
+                if ("exchange".equals(channel)) {
+                    sendExchangeMessageNow(target, content, contentType);
+                } else {
+                    String reactorName = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            .getString(PREF_REACTOR_NAME, "mobile-reactor");
+                    String senderId = String.valueOf(reactorName) + ":" + currentPort;
+                    sendDirectMessageNow(target, content, reactorName, senderId, jsonToHeaders(headersJson));
+                }
+                delivered += 1;
+            } catch (Exception error) {
+                int attempts = item.optInt("attempts", 0) + 1;
+                long backoffMs = Math.min(getQueueRetryMs() * Math.max(1, attempts), 30L * 60L * 1000L);
+                item.put("attempts", attempts);
+                item.put("nextAttemptAt", now + backoffMs);
+                nextQueue.add(item);
+            }
+        }
+
+        writeOutgoingQueueEntries(nextQueue);
+        if (delivered > 0) {
+            appendGlobalLog(buildExchangeLog("QUEUE_FLUSH", "delivered=" + delivered + " pending=" + nextQueue.size()));
+        }
+    }
+
+    private void startOutgoingQueueFlusher() {
+        if (outgoingQueueFlusherRunning) {
+            return;
+        }
+
+        outgoingQueueFlusherRunning = true;
+        outgoingQueueFlusherThread = new Thread(() -> {
+            while (outgoingQueueFlusherRunning) {
+                try {
+                    flushOutgoingQueue();
+                } catch (Exception ignored) {
+                    // best effort
+                }
+
+                try {
+                    Thread.sleep(getQueueRetryMs());
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }, "reactor-outgoing-queue-flusher");
+        outgoingQueueFlusherThread.setDaemon(true);
+        outgoingQueueFlusherThread.start();
+    }
+
+    private void stopOutgoingQueueFlusher() {
+        outgoingQueueFlusherRunning = false;
+        if (outgoingQueueFlusherThread != null) {
+            outgoingQueueFlusherThread.interrupt();
+            outgoingQueueFlusherThread = null;
+        }
+    }
+
+    private void sendDirectMessageNow(String normalizedTarget, String content, String reactorName, String senderId, Map<String, String> extraHeaders) {
+        String[] hostPort = String.valueOf(normalizedTarget).split(":", 2);
+        if (hostPort.length < 2) {
+            throw new RuntimeException("invalid target");
+        }
+
+        String endpoint = "http://" + hostPort[0] + ":" + hostPort[1] + "/message";
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(endpoint).openConnection();
+            connection.setRequestMethod("POST");
+            connection.setConnectTimeout(2000);
+            connection.setReadTimeout(4000);
+            connection.setDoOutput(true);
+            connection.setRequestProperty("content-type", "text/plain; charset=utf-8");
+            connection.setRequestProperty("Reactor-Name", String.valueOf(reactorName));
+            connection.setRequestProperty("Reactor-Sender", String.valueOf(senderId));
+
+            for (Map.Entry<String, String> header : extraHeaders.entrySet()) {
+                connection.setRequestProperty(header.getKey(), header.getValue());
+            }
+
+            byte[] payload = String.valueOf(content).getBytes(StandardCharsets.UTF_8);
+            connection.setRequestProperty("content-length", String.valueOf(payload.length));
+            connection.getOutputStream().write(payload);
+
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) {
+                throw new RuntimeException("message dispatch failed with HTTP " + status);
+            }
+        } catch (Exception error) {
+            throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "direct send failed");
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private void sendExchangeMessageNow(String target, String content, String contentType) {
+        if (!"node".equals(currentExchangeMode) || wsExchangeClientSocket == null) {
+            throw new RuntimeException("exchange client not connected");
+        }
+
+        JSONObject packet = new JSONObject();
+        packet.put("type", "message");
+        packet.put("to", String.valueOf(target).toLowerCase(Locale.ROOT));
+        packet.put("content", String.valueOf(content));
+        packet.put("contentType", String.valueOf(contentType));
+        if (!wsExchangeClientSocket.send(packet.toString())) {
+            throw new RuntimeException("exchange websocket send failed");
+        }
+    }
+
     // =========================================================================
     // EXCHANGE — configurazione e lifecycle
     // =========================================================================
@@ -990,18 +1298,22 @@ public class ReactorHttpService extends Service {
         currentExchangeToken = token != null ? token : "";
 
         stopExchange();
+        startOutgoingQueueFlusher();
 
         // In EXCHANGE mode the WS server is integrated into the HTTP server:
         // handleClient() detects upgrade requests and handles WS connections.
         if ("exchange".equals(mode)) {
             wsExchangeClients.clear();
             appendGlobalLog(buildExchangeLog("SERVER_START", "Exchange server active on HTTP port " + currentPort));
+            flushOutgoingQueue();
         } else if ("node".equals(mode) && !host.isEmpty()) {
             startWsExchangeClient();
+            flushOutgoingQueue();
         }
     }
 
     private void stopExchange() {
+        stopOutgoingQueueFlusher();
         if ("exchange".equals(currentExchangeMode)) {
             wsExchangeClients.clear();
         }
@@ -1211,6 +1523,7 @@ public class ReactorHttpService extends Service {
                     webSocket.send("{\"type\":\"register\",\"name\":\"mobile-reactor\",\"token\":\"\"}");
                 }
                 appendGlobalLog(buildExchangeLog("CLIENT_CONNECTED", "connected to " + url + " as " + reactorName));
+                flushOutgoingQueue();
             }
 
             @Override

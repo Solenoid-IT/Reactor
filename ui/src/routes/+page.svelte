@@ -38,6 +38,10 @@
 		deleteTlsCert,
 		exportBackup,
 		importBackup,
+		getMessageQueueStatus,
+		setMessageQueueTtlDays,
+		flushMessageQueue,
+		clearMessageQueue,
 	} from '$lib/reactorApi';
 
 	let scripts = [];
@@ -57,6 +61,10 @@
 	let tlsSubject = '';
 	let tlsNotAfter = '';
 	let tlsFingerprint = '';
+	let messageQueuePending = 0;
+	let messageQueueDirectPending = 0;
+	let messageQueueExchangePending = 0;
+	let messageQueueTtlDays = 7;
 	let status = 'Ready';
 	let settingsOpen = false;
 	let renameOpen = false;
@@ -101,7 +109,7 @@
 	$: selectedScript = selectedIndex >= 0 ? scripts[selectedIndex] : null;
 
 	async function refreshAll() {
-		const [info, settings, serverConfig, currentReactorName, exchangeConfigResult, exchangeTokenResult, tlsConfigResult] = await Promise.all([
+		const [info, settings, serverConfig, currentReactorName, exchangeConfigResult, exchangeTokenResult, tlsConfigResult, queueStatusResult] = await Promise.all([
 			getScriptsInfo(),
 			getUiSettings(),
 			getHttpServerConfig(),
@@ -109,6 +117,7 @@
 			getExchangeConfig(),
 			getExchangeToken(),
 			getTlsConfig(),
+			getMessageQueueStatus(),
 		]);
 
 		if (info?.ok === false) {
@@ -147,6 +156,14 @@
 
 		if (exchangeTokenResult?.ok && exchangeTokenResult?.exchangeToken?.token) {
 			exchangeToken = exchangeTokenResult.exchangeToken.token;
+		}
+
+		if (queueStatusResult?.ok && queueStatusResult?.queue) {
+			const queue = queueStatusResult.queue;
+			messageQueuePending = Number(queue.pending || 0);
+			messageQueueDirectPending = Number(queue.directPending || 0);
+			messageQueueExchangePending = Number(queue.exchangePending || 0);
+			messageQueueTtlDays = Number(queue.ttlDays || 7);
 		}
 
 		if (selectedIndex >= scripts.length) {
@@ -440,6 +457,33 @@
 		await refreshAll();
 	}
 
+	async function saveMessageQueueTtlDaysHandler(nextDays) {
+		const ttlDays = Number(nextDays);
+		if (!Number.isFinite(ttlDays) || ttlDays <= 0) {
+			status = 'Error: invalid queue TTL';
+			return;
+		}
+
+		status = 'Saving queue TTL...';
+		const result = await setMessageQueueTtlDays(ttlDays);
+		status = result?.ok ? `Queue TTL updated: ${ttlDays} day(s)` : `Error: ${result?.error || 'unknown'}`;
+		await refreshAll();
+	}
+
+	async function flushMessageQueueHandler() {
+		status = 'Flushing queue...';
+		const result = await flushMessageQueue();
+		status = result?.ok ? 'Queue flush completed' : `Error: ${result?.error || 'unknown'}`;
+		await refreshAll();
+	}
+
+	async function clearMessageQueueHandler() {
+		status = 'Clearing queue...';
+		const result = await clearMessageQueue();
+		status = result?.ok ? 'Queue cleared' : `Error: ${result?.error || 'unknown'}`;
+		await refreshAll();
+	}
+
 	async function openLog(index) {
 		const script = scripts[index];
 		if (!script) {
@@ -612,6 +656,10 @@
 			{tlsSubject}
 			{tlsNotAfter}
 			{tlsFingerprint}
+			{messageQueuePending}
+			{messageQueueDirectPending}
+			{messageQueueExchangePending}
+			{messageQueueTtlDays}
 			{exchangeMode}
 			{exchangeHost}
 			{exchangePort}
@@ -628,6 +676,9 @@
 			onSaveExchangeConfig={saveExchangeConfigValue}
 			onExportBackup={exportBackupHandler}
 			onImportBackup={importBackupHandler}
+			onSaveMessageQueueTtlDays={saveMessageQueueTtlDaysHandler}
+			onFlushMessageQueue={flushMessageQueueHandler}
+			onClearMessageQueue={clearMessageQueueHandler}
 		/>
 	</Modal>
 

@@ -32,6 +32,10 @@ contextBridge.exposeInMainWorld('reactor', {
 	getTlsConfig: () => ipcRenderer.invoke('get-tls-config'),
 	generateTlsCert: () => ipcRenderer.invoke('generate-tls-cert'),
 	deleteTlsCert: () => ipcRenderer.invoke('delete-tls-cert'),
+	getMessageQueueStatus: () => ipcRenderer.invoke('get-message-queue-status'),
+	setMessageQueueTtlDays: (ttlDays) => ipcRenderer.invoke('set-message-queue-ttl-days', ttlDays),
+	flushMessageQueue: () => ipcRenderer.invoke('flush-message-queue'),
+	clearMessageQueue: () => ipcRenderer.invoke('clear-message-queue'),
 	exportBackup: () => ipcRenderer.invoke('export-backup'),
 	importBackup: () => ipcRenderer.invoke('import-backup'),
 });

@@ -1042,6 +1042,55 @@ function setupIpcHandlers(runtime) {
 		}
 	});
 
+	ipcMain.handle('get-message-queue-status', async () => {
+		if (!runtime || !runtime.getMessageQueueStatus) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+		try {
+			const status = await runtime.getMessageQueueStatus();
+			return { ok: true, queue: status };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('set-message-queue-ttl-days', async (_, ttlDays) => {
+		if (!runtime || !runtime.setMessageQueueTtlDays) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+		try {
+			const status = await runtime.setMessageQueueTtlDays(ttlDays);
+			return { ok: true, queue: status };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('flush-message-queue', async () => {
+		if (!runtime || !runtime.flushMessageQueue || !runtime.getMessageQueueStatus) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+		try {
+			await runtime.flushMessageQueue();
+			const status = await runtime.getMessageQueueStatus();
+			return { ok: true, queue: status };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('clear-message-queue', async () => {
+		if (!runtime || !runtime.clearMessageQueue) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+		try {
+			const status = await runtime.clearMessageQueue();
+			return { ok: true, queue: status };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
 	ipcMain.handle('get-scripts-info', async () => {
 		if (runtime) {
 			return {

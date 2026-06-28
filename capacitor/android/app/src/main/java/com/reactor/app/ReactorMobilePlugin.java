@@ -1115,6 +1115,50 @@ public class ReactorMobilePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void getMessageQueueStatus(PluginCall call) {
+        try {
+            JSObject queue = ReactorHttpService.getOutgoingQueueStatus();
+            call.resolve(new JSObject().put("ok", true).put("queue", queue));
+        } catch (Exception e) {
+            call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
+        }
+    }
+
+    @PluginMethod
+    public void setMessageQueueTtlDays(PluginCall call) {
+        double ttlDays = call.getDouble("ttlDays", 7.0);
+        try {
+            ReactorHttpService.setOutgoingQueueTtlDays(ttlDays);
+            JSObject queue = ReactorHttpService.getOutgoingQueueStatus();
+            call.resolve(new JSObject().put("ok", true).put("queue", queue));
+        } catch (Exception e) {
+            call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
+        }
+    }
+
+    @PluginMethod
+    public void flushMessageQueue(PluginCall call) {
+        try {
+            ReactorHttpService.flushOutgoingQueueNow();
+            JSObject queue = ReactorHttpService.getOutgoingQueueStatus();
+            call.resolve(new JSObject().put("ok", true).put("queue", queue));
+        } catch (Exception e) {
+            call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
+        }
+    }
+
+    @PluginMethod
+    public void clearMessageQueue(PluginCall call) {
+        try {
+            ReactorHttpService.clearOutgoingQueueNow();
+            JSObject queue = ReactorHttpService.getOutgoingQueueStatus();
+            call.resolve(new JSObject().put("ok", true).put("queue", queue));
+        } catch (Exception e) {
+            call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
+        }
+    }
+
+    @PluginMethod
     public void getExchangeConfig(PluginCall call) {
         JSObject workingMode = readWorkingModeConfig();
         String mode = workingMode.getString("mode", "node");

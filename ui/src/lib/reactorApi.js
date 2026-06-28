@@ -567,3 +567,79 @@ export async function importBackup() {
 
 	return { ok: false, error: 'bridge unavailable' };
 }
+
+export async function getMessageQueueStatus() {
+	const bridge = getBridge();
+	if (bridge && bridge.getMessageQueueStatus) {
+		return bridge.getMessageQueueStatus();
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.getMessageQueueStatus) {
+		return mobile.getMessageQueueStatus();
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'getMessageQueueStatus');
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function setMessageQueueTtlDays(ttlDays) {
+	const bridge = getBridge();
+	if (bridge && bridge.setMessageQueueTtlDays) {
+		return bridge.setMessageQueueTtlDays(ttlDays);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.setMessageQueueTtlDays) {
+		return mobile.setMessageQueueTtlDays({ ttlDays });
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'setMessageQueueTtlDays', { ttlDays });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function flushMessageQueue() {
+	const bridge = getBridge();
+	if (bridge && bridge.flushMessageQueue) {
+		return bridge.flushMessageQueue();
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.flushMessageQueue) {
+		return mobile.flushMessageQueue();
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'flushMessageQueue');
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function clearMessageQueue() {
+	const bridge = getBridge();
+	if (bridge && bridge.clearMessageQueue) {
+		return bridge.clearMessageQueue();
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.clearMessageQueue) {
+		return mobile.clearMessageQueue();
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'clearMessageQueue');
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}

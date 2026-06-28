@@ -24,6 +24,9 @@ const ALL_WATCH_LISTENERS = new Set([
 	'dir:moved',
 ]);
 
+const DEFAULT_MESSAGE_QUEUE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_MESSAGE_QUEUE_RETRY_MS = 30 * 1000;
+
 function collectKnownEntries(rootPath, map) {
 	let entries = [];
 	try {
@@ -202,6 +205,221 @@ class ReactorRuntime {
 		this.workingModeConfigPath = path.join(this.reactorRootDir, 'working-mode.json');
 		this.tlsManager = new TlsManager(path.join(this.reactorRootDir, 'tls'));
 		this.tlsEnabled = false; // impostato da startHttpServer
+		this.messageQueuePath = path.join(this.reactorRootDir, 'outgoing-message-queue.json');
+		this.messageQueueConfigPath = path.join(this.reactorRootDir, 'message-queue-config.json');
+		this.messageQueueTtlMs = this.readQueueDuration('REACTOR_MESSAGE_QUEUE_TTL_MS', DEFAULT_MESSAGE_QUEUE_TTL_MS, 60 * 1000);
+		this.messageQueueRetryMs = this.readQueueDuration('REACTOR_MESSAGE_QUEUE_RETRY_MS', DEFAULT_MESSAGE_QUEUE_RETRY_MS, 5 * 1000);
+		this.messageQueueFlushTimer = null;
+		this.isFlushingMessageQueue = false;
+	}
+
+	readQueueDuration(envName, fallback, minMs) {
+		const raw = Number(process.env[envName]);
+		if (!Number.isFinite(raw) || raw <= 0) {
+			return fallback;
+		}
+
+		return Math.max(minMs, Math.floor(raw));
+	}
+
+	serializeQueuedContent(content) {
+		if (Buffer.isBuffer(content) || content instanceof Uint8Array) {
+			return { payloadType: 'base64', payload: Buffer.from(content).toString('base64') };
+		}
+
+		if (typeof content === 'string') {
+			return { payloadType: 'string', payload: content };
+		}
+
+		if (content === null || content === undefined) {
+			return { payloadType: 'null', payload: '' };
+		}
+
+		return { payloadType: 'json', payload: JSON.stringify(content) };
+	}
+
+	deserializeQueuedContent(payloadType, payload) {
+		if (payloadType === 'base64') {
+			return Buffer.from(String(payload || ''), 'base64');
+		}
+		if (payloadType === 'string') {
+			return String(payload || '');
+		}
+		if (payloadType === 'null') {
+			return '';
+		}
+		if (payloadType === 'json') {
+			try {
+				return JSON.parse(String(payload || 'null'));
+			} catch {
+				return String(payload || '');
+			}
+		}
+		return String(payload || '');
+	}
+
+	async readMessageQueue() {
+		try {
+			const raw = await fs.readFile(this.messageQueuePath, 'utf8');
+			const parsed = JSON.parse(raw);
+			return Array.isArray(parsed) ? parsed : [];
+		} catch {
+			return [];
+		}
+	}
+
+	async loadMessageQueueConfig() {
+		try {
+			const raw = await fs.readFile(this.messageQueueConfigPath, 'utf8');
+			const parsed = JSON.parse(raw);
+			const ttlMs = Number(parsed?.ttlMs);
+			const retryMs = Number(parsed?.retryMs);
+			if (Number.isFinite(ttlMs) && ttlMs >= 60 * 1000) {
+				this.messageQueueTtlMs = Math.floor(ttlMs);
+			}
+			if (Number.isFinite(retryMs) && retryMs >= 5 * 1000) {
+				this.messageQueueRetryMs = Math.floor(retryMs);
+			}
+		} catch {
+			// keep defaults when config is missing/invalid
+		}
+	}
+
+	async persistMessageQueueConfig() {
+		await fs.mkdir(path.dirname(this.messageQueueConfigPath), { recursive: true });
+		await fs.writeFile(
+			this.messageQueueConfigPath,
+			`${JSON.stringify({ ttlMs: this.messageQueueTtlMs, retryMs: this.messageQueueRetryMs }, null, 2)}\n`,
+			'utf8',
+		);
+	}
+
+	async getMessageQueueStatus() {
+		const queue = await this.readMessageQueue();
+		const now = Date.now();
+		const pendingItems = queue.filter((item) => item && Number(item.expiresAt || 0) > now);
+		const exchangePending = pendingItems.filter((item) => item.channel === 'exchange').length;
+		const directPending = pendingItems.filter((item) => item.channel !== 'exchange').length;
+		return {
+			pending: pendingItems.length,
+			directPending,
+			exchangePending,
+			ttlMs: this.messageQueueTtlMs,
+			ttlDays: Number((this.messageQueueTtlMs / (24 * 60 * 60 * 1000)).toFixed(2)),
+			retryMs: this.messageQueueRetryMs,
+			path: this.messageQueuePath,
+		};
+	}
+
+	async setMessageQueueTtlDays(ttlDays) {
+		const safeDays = Number(ttlDays);
+		if (!Number.isFinite(safeDays) || safeDays <= 0) {
+			throw new Error('invalid queue ttl days');
+		}
+
+		this.messageQueueTtlMs = Math.max(60 * 1000, Math.floor(safeDays * 24 * 60 * 60 * 1000));
+		await this.persistMessageQueueConfig();
+		return this.getMessageQueueStatus();
+	}
+
+	async clearMessageQueue() {
+		await this.writeMessageQueue([]);
+		return this.getMessageQueueStatus();
+	}
+
+	async writeMessageQueue(queue) {
+		await fs.mkdir(path.dirname(this.messageQueuePath), { recursive: true });
+		await fs.writeFile(this.messageQueuePath, `${JSON.stringify(queue, null, 2)}\n`, 'utf8');
+	}
+
+	async enqueueMessageForRetry(entry) {
+		const now = Date.now();
+		const queue = await this.readMessageQueue();
+		const expiresAt = now + this.messageQueueTtlMs;
+		queue.push({
+			id: crypto.randomUUID(),
+			createdAt: now,
+			expiresAt,
+			nextAttemptAt: now + this.messageQueueRetryMs,
+			attempts: 0,
+			...entry,
+		});
+
+		await this.writeMessageQueue(queue);
+		this.log(`[Queue] Message enqueued (${entry.channel}) target=${entry.target} ttlMs=${this.messageQueueTtlMs}`);
+		return { queued: true, expiresAt };
+	}
+
+	async flushMessageQueue() {
+		if (this.isFlushingMessageQueue) {
+			return;
+		}
+
+		this.isFlushingMessageQueue = true;
+		try {
+			const now = Date.now();
+			const queue = await this.readMessageQueue();
+			if (queue.length === 0) {
+				return;
+			}
+
+			const nextQueue = [];
+			let delivered = 0;
+			let dropped = 0;
+
+			for (const item of queue) {
+				if (!item || typeof item !== 'object') {
+					continue;
+				}
+
+				if (Number(item.expiresAt || 0) <= now) {
+					dropped += 1;
+					continue;
+				}
+
+				if (Number(item.nextAttemptAt || 0) > now) {
+					nextQueue.push(item);
+					continue;
+				}
+
+				const payload = this.deserializeQueuedContent(item.payloadType, item.payload);
+				try {
+					if (item.channel === 'exchange') {
+						await this.sendExchangeMessage(item.target, payload, { noEnqueue: true });
+					} else {
+						await this.sendNodeMessage(item.target, payload, item.headers || {}, { noEnqueue: true });
+					}
+					delivered += 1;
+				} catch {
+					const attempts = Number(item.attempts || 0) + 1;
+					const backoff = Math.min(this.messageQueueRetryMs * Math.max(1, attempts), 30 * 60 * 1000);
+					nextQueue.push({
+						...item,
+						attempts,
+						nextAttemptAt: now + backoff,
+					});
+				}
+			}
+
+			await this.writeMessageQueue(nextQueue);
+			if (delivered > 0 || dropped > 0) {
+				this.log(`[Queue] Flush completed delivered=${delivered} dropped=${dropped} pending=${nextQueue.length}`);
+			}
+		} finally {
+			this.isFlushingMessageQueue = false;
+		}
+	}
+
+	startMessageQueueFlushTimer() {
+		if (this.messageQueueFlushTimer) {
+			clearInterval(this.messageQueueFlushTimer);
+		}
+
+		this.messageQueueFlushTimer = setInterval(() => {
+			this.flushMessageQueue().catch((error) => {
+				this.log(`[Queue] Flush failed: ${error.message}`);
+			});
+		}, this.messageQueueRetryMs);
 	}
 
 	addHttpServerLog(message) {
@@ -464,7 +682,7 @@ class ReactorRuntime {
 		};
 	}
 
-	async sendNodeMessage(target, content, extraHeaders = {}) {
+	async sendNodeMessage(target, content, extraHeaders = {}, dispatchOptions = {}) {
 		const targetId = String(target || '').trim();
 		if (!targetId) {
 			throw new Error('invalid target. expected host or host:port');
@@ -561,11 +779,76 @@ class ReactorRuntime {
 		}
 
 		if (lastError) {
-			throw lastError;
+			if (dispatchOptions.noEnqueue) {
+				throw lastError;
+			}
+
+			const serialized = this.serializeQueuedContent(content);
+			const queueResult = await this.enqueueMessageForRetry({
+				channel: 'direct',
+				target: targetId,
+				headers: extraHeaders || {},
+				payloadType: serialized.payloadType,
+				payload: serialized.payload,
+			});
+
+			return {
+				target: targetId,
+				via: 'direct',
+				queued: true,
+				reason: String(lastError.message || 'send failed'),
+				...queueResult,
+			};
 		}
 
 		// Se nessun target diretto era disponibile, il messaggio fallisce
-		throw new Error(`No direct route found for ${targetId}`);
+		if (dispatchOptions.noEnqueue) {
+			throw new Error(`No direct route found for ${targetId}`);
+		}
+
+		const serialized = this.serializeQueuedContent(content);
+		const queueResult = await this.enqueueMessageForRetry({
+			channel: 'direct',
+			target: targetId,
+			headers: extraHeaders || {},
+			payloadType: serialized.payloadType,
+			payload: serialized.payload,
+		});
+
+		return {
+			target: targetId,
+			via: 'direct',
+			queued: true,
+			reason: 'no direct route found',
+			...queueResult,
+		};
+	}
+
+	async sendExchangeMessage(target, content, options = {}) {
+		try {
+			return await this.exchangeManager.sendViaExchange(target, content);
+		} catch (error) {
+			if (options && options.noEnqueue) {
+				throw error;
+			}
+
+			const serialized = this.serializeQueuedContent(content);
+			const queueResult = await this.enqueueMessageForRetry({
+				channel: 'exchange',
+				target: String(target || '').trim().toLowerCase(),
+				headers: {},
+				payloadType: serialized.payloadType,
+				payload: serialized.payload,
+			});
+
+			return {
+				target: String(target || '').trim().toLowerCase(),
+				via: 'exchange',
+				queued: true,
+				reason: String(error?.message || 'exchange send failed'),
+				...queueResult,
+			};
+		}
 	}
 
 	/**
@@ -633,7 +916,7 @@ class ReactorRuntime {
 						if (this.exchangeMode !== 'node') {
 							throw new Error('exchange routing is available only when REACTOR_WORKING_MODE=node');
 						}
-						return this.exchangeManager.sendViaExchange(target, content);
+						return this.sendExchangeMessage(target, content);
 					},
 				}),
 			},
@@ -872,6 +1155,7 @@ class ReactorRuntime {
 	}
 
 	async init() {
+		await this.loadMessageQueueConfig();
 		await fs.mkdir(this.scriptsDir, { recursive: true });
 		await this.getReactorName();
 		await this.discoverScripts();
@@ -887,6 +1171,8 @@ class ReactorRuntime {
 				this.log(`[Exchange] Avvio fallito: ${err.message}`);
 			});
 		}
+		this.startMessageQueueFlushTimer();
+		await this.flushMessageQueue();
 		await this.emitEvent('BOOT');
 	}
 
@@ -1128,6 +1414,11 @@ class ReactorRuntime {
 		const listeners = this.eventMap.get(eventName) || [];
 		if (listeners.length === 0) {
 			this.log(`Emitting event ${eventName} - no listeners`);
+			if (eventName === 'NET_UP' || eventName === 'WIFI_ON') {
+				this.flushMessageQueue().catch((error) => {
+					this.log(`[Queue] Flush on ${eventName} failed: ${error.message}`);
+				});
+			}
 			return;
 		}
 
@@ -1135,6 +1426,12 @@ class ReactorRuntime {
 		await Promise.allSettled(
 			listeners.map((script) => this.runScript(script, { trigger: 'EVENT', event: eventName })),
 		);
+
+		if (eventName === 'NET_UP' || eventName === 'WIFI_ON') {
+			this.flushMessageQueue().catch((error) => {
+				this.log(`[Queue] Flush on ${eventName} failed: ${error.message}`);
+			});
+		}
 	}
 
 	async runScript(script, context) {
@@ -1286,6 +1583,11 @@ class ReactorRuntime {
 
 		if (this.networkMonitor) {
 			this.networkMonitor.stop();
+		}
+
+		if (this.messageQueueFlushTimer) {
+			clearInterval(this.messageQueueFlushTimer);
+			this.messageQueueFlushTimer = null;
 		}
 
 		if (this.httpServer) {
