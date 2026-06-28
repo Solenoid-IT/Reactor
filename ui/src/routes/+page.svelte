@@ -36,6 +36,8 @@
 		getTlsConfig,
 		generateTlsCert,
 		deleteTlsCert,
+		exportBackup,
+		importBackup,
 	} from '$lib/reactorApi';
 
 	let scripts = [];
@@ -404,6 +406,40 @@
 		await refreshAll();
 	}
 
+	async function exportBackupHandler() {
+		status = 'Exporting backup ZIP...';
+		const result = await exportBackup();
+		if (result?.canceled) {
+			status = 'Backup export cancelled';
+			return;
+		}
+		status = result?.ok ? `Backup exported: ${result.path || 'ZIP created'}` : `Error: ${result?.error || 'unknown'}`;
+	}
+
+	async function importBackupHandler() {
+		const confirm = window.confirm('Import backup and overwrite current projects/configuration?');
+		if (!confirm) {
+			status = 'Backup import cancelled';
+			return;
+		}
+
+		status = 'Importing backup ZIP...';
+		const result = await importBackup();
+		if (result?.canceled) {
+			status = 'Backup import cancelled';
+			return;
+		}
+
+		if (!result?.ok) {
+			status = `Error: ${result?.error || 'unknown'}`;
+			return;
+		}
+
+		status = `Backup imported: ${result.path || 'OK'}`;
+		await refreshAll();
+		await refreshAll();
+	}
+
 	async function openLog(index) {
 		const script = scripts[index];
 		if (!script) {
@@ -590,6 +626,8 @@
 			onDeleteTlsCert={deleteTlsCertHandler}
 			onGenerateExchangeToken={generateExchangeTokenHandler}
 			onSaveExchangeConfig={saveExchangeConfigValue}
+			onExportBackup={exportBackupHandler}
+			onImportBackup={importBackupHandler}
 		/>
 	</Modal>
 

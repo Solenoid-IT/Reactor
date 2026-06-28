@@ -21,6 +21,8 @@
 	export let onDeleteTlsCert = () => {};
 	export let onGenerateExchangeToken = () => {};
 	export let onSaveExchangeConfig = () => {};
+	export let onExportBackup = () => {};
+	export let onImportBackup = () => {};
 
 	function onNameSubmit(event) {
 		if (!event.detail.valid) {
@@ -235,6 +237,23 @@
 			{/if}
 		</div>
 	</section>
+
+	<section class="detail-card settings-backup-card">
+		<h3><i class="fa-solid fa-box-archive me-2"></i>Backup</h3>
+		<div class="detail-value" style="font-size:0.82em; opacity:0.75; margin-bottom:10px;">
+			Export and import a full ZIP backup with projects and runtime configuration.
+		</div>
+		<div class="settings-backup-actions">
+			<button type="button" class="btn-secondary" on:click={onExportBackup}>
+				<i class="fa-solid fa-file-export me-2"></i>
+				Export ZIP
+			</button>
+			<button type="button" class="btn-primary" on:click={onImportBackup}>
+				<i class="fa-solid fa-file-import me-2"></i>
+				Import ZIP
+			</button>
+		</div>
+	</section>
 </div>
 
 <style>
@@ -287,6 +306,16 @@
 		min-width: 0;
 	}
 
+	.settings-backup-actions {
+		display: flex;
+		gap: 10px;
+		flex-wrap: wrap;
+	}
+
+	.settings-backup-actions :global(button) {
+		flex: 1 1 180px;
+	}
+
 	@media (max-width: 760px) {
 		.settings-pane {
 			grid-template-columns: 1fr;
@@ -310,6 +339,14 @@
 
 		.settings-token-row {
 			flex-wrap: nowrap;
+		}
+
+		.settings-backup-actions {
+			flex-direction: column;
+		}
+
+		.settings-backup-actions :global(button) {
+			width: 100%;
 		}
 	}
 

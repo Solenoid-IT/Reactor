@@ -24,6 +24,8 @@ declare global {
 			setReactorName?: (name: string) => Promise<any>;
 			getWorkflow?: () => Promise<any>;
 			saveWorkflow?: (workflow: any) => Promise<any>;
+			exportBackup?: () => Promise<any>;
+			importBackup?: () => Promise<any>;
 		};
 	}
 }

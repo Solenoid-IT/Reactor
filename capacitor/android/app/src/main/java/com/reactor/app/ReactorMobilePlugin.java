@@ -1,5 +1,6 @@
 package com.reactor.app;
 
+import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -12,7 +13,9 @@ import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import androidx.activity.result.ActivityResult;
 
 import android.util.Base64;
 
@@ -22,6 +25,8 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.BufferedOutputStream;
+import java.io.BufferedInputStream;
 import java.time.Instant;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -31,6 +36,11 @@ import java.security.SecureRandom;
 import java.util.Comparator;
 import java.util.List;
 import java.util.stream.Stream;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 import org.json.JSONObject;
 
 @CapacitorPlugin(name = "ReactorMobile")
@@ -39,6 +49,7 @@ public class ReactorMobilePlugin extends Plugin {
     private static final int DEFAULT_HTTP_PORT = 7070;
     private static final String TAG = "ReactorMobilePlugin";
     private static final String WORKING_MODE_FILE = "working-mode.json";
+    private static final String REACTOR_NAME_FILE = "name";
 
     @Override
     public void load() {
@@ -63,11 +74,20 @@ public class ReactorMobilePlugin extends Plugin {
     }
 
     private String getConfiguredReactorName() {
+        String fromFile = readConfiguredReactorNameFile();
+        if (!fromFile.isEmpty()) {
+            return fromFile;
+        }
         return String.valueOf(getPrefs().getString(ReactorHttpService.PREF_REACTOR_NAME, "mobile-reactor"));
     }
 
     private void setConfiguredReactorName(String name) {
         getPrefs().edit().putString(ReactorHttpService.PREF_REACTOR_NAME, name).apply();
+        try {
+            writeTextFile(getReactorNameFile(), name + "\n");
+        } catch (Exception ignored) {
+            // Keep prefs as fallback even if file write fails.
+        }
     }
 
     private void startHttpService(int port) {
@@ -100,6 +120,22 @@ public class ReactorMobilePlugin extends Plugin {
 
     private File getWorkingModeFile() {
         return new File(getContext().getFilesDir(), WORKING_MODE_FILE);
+    }
+
+    private File getReactorNameFile() {
+        return new File(getContext().getFilesDir(), REACTOR_NAME_FILE);
+    }
+
+    private String readConfiguredReactorNameFile() {
+        try {
+            File file = getReactorNameFile();
+            if (!file.exists()) {
+                return "";
+            }
+            return readTextFile(file).trim();
+        } catch (Exception ignored) {
+            return "";
+        }
     }
 
     private JSObject getDefaultWorkingModeConfig() {
@@ -194,6 +230,177 @@ public class ReactorMobilePlugin extends Plugin {
 
     private File getGlobalLogFile() {
         return new File(getContext().getFilesDir(), "activity.log");
+    }
+
+    private File getUiSettingsFile() {
+        return new File(getContext().getFilesDir(), "ui-settings.json");
+    }
+
+    private File getWorkflowFile() {
+        return new File(getContext().getFilesDir(), "workflow.json");
+    }
+
+    private File getTlsDir() {
+        return new File(getContext().getFilesDir(), "tls");
+    }
+
+    private File getBackupsDir() {
+        File externalDir = getContext().getExternalFilesDir("backups");
+        File backupsDir = externalDir != null ? externalDir : new File(getContext().getFilesDir(), "backups");
+        if (!backupsDir.exists()) {
+            backupsDir.mkdirs();
+        }
+        return backupsDir;
+    }
+
+    private List<File> getBackupSourceEntries() {
+        return Arrays.asList(
+                getProjectsDir(),
+                getWorkingModeFile(),
+                getReactorNameFile(),
+                getUiSettingsFile(),
+                getWorkflowFile(),
+                getGlobalLogFile(),
+                getTlsDir()
+        );
+    }
+
+    private String toArchiveRelativeName(File target) throws IOException {
+        String base = getContext().getFilesDir().getCanonicalPath();
+        String full = target.getCanonicalPath();
+        if (full.equals(base)) {
+            return "";
+        }
+        if (full.startsWith(base + File.separator)) {
+            return full.substring(base.length() + 1).replace(File.separatorChar, '/');
+        }
+        throw new IOException("path outside reactor root");
+    }
+
+    private void addPathToZip(ZipOutputStream output, File source) throws IOException {
+        if (!source.exists()) {
+            return;
+        }
+
+        if (source.isDirectory()) {
+            File[] children = source.listFiles();
+            if (children == null || children.length == 0) {
+                String relative = toArchiveRelativeName(source);
+                if (!relative.isEmpty()) {
+                    ZipEntry entry = new ZipEntry(relative + "/.keep");
+                    output.putNextEntry(entry);
+                    output.closeEntry();
+                }
+                return;
+            }
+
+            for (File child : children) {
+                addPathToZip(output, child);
+            }
+            return;
+        }
+
+        String relative = toArchiveRelativeName(source);
+        if (relative.isEmpty()) {
+            return;
+        }
+
+        ZipEntry entry = new ZipEntry(relative);
+        output.putNextEntry(entry);
+        try (BufferedInputStream input = new BufferedInputStream(new FileInputStream(source))) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+        }
+        output.closeEntry();
+    }
+
+    private List<String> getAllowedBackupRoots() {
+        return Arrays.asList(
+                "projects",
+                "working-mode.json",
+                "name",
+                "ui-settings.json",
+                "workflow.json",
+                "activity.log",
+                "tls",
+                "backup-meta.json"
+        );
+    }
+
+    private File resolveSafeBackupTarget(String entryName) throws IOException {
+        String normalized = String.valueOf(entryName == null ? "" : entryName)
+                .replace('\\', '/')
+                .replaceAll("^/+", "")
+                .trim();
+        if (normalized.isEmpty() || normalized.contains("..")) {
+            return null;
+        }
+
+        String[] segments = normalized.split("/");
+        if (segments.length == 0) {
+            return null;
+        }
+
+        String root = segments[0];
+        if (!getAllowedBackupRoots().contains(root)) {
+            return null;
+        }
+
+        File base = getContext().getFilesDir();
+        File target = new File(base, normalized);
+        String canonicalBase = base.getCanonicalPath();
+        String canonicalTarget = target.getCanonicalPath();
+        if (!canonicalTarget.startsWith(canonicalBase + File.separator) && !canonicalTarget.equals(canonicalBase)) {
+            return null;
+        }
+        return target;
+    }
+
+    private void writeUiSettingsSnapshot() {
+        try {
+            JSObject snapshot = new JSObject();
+            snapshot.put("defaultProgramPath", "");
+            snapshot.put("httpServerPort", getConfiguredHttpPort());
+            writeTextFile(getUiSettingsFile(), snapshot.toString() + "\n");
+        } catch (Exception ignored) {
+            // Optional backup metadata.
+        }
+    }
+
+    private void applyRuntimeStateAfterBackupImport() {
+        try {
+            JSObject workingMode = readWorkingModeConfig();
+
+            String mode = workingMode.getString("mode", "node");
+            String host = workingMode.getString("host", "");
+            int port = workingMode.getInteger("port", ReactorHttpService.DEFAULT_PORT);
+            boolean tls = workingMode.has("tls") && workingMode.getBool("tls");
+            String token = workingMode.getString("token", "");
+
+            SharedPreferences.Editor editor = getPrefs().edit();
+            editor.putString(ReactorHttpService.PREF_EXCHANGE_MODE, mode);
+            editor.putString(ReactorHttpService.PREF_EXCHANGE_HOST, host);
+            editor.putInt(ReactorHttpService.PREF_EXCHANGE_PORT, port);
+            editor.putBoolean(ReactorHttpService.PREF_EXCHANGE_TLS, tls);
+            editor.putString(ReactorHttpService.PREF_EXCHANGE_TOKEN, token);
+
+            String restoredName = readConfiguredReactorNameFile();
+            if (!restoredName.isEmpty()) {
+                editor.putString(ReactorHttpService.PREF_REACTOR_NAME, restoredName);
+            }
+            editor.apply();
+        } catch (Exception ignored) {
+            // Keep previous runtime state on partial failures.
+        }
+
+        try {
+            startHttpService(getConfiguredHttpPort());
+        } catch (Exception ignored) {
+            // Ignore restart failures.
+        }
     }
 
     private String readTextFile(File file) throws IOException {
@@ -1045,6 +1252,161 @@ public class ReactorMobilePlugin extends Plugin {
             call.resolve(result);
         } catch (Exception e) {
             call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
+        }
+    }
+
+    @PluginMethod
+    public void exportBackup(PluginCall call) {
+        try {
+            writeUiSettingsSnapshot();
+
+            File backupsDir = getBackupsDir();
+            String timestamp = String.valueOf(System.currentTimeMillis());
+            File target = new File(backupsDir, "reactor-backup-" + timestamp + ".zip");
+
+            try (ZipOutputStream output = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(target)))) {
+                for (File source : getBackupSourceEntries()) {
+                    addPathToZip(output, source);
+                }
+
+                String meta = new JSObject()
+                        .put("createdAt", Instant.now().toString())
+                        .put("format", "reactor-backup-v1")
+                        .toString();
+                output.putNextEntry(new ZipEntry("backup-meta.json"));
+                output.write(meta.getBytes(StandardCharsets.UTF_8));
+                output.closeEntry();
+            }
+
+            JSObject result = new JSObject();
+            result.put("ok", true);
+            result.put("path", target.getAbsolutePath());
+            call.resolve(result);
+        } catch (Exception e) {
+            call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
+        }
+    }
+
+    @PluginMethod
+    public void importBackup(PluginCall call) {
+        Intent pickerIntent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        pickerIntent.addCategory(Intent.CATEGORY_OPENABLE);
+        pickerIntent.setType("*/*");
+        pickerIntent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/zip", "application/x-zip-compressed"});
+        startActivityForResult(call, pickerIntent, "handleBackupImportPicker");
+    }
+
+    @ActivityCallback
+    private void handleBackupImportPicker(PluginCall call, ActivityResult activityResult) {
+        if (call == null) {
+            return;
+        }
+
+        if (activityResult == null || activityResult.getResultCode() != Activity.RESULT_OK || activityResult.getData() == null) {
+            call.resolve(new JSObject().put("ok", false).put("canceled", true));
+            return;
+        }
+
+        Uri pickedUri = activityResult.getData().getData();
+        if (pickedUri == null) {
+            call.resolve(new JSObject().put("ok", false).put("error", "invalid backup selection"));
+            return;
+        }
+
+        try {
+            getContext().getContentResolver().takePersistableUriPermission(
+                    pickedUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+            );
+        } catch (Exception ignored) {
+            // Some providers don't support persisted permissions.
+        }
+
+        File importedZip = null;
+        try {
+            importedZip = File.createTempFile("reactor-backup-import-", ".zip", getContext().getCacheDir());
+            try (BufferedInputStream input = new BufferedInputStream(getContext().getContentResolver().openInputStream(pickedUri));
+                 FileOutputStream output = new FileOutputStream(importedZip, false)) {
+                if (input == null) {
+                    call.resolve(new JSObject().put("ok", false).put("error", "unable to read selected ZIP"));
+                    return;
+                }
+
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, read);
+                }
+            }
+
+            JSObject result = importBackupFromZip(importedZip);
+            call.resolve(result);
+        } catch (Exception e) {
+            call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
+        } finally {
+            if (importedZip != null && importedZip.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                importedZip.delete();
+            }
+        }
+    }
+
+    private JSObject importBackupFromZip(File zipFile) {
+        try {
+            if (!zipFile.exists() || !zipFile.isFile()) {
+                return new JSObject().put("ok", false).put("error", "backup ZIP not found");
+            }
+
+            List<String> clearedRoots = new ArrayList<>();
+            try (ZipInputStream input = new ZipInputStream(new BufferedInputStream(new FileInputStream(zipFile)))) {
+                ZipEntry entry;
+                byte[] buffer = new byte[8192];
+
+                while ((entry = input.getNextEntry()) != null) {
+                    if (entry.isDirectory()) {
+                        input.closeEntry();
+                        continue;
+                    }
+
+                    File target = resolveSafeBackupTarget(entry.getName());
+                    if (target == null) {
+                        input.closeEntry();
+                        continue;
+                    }
+
+                    String root = entry.getName().replace('\\', '/').replaceAll("^/+", "").split("/")[0];
+                    if (!clearedRoots.contains(root)) {
+                        File rootTarget = new File(getContext().getFilesDir(), root);
+                        if (rootTarget.exists()) {
+                            deleteRecursively(rootTarget.toPath());
+                        }
+                        clearedRoots.add(root);
+                    }
+
+                    File parent = target.getParentFile();
+                    if (parent != null && !parent.exists()) {
+                        parent.mkdirs();
+                    }
+
+                    try (FileOutputStream output = new FileOutputStream(target, false)) {
+                        int read;
+                        while ((read = input.read(buffer)) != -1) {
+                            output.write(buffer, 0, read);
+                        }
+                    }
+
+                    input.closeEntry();
+                }
+            }
+
+            applyRuntimeStateAfterBackupImport();
+
+            JSObject result = new JSObject();
+            result.put("ok", true);
+            result.put("path", zipFile.getAbsolutePath());
+            return result;
+        } catch (Exception e) {
+            return new JSObject().put("ok", false).put("error", e.getMessage());
         }
     }
 }

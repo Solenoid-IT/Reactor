@@ -529,3 +529,41 @@ export async function deleteTlsCert() {
 	}
 	return { ok: false, error: 'bridge unavailable' };
 }
+
+export async function exportBackup() {
+	const bridge = getBridge();
+	if (bridge && bridge.exportBackup) {
+		return bridge.exportBackup();
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.exportBackup) {
+		return mobile.exportBackup();
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'exportBackup');
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function importBackup() {
+	const bridge = getBridge();
+	if (bridge && bridge.importBackup) {
+		return bridge.importBackup();
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.importBackup) {
+		return mobile.importBackup();
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'importBackup');
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}

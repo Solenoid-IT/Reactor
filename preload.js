@@ -32,4 +32,6 @@ contextBridge.exposeInMainWorld('reactor', {
 	getTlsConfig: () => ipcRenderer.invoke('get-tls-config'),
 	generateTlsCert: () => ipcRenderer.invoke('generate-tls-cert'),
 	deleteTlsCert: () => ipcRenderer.invoke('delete-tls-cert'),
+	exportBackup: () => ipcRenderer.invoke('export-backup'),
+	importBackup: () => ipcRenderer.invoke('import-backup'),
 });

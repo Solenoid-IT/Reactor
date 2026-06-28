@@ -2,6 +2,7 @@ const { dialog, ipcMain, shell } = require('electron');
 const fs = require('fs/promises');
 const { spawn } = require('child_process');
 const path = require('path');
+const AdmZip = require('adm-zip');
 const { parseDirectiveHeader, rebuildDirectiveHeader } = require('./directiveHeader');
 const { readUiSettings, writeUiSettings } = require('./uiSettings');
 
@@ -52,6 +53,115 @@ function setupIpcHandlers(runtime) {
 
 	function isEditableExtension(targetPath) {
 		return /\.(ts|js|log)$/i.test(targetPath || '');
+	}
+
+	function getBackupEntries(rootDir) {
+		return [
+			{ sourcePath: path.join(rootDir, 'projects'), archiveName: 'projects' },
+			{ sourcePath: path.join(rootDir, 'working-mode.json'), archiveName: 'working-mode.json' },
+			{ sourcePath: path.join(rootDir, 'name'), archiveName: 'name' },
+			{ sourcePath: path.join(rootDir, 'ui-settings.json'), archiveName: 'ui-settings.json' },
+			{ sourcePath: path.join(rootDir, 'workflow.json'), archiveName: 'workflow.json' },
+			{ sourcePath: path.join(rootDir, 'activity.log'), archiveName: 'activity.log' },
+			{ sourcePath: path.join(rootDir, 'tls'), archiveName: 'tls' },
+		];
+	}
+
+	async function addPathToZip(zip, sourcePath, archiveName) {
+		let stats;
+		try {
+			stats = await fs.stat(sourcePath);
+		} catch {
+			return;
+		}
+
+		if (stats.isDirectory()) {
+			const entries = await fs.readdir(sourcePath, { withFileTypes: true });
+			if (entries.length === 0) {
+				zip.addFile(`${archiveName.replace(/\\/g, '/')}/.keep`, Buffer.from('', 'utf8'));
+				return;
+			}
+
+			for (const entry of entries) {
+				const childSource = path.join(sourcePath, entry.name);
+				const childArchive = `${archiveName.replace(/\\/g, '/')}/${entry.name}`;
+				await addPathToZip(zip, childSource, childArchive);
+			}
+			return;
+		}
+
+		const data = await fs.readFile(sourcePath);
+		zip.addFile(archiveName.replace(/\\/g, '/'), data);
+	}
+
+	async function buildBackupZip(rootDir) {
+		const zip = new AdmZip();
+		for (const entry of getBackupEntries(rootDir)) {
+			await addPathToZip(zip, entry.sourcePath, entry.archiveName);
+		}
+
+		const metadata = {
+			createdAt: new Date().toISOString(),
+			format: 'reactor-backup-v1',
+		};
+		zip.addFile('backup-meta.json', Buffer.from(JSON.stringify(metadata, null, 2), 'utf8'));
+		return zip;
+	}
+
+	function resolveSafeBackupTarget(rootDir, rawEntryName) {
+		const normalized = String(rawEntryName || '').replace(/\\/g, '/').replace(/^\/+/, '');
+		if (!normalized || normalized.includes('..')) {
+			return null;
+		}
+
+		const firstSegment = normalized.split('/')[0];
+		const allowedRoots = new Set(['projects', 'working-mode.json', 'name', 'ui-settings.json', 'workflow.json', 'activity.log', 'tls', 'backup-meta.json']);
+		if (!allowedRoots.has(firstSegment)) {
+			return null;
+		}
+
+		const targetPath = path.resolve(path.join(rootDir, normalized));
+		if (!targetPath.startsWith(path.resolve(rootDir) + path.sep) && targetPath !== path.resolve(rootDir, normalized)) {
+			return null;
+		}
+
+		return targetPath;
+	}
+
+	async function applyRuntimeStateFromImportedConfig() {
+		if (!runtime) {
+			return;
+		}
+
+		try {
+			const settings = await readUiSettings();
+			if (runtime.setHttpServerPort && Number(settings.httpServerPort)) {
+				await runtime.setHttpServerPort(Number(settings.httpServerPort)).catch(() => {});
+			}
+			if (runtime.setExchangeConfig) {
+				await runtime
+					.setExchangeConfig(
+						settings.exchangeMode || 'node',
+						settings.exchangeHost || '',
+						Number(settings.exchangePort) || 7070,
+						Boolean(settings.exchangeTls),
+						settings.exchangeToken || '',
+					)
+					.catch(() => {});
+			}
+		} catch {
+			// Ignore partial restore errors.
+		}
+
+		try {
+			runtime.cachedReactorName = null;
+		} catch {
+			// ignore
+		}
+
+		if (runtime.reloadScripts) {
+			await runtime.reloadScripts('ui-import-backup').catch(() => {});
+		}
 	}
 
 	readUiSettings()
@@ -164,6 +274,83 @@ function setupIpcHandlers(runtime) {
 		const nextSettings = { defaultProgramPath: result.filePaths[0] };
 		await writeUiSettings(nextSettings);
 		return { ok: true, defaultProgramPath: nextSettings.defaultProgramPath };
+	});
+
+	ipcMain.handle('export-backup', async () => {
+		if (!runtime) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		const now = new Date();
+		const pad = (value) => String(value).padStart(2, '0');
+		const fileName = `reactor-backup-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.zip`;
+		const saveResult = await dialog.showSaveDialog({
+			title: 'Export Reactor backup',
+			defaultPath: path.join(runtime.reactorRootDir || runtime.scriptsDir, fileName),
+			filters: [{ name: 'ZIP archive', extensions: ['zip'] }],
+		});
+
+		if (saveResult.canceled || !saveResult.filePath) {
+			return { ok: false, canceled: true };
+		}
+
+		try {
+			const zip = await buildBackupZip(runtime.reactorRootDir || path.dirname(runtime.scriptsDir));
+			zip.writeZip(saveResult.filePath);
+			return { ok: true, path: saveResult.filePath };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('import-backup', async () => {
+		if (!runtime) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		const openResult = await dialog.showOpenDialog({
+			title: 'Import Reactor backup',
+			properties: ['openFile'],
+			filters: [{ name: 'ZIP archive', extensions: ['zip'] }],
+		});
+
+		if (openResult.canceled || !openResult.filePaths || openResult.filePaths.length === 0) {
+			return { ok: false, canceled: true };
+		}
+
+		const zipPath = openResult.filePaths[0];
+		const rootDir = runtime.reactorRootDir || path.dirname(runtime.scriptsDir);
+
+		try {
+			const zip = new AdmZip(zipPath);
+			const clearedRoots = new Set();
+			for (const entry of zip.getEntries()) {
+				if (entry.isDirectory) {
+					continue;
+				}
+
+				const targetPath = resolveSafeBackupTarget(rootDir, entry.entryName);
+				if (!targetPath) {
+					continue;
+				}
+
+				const normalizedEntry = String(entry.entryName || '').replace(/\\/g, '/').replace(/^\/+/, '');
+				const rootEntry = normalizedEntry.split('/')[0];
+				if (rootEntry && rootEntry !== 'backup-meta.json' && !clearedRoots.has(rootEntry)) {
+					const rootTargetPath = path.join(rootDir, rootEntry);
+					await fs.rm(rootTargetPath, { recursive: true, force: true });
+					clearedRoots.add(rootEntry);
+				}
+
+				await fs.mkdir(path.dirname(targetPath), { recursive: true });
+				await fs.writeFile(targetPath, entry.getData());
+			}
+
+			await applyRuntimeStateFromImportedConfig();
+			return { ok: true, path: zipPath };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
 	});
 
 	ipcMain.handle('open-scripts-folder', async () => {

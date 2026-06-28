@@ -38,6 +38,7 @@
   },
   "dependencies": {
     "@capacitor/core": "^8.4.1",
+    "adm-zip": "^0.5.17",
     "typescript": "^5.9.3",
     "ws": "^8.21.0"
   },
