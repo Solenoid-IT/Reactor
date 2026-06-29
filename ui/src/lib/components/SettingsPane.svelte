@@ -41,57 +41,8 @@
 	export let onClearMessageQueue = () => {};
 	export let onCopyText = async () => ({ ok: false, error: 'copy handler unavailable' });
 
-	let expandedNodeNames = new Set();
 	let copiedScriptUuid = '';
 	let copiedScriptTimer = null;
-	let openAllNodesForDebug = true;
-
-	function getNodeExpandKey(node, nodeIndex = -1) {
-		const byName = String(node?.name || '').trim().toLowerCase();
-		if (byName) {
-			return `name:${byName}`;
-		}
-
-		const byAddress = String(node?.address || '').trim().toLowerCase();
-		if (byAddress) {
-			return `address:${byAddress}`;
-		}
-
-		const byIpPort = `${String(node?.ip || '').trim().toLowerCase()}:${Number(node?.port) || ''}`.replace(/:$/, '');
-		if (byIpPort && byIpPort !== ':') {
-			return `ip:${byIpPort}`;
-		}
-
-		if (Number.isInteger(nodeIndex) && nodeIndex >= 0) {
-			return `idx:${nodeIndex}`;
-		}
-
-		return '';
-	}
-
-	function toggleNodeScripts(node, nodeIndex = -1) {
-		const nodeKey = getNodeExpandKey(node, nodeIndex);
-		if (!nodeKey) {
-			return;
-		}
-
-		const next = new Set(expandedNodeNames);
-		if (next.has(nodeKey)) {
-			next.delete(nodeKey);
-		} else {
-			next.add(nodeKey);
-		}
-		expandedNodeNames = next;
-	}
-
-	function isNodeExpanded(node, nodeIndex = -1) {
-		if (openAllNodesForDebug) {
-			return true;
-		}
-
-		const nodeKey = getNodeExpandKey(node, nodeIndex);
-		return nodeKey ? expandedNodeNames.has(nodeKey) : false;
-	}
 
 	function showCopiedFeedback(scriptUuid) {
 		copiedScriptUuid = String(scriptUuid || '').trim();
@@ -313,23 +264,18 @@
 							<div class="detail-value mt-2" style="opacity:0.65;">No linked nodes</div>
 						{:else}
 							<div class="detail-value mt-2" style="max-height:220px; overflow:auto; font-size:0.78em;">
-								{#each linkedNodes as node, nodeIndex}
+								{#each linkedNodes as node}
 									<div style="padding:6px 0; border-bottom:1px dashed rgba(255,255,255,0.08);">
-										<button
-											type="button"
-											class="node-accordion-toggle"
-											on:click={() => toggleNodeScripts(node, nodeIndex)}
-											aria-expanded={isNodeExpanded(node, nodeIndex)}
-										>
-											<span class="node-accordion-title">
-												<strong>{node.name || 'unknown'}</strong>
-												{node.ip ? ` (${node.ip}${node.port ? `:${node.port}` : ''})` : ''}
-											</span>
-											<i class={`fa-solid ${isNodeExpanded(node, nodeIndex) ? 'fa-chevron-up' : 'fa-chevron-down'} node-accordion-icon`}></i>
-										</button>
-										<div style="opacity:0.7;">Connected: {node.connectedAt || '-'}</div>
-										<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
-										{#if isNodeExpanded(node, nodeIndex)}
+										<details class="node-accordion-details">
+											<summary class="node-accordion-toggle">
+												<span class="node-accordion-title">
+													<strong>{node.name || 'unknown'}</strong>
+													{node.ip ? ` (${node.ip}${node.port ? `:${node.port}` : ''})` : ''}
+												</span>
+												<i class="fa-solid fa-chevron-down node-accordion-icon"></i>
+											</summary>
+											<div style="opacity:0.7; margin-top:6px;">Connected: {node.connectedAt || '-'}</div>
+											<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
 											{#if Array.isArray(node.scripts) && node.scripts.length > 0}
 												<div style="margin-top:6px; padding-left:8px; border-left:2px solid rgba(255,255,255,0.14);">
 													{#each node.scripts as script}
@@ -347,7 +293,7 @@
 											{:else}
 												<div style="margin-top:6px; opacity:0.65;">No scripts exposed by this node</div>
 											{/if}
-										{/if}
+										</details>
 									</div>
 								{/each}
 							</div>
@@ -424,23 +370,18 @@
 								<div class="detail-value mt-2" style="opacity:0.65;">No remote nodes found (or discovery disabled on Exchange)</div>
 							{:else}
 								<div class="detail-value mt-2" style="max-height:220px; overflow:auto; font-size:0.78em;">
-									{#each linkedNodes as node, nodeIndex}
+									{#each linkedNodes as node}
 										<div style="padding:6px 0; border-bottom:1px dashed rgba(255,255,255,0.08);">
-											<button
-												type="button"
-												class="node-accordion-toggle"
-												on:click={() => toggleNodeScripts(node, nodeIndex)}
-												aria-expanded={isNodeExpanded(node, nodeIndex)}
-											>
-												<span class="node-accordion-title">
-													<strong>{node.name || 'unknown'}</strong>
-													{node.ip ? ` (${node.ip}${node.port ? `:${node.port}` : ''})` : ''}
-												</span>
-												<i class={`fa-solid ${isNodeExpanded(node, nodeIndex) ? 'fa-chevron-up' : 'fa-chevron-down'} node-accordion-icon`}></i>
-											</button>
-											<div style="opacity:0.7;">Connected: {node.connectedAt || '-'}</div>
-											<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
-											{#if isNodeExpanded(node, nodeIndex)}
+											<details class="node-accordion-details">
+												<summary class="node-accordion-toggle">
+													<span class="node-accordion-title">
+														<strong>{node.name || 'unknown'}</strong>
+														{node.ip ? ` (${node.ip}${node.port ? `:${node.port}` : ''})` : ''}
+													</span>
+													<i class="fa-solid fa-chevron-down node-accordion-icon"></i>
+												</summary>
+												<div style="opacity:0.7; margin-top:6px;">Connected: {node.connectedAt || '-'}</div>
+												<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
 												{#if Array.isArray(node.scripts) && node.scripts.length > 0}
 													<div style="margin-top:6px; padding-left:8px; border-left:2px solid rgba(255,255,255,0.14);">
 														{#each node.scripts as script}
@@ -458,7 +399,7 @@
 												{:else}
 													<div style="margin-top:6px; opacity:0.65;">No scripts exposed by this node</div>
 												{/if}
-											{/if}
+											</details>
 										</div>
 									{/each}
 								</div>
@@ -715,6 +656,18 @@
 		font-size: 0.9em;
 		flex-shrink: 0;
 		transition: transform 0.16s ease;
+	}
+
+	.node-accordion-details > summary {
+		list-style: none;
+	}
+
+	.node-accordion-details > summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.node-accordion-details[open] .node-accordion-icon {
+		transform: rotate(180deg);
 	}
 
 	@media (max-width: 760px) {

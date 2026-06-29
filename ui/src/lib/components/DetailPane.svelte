@@ -1,8 +1,6 @@
 <script>
 	export let selectedScript = null;
 	export let scriptsPath = '';
-	export let defaultProgramPath = '';
-	export let onOpenWorkflow = () => {};
 	export let status = 'Ready';
 </script>
 
@@ -10,12 +8,6 @@
 	<section class="detail-card">
 		<h3><i class="fa-solid fa-folder-tree me-2"></i>Scripts Path</h3>
 		<div class="detail-value">{scriptsPath || '-'}</div>
-		<button class="btn-secondary mt-2" on:click={onOpenWorkflow}><i class="fa-solid fa-diagram-project me-2"></i>Open Workflow</button>
-	</section>
-
-	<section class="detail-card">
-		<h3><i class="fa-solid fa-desktop me-2"></i>Default Program</h3>
-		<div class="detail-value">{defaultProgramPath || 'System default (not set)'}</div>
 	</section>
 
 	<section class="detail-card">

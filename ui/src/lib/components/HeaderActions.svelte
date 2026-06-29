@@ -6,9 +6,7 @@
 
 	export let onRefresh = () => {};
 	export let onOpenFolder = () => {};
-	export let onPickProgram = () => {};
 	export let onOpenSettings = () => {};
-	export let onOpenWorkflow = () => {};
 	export let onOpenGlobalLog = () => {};
 	export let onClearGlobalLog = () => {};
 	export let onCreateBlank = () => {};
@@ -53,9 +51,8 @@
 		</div>
 		<button type="button" class="btn-secondary icon-button" on:click={onRefresh} title="refresh scripts" aria-label="Refresh scripts"><i class="fa-solid fa-rotate-right"></i></button>
 		<button type="button" class="btn-secondary icon-button" on:click={onOpenFolder} title="open project folder" aria-label="Open project folder"><i class="fa-regular fa-folder-open"></i></button>
-		<button type="button" class="btn-secondary" on:click={onOpenSettings}><i class="fa-solid fa-sliders"></i><span class="ms-2">Settings</span></button>
-		<button type="button" class="btn-secondary" on:click={onPickProgram}><i class="fa-solid fa-gear"></i><span class="ms-2">Set Default Program</span></button>
-		<button type="button" class="btn-secondary" on:click={onOpenWorkflow}><i class="fa-solid fa-diagram-project"></i><span class="ms-2">Open Workflow</span></button>
+		<!-- svelte-ignore a11y_consider_explicit_label -->
+		<button type="button" class="btn-secondary" on:click={onOpenSettings} title="settings"><i class="fa-solid fa-cog"></i></button>
 		<div class="log-picker" class:open={logOpen}>
 			<button type="button" class="btn-secondary" on:click={() => (logOpen = !logOpen)} title="log actions"><i class="fa-solid fa-list"></i><span class="ms-2">LOG</span></button>
 			<div class="log-menu" aria-hidden={!logOpen}>

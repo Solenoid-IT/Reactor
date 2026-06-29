@@ -4,7 +4,6 @@
 	import ScriptList from '$lib/components/ScriptList.svelte';
 	import DetailPane from '$lib/components/DetailPane.svelte';
 	import SettingsPane from '$lib/components/SettingsPane.svelte';
-	import WorkflowEditor from '$lib/components/WorkflowEditor.svelte';
 	import Modal from '$lib/components/Modal.svelte';
 	import {
 		getScriptsInfo,
@@ -14,7 +13,6 @@
 		openScriptsFolder,
 		readScriptContent,
 		saveScriptContent,
-		pickDefaultProgram,
 		runScriptNow,
 		createScriptFile,
 		renameScriptFile,
@@ -28,8 +26,6 @@
 		openServerStatus,
 		getReactorName,
 		setReactorName,
-		getWorkflow,
-		saveWorkflow,
 		getExchangeConfig,
 		getExchangeLinkedNodes,
 		setExchangeConfig,
@@ -49,7 +45,6 @@
 	let scripts = [];
 	let scriptsPath = '';
 	let selectedIndex = -1;
-	let defaultProgramPath = '';
 	let reactorName = '';
 	let httpPort = 7070;
 	let exchangeMode = 'node';
@@ -79,8 +74,6 @@
 	let renameOriginalName = '';
 	let renameValue = '';
 	let renameInput;
-	let workflowOpen = false;
-	let workflowData = { version: 1, nodes: [], links: [] };
 	let editorOpen = false;
 	let editorFilePath = '';
 	let editorFileName = '';
@@ -133,7 +126,6 @@
 
 		scripts = Array.isArray(info?.scripts) ? info.scripts : [];
 		scriptsPath = info?.path || '';
-		defaultProgramPath = settings?.defaultProgramPath || '';
 		httpPort = Number(serverConfig?.config?.port || settings?.httpServerPort || 7070);
 		reactorName = String(currentReactorName?.name || '');
 
@@ -374,16 +366,6 @@
 		}
 		const result = await runScriptNow(script.path);
 		status = result?.ok ? `Test started: ${script.name}` : `Error: ${result?.error || 'unknown'}`;
-	}
-
-	async function pickProgram() {
-		const result = await pickDefaultProgram();
-		if (result?.ok) {
-			defaultProgramPath = result.defaultProgramPath || '';
-			status = 'Default program updated';
-		} else if (!result?.canceled) {
-			status = `Error: ${result?.error || 'unable to set default program'}`;
-		}
 	}
 
 	async function saveReactorNameValue(nextName) {
@@ -654,31 +636,6 @@
 		status = result?.ok ? 'Cleared project activity.log' : `Error: ${result?.error || 'unknown'}`;
 	}
 
-	async function openWorkflowEditor() {
-		const result = await getWorkflow();
-		if (result?.ok) {
-			workflowData = result.workflow || { version: 1, nodes: [], links: [] };
-			workflowOpen = true;
-			status = 'Workflow loaded';
-			return;
-		}
-		status = `Error: ${result?.error || 'unable to load workflow'}`;
-	}
-
-	function closeWorkflowEditor() {
-		workflowOpen = false;
-	}
-
-	async function saveWorkflowGraph(nextWorkflow) {
-		const result = await saveWorkflow(nextWorkflow);
-		if (result?.ok) {
-			workflowData = result.workflow || nextWorkflow;
-			status = 'workflow.json saved';
-			return;
-		}
-		status = `Error: ${result?.error || 'unable to save workflow'}`;
-	}
-
 	function openSettings() {
 		settingsOpen = true;
 	}
@@ -697,8 +654,6 @@
 		onRefresh={refreshAll}
 		onOpenFolder={openScriptsFolder}
 		onOpenSettings={openSettings}
-		onOpenWorkflow={openWorkflowEditor}
-		onPickProgram={pickProgram}
 		onOpenGlobalLog={openGlobalLog}
 		onClearGlobalLog={clearGlobalLog}
 		onCreateBlank={() => createScript('blank')}
@@ -728,8 +683,6 @@
 		<DetailPane
 			{selectedScript}
 			{scriptsPath}
-			{defaultProgramPath}
-			onOpenWorkflow={openWorkflowEditor}
 			{status}
 		/>
 	</main>
@@ -782,14 +735,6 @@
 			onCopyText={(text) => copyTextToClipboard(text)}
 		/>
 	</Modal>
-
-	<WorkflowEditor
-		open={workflowOpen}
-		scripts={scripts}
-		workflow={workflowData}
-		onClose={closeWorkflowEditor}
-		onSave={saveWorkflowGraph}
-	/>
 
 	{#if editorOpen && CodeEditorComponent}
 		<svelte:component
