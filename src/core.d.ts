@@ -237,6 +237,35 @@ declare module 'core' {
 		System: SystemApi;
 	}
 
+	export interface NetChangeInterfaceInfo {
+		name: string;
+		family: string;
+		address: string;
+		netmask: string;
+		cidr: string;
+		mac: string;
+		internal: boolean;
+		transport: 'wifi' | 'ethernet' | 'cellular' | 'loopback' | 'unknown';
+	}
+
+	export interface NetChangeSnapshot {
+		timestamp: string;
+		online: boolean;
+		primaryInterface: string | null;
+		primaryAddress: string | null;
+		subnet: string | null;
+		gateway: string | null;
+		transport: string;
+		signal: number | null;
+		interfaces: NetChangeInterfaceInfo[];
+	}
+
+	export interface NetChangeContext {
+		reason: 'initial' | 'changed';
+		previous: NetChangeSnapshot | null;
+		current: NetChangeSnapshot;
+	}
+
 	export interface Context {
 		trigger?: string;
 		event?: string | null;
@@ -249,6 +278,7 @@ declare module 'core' {
 		messageJson?: unknown;
 		stream?: StreamPacketApi | null;
 		streamEnd?: StreamEndApi | null;
+		networkChange?: NetChangeContext | null;
 		messageHeaders?: IncomingHeadersMap;
 		watchPath?: string;
 		watchType?: 'file:created' | 'file:deleted' | 'file:moved' | 'dir:created' | 'dir:deleted' | 'dir:moved' | 'file:changed';

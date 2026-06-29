@@ -7,6 +7,11 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.ConnectivityManager;
+import android.net.LinkAddress;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.os.Build;
 import android.os.IBinder;
 import android.util.Base64;
@@ -29,6 +34,9 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URL;
@@ -44,6 +52,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Enumeration;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -89,6 +98,7 @@ public class ReactorHttpService extends Service {
     private static final long WS_HEARTBEAT_TIMEOUT_MS = 45000L;
     private static final long DEFAULT_MESSAGE_QUEUE_TTL_MS = 7L * 24L * 60L * 60L * 1000L;
     private static final long DEFAULT_MESSAGE_QUEUE_RETRY_MS = 30000L;
+    private static final long NET_CHANGE_POLL_INTERVAL_MS = 5000L;
 
     private static volatile boolean running = false;
     private static volatile int currentPort = DEFAULT_PORT;
@@ -119,6 +129,10 @@ public class ReactorHttpService extends Service {
     private Thread wsClientThread;
         private volatile boolean outgoingQueueFlusherRunning = false;
         private Thread outgoingQueueFlusherThread;
+    private volatile boolean networkWatcherRunning = false;
+    private Thread networkWatcherThread;
+    private volatile String lastNetworkSignature = null;
+    private volatile JSONObject lastNetworkSnapshot = null;
 
     private static final Pattern SEND_MESSAGE_CALL_PATTERN = Pattern.compile(
             "Node\\.sendMessage\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\1\\s*,\\s*(['\"])\\s*(.*?)\\s*\\3",
@@ -170,6 +184,7 @@ public class ReactorHttpService extends Service {
         boolean hasStreamEndEvent;
         boolean streamEndFromAnySender;
         List<String> streamEndSenders;
+        boolean hasNetChangeEvent;
     }
 
     private static class PendingBinaryChunkMeta {
@@ -468,9 +483,11 @@ public class ReactorHttpService extends Service {
         acceptThread.start();
 
         appendGlobalLog(buildServerLifecycleLog("START", "listening on port " + port));
+        startNetworkWatcher();
     }
 
     private synchronized void stopServer() {
+        stopNetworkWatcher();
         running = false;
 
         if (serverSocket != null) {
@@ -488,6 +505,389 @@ public class ReactorHttpService extends Service {
         }
 
         appendGlobalLog(buildServerLifecycleLog("STOP", "server stopped"));
+    }
+
+    private synchronized void startNetworkWatcher() {
+        if (networkWatcherRunning) {
+            return;
+        }
+
+        networkWatcherRunning = true;
+        lastNetworkSignature = null;
+        lastNetworkSnapshot = null;
+
+        networkWatcherThread = new Thread(() -> {
+            while (networkWatcherRunning) {
+                try {
+                    JSONObject current = buildNetworkSnapshot();
+                    String currentSignature = buildNetworkSignature(current);
+                    JSONObject previous = lastNetworkSnapshot;
+                    String previousSignature = lastNetworkSignature;
+
+                    if (previousSignature == null) {
+                        emitNetChange(previous, current, "initial");
+                    } else if (!previousSignature.equals(currentSignature)) {
+                        emitNetChange(previous, current, "changed");
+                    }
+
+                    lastNetworkSnapshot = new JSONObject(current.toString());
+                    lastNetworkSignature = currentSignature;
+                } catch (Exception ignored) {
+                    // Best effort monitor: keep polling even on transient failures.
+                }
+
+                try {
+                    Thread.sleep(NET_CHANGE_POLL_INTERVAL_MS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }, "reactor-net-change-monitor");
+        networkWatcherThread.setDaemon(true);
+        networkWatcherThread.start();
+    }
+
+    private synchronized void stopNetworkWatcher() {
+        networkWatcherRunning = false;
+        if (networkWatcherThread != null) {
+            networkWatcherThread.interrupt();
+            networkWatcherThread = null;
+        }
+        lastNetworkSnapshot = null;
+        lastNetworkSignature = null;
+    }
+
+    private void emitNetChange(JSONObject previousSnapshot, JSONObject currentSnapshot, String reason) {
+        List<MessageScript> listeners = collectMessageListeners();
+        if (listeners.isEmpty()) {
+            return;
+        }
+
+        JSONObject payload = new JSONObject();
+        payload.put("reason", String.valueOf(reason));
+        payload.put("previous", previousSnapshot != null ? previousSnapshot : JSONObject.NULL);
+        payload.put("current", currentSnapshot != null ? currentSnapshot : JSONObject.NULL);
+
+        Map<String, String> headers = new HashMap<>();
+        headers.put("content-type", "application/json; charset=utf-8");
+        headers.put("x-reactor-trigger", "NET_CHANGE");
+
+        String bodyText = payload.toString();
+        Set<String> senderCandidates = new HashSet<>();
+        for (MessageScript script : listeners) {
+            if (!matchesEventSender(script, senderCandidates, "NET_CHANGE")) {
+                continue;
+            }
+
+            try {
+                writeExecutionStart(script, "NET_CHANGE", "NET_CHANGE");
+                executeScriptActions(script, bodyText, headers);
+            } catch (Exception executionError) {
+                writeExecutionError(script, "NET_CHANGE", "NET_CHANGE", executionError.getMessage());
+            }
+        }
+    }
+
+    private JSONObject buildNetworkSnapshot() {
+        JSONObject snapshot = new JSONObject();
+        snapshot.put("timestamp", Instant.now().toString());
+        snapshot.put("online", false);
+        snapshot.put("primaryInterface", JSONObject.NULL);
+        snapshot.put("primaryAddress", JSONObject.NULL);
+        snapshot.put("subnet", JSONObject.NULL);
+        snapshot.put("gateway", JSONObject.NULL);
+        snapshot.put("transport", "unknown");
+        snapshot.put("signal", JSONObject.NULL);
+
+        JSONArray interfaces = new JSONArray();
+        snapshot.put("interfaces", interfaces);
+
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        Network activeNetwork = null;
+        NetworkCapabilities capabilities = null;
+        LinkProperties linkProperties = null;
+        if (cm != null) {
+            activeNetwork = cm.getActiveNetwork();
+            capabilities = activeNetwork != null ? cm.getNetworkCapabilities(activeNetwork) : null;
+            linkProperties = activeNetwork != null ? cm.getLinkProperties(activeNetwork) : null;
+        }
+
+        boolean online = capabilities != null
+                && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+        snapshot.put("online", online);
+
+        String transport = inferTransport(capabilities);
+        snapshot.put("transport", transport);
+
+        Integer signal = readSignalStrength(capabilities);
+        if (signal != null) {
+            snapshot.put("signal", signal.intValue());
+        }
+
+        if (linkProperties != null) {
+            String interfaceName = linkProperties.getInterfaceName();
+            if (interfaceName != null && !interfaceName.trim().isEmpty()) {
+                snapshot.put("primaryInterface", interfaceName);
+            }
+
+            InetAddress gateway = null;
+            try {
+                List<android.net.RouteInfo> routes = linkProperties.getRoutes();
+                for (android.net.RouteInfo route : routes) {
+                    if (route == null) {
+                        continue;
+                    }
+                    if (!route.isDefaultRoute()) {
+                        continue;
+                    }
+                    InetAddress candidate = route.getGateway();
+                    if (candidate != null && !candidate.isAnyLocalAddress()) {
+                        gateway = candidate;
+                        break;
+                    }
+                }
+            } catch (Exception ignored) {
+                // Keep gateway null if route APIs are unavailable.
+            }
+            if (gateway != null) {
+                snapshot.put("gateway", gateway.getHostAddress());
+            }
+
+            for (LinkAddress linkAddress : linkProperties.getLinkAddresses()) {
+                if (linkAddress == null || linkAddress.getAddress() == null) {
+                    continue;
+                }
+
+                InetAddress addr = linkAddress.getAddress();
+                int prefix = linkAddress.getPrefixLength();
+                String family = addr instanceof Inet4Address ? "IPv4" : "IPv6";
+                String address = addr.getHostAddress();
+                String netmask = prefixToNetmask(addr, prefix);
+                String cidr = address + "/" + prefix;
+                boolean internal = addr.isLoopbackAddress() || addr.isLinkLocalAddress();
+
+                JSONObject ifaceEntry = new JSONObject();
+                ifaceEntry.put("name", linkProperties.getInterfaceName() != null ? linkProperties.getInterfaceName() : "unknown");
+                ifaceEntry.put("family", family);
+                ifaceEntry.put("address", address);
+                ifaceEntry.put("netmask", netmask != null ? netmask : JSONObject.NULL);
+                ifaceEntry.put("cidr", cidr);
+                ifaceEntry.put("mac", JSONObject.NULL);
+                ifaceEntry.put("internal", internal);
+                ifaceEntry.put("transport", transport);
+                interfaces.put(ifaceEntry);
+
+                if (snapshot.isNull("primaryAddress") && addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
+                    snapshot.put("primaryAddress", address);
+                    if (netmask != null) {
+                        snapshot.put("subnet", netmask);
+                    }
+                }
+            }
+        }
+
+        if (interfaces.length() == 0) {
+            appendInterfacesFallback(interfaces, transport);
+            // Fallback primary fields from first non-internal IPv4, if available.
+            for (int i = 0; i < interfaces.length(); i += 1) {
+                JSONObject item = interfaces.optJSONObject(i);
+                if (item == null) {
+                    continue;
+                }
+                if (item.optBoolean("internal", true)) {
+                    continue;
+                }
+                if (!"IPv4".equals(item.optString("family", ""))) {
+                    continue;
+                }
+                String address = item.optString("address", "");
+                if (!address.isEmpty()) {
+                    snapshot.put("primaryAddress", address);
+                }
+                String netmask = item.optString("netmask", "");
+                if (!netmask.isEmpty()) {
+                    snapshot.put("subnet", netmask);
+                }
+                String ifaceName = item.optString("name", "");
+                if (!ifaceName.isEmpty()) {
+                    snapshot.put("primaryInterface", ifaceName);
+                }
+                break;
+            }
+        }
+
+        return snapshot;
+    }
+
+    private void appendInterfacesFallback(JSONArray interfaces, String activeTransport) {
+        try {
+            Enumeration<NetworkInterface> networkInterfaces = NetworkInterface.getNetworkInterfaces();
+            if (networkInterfaces == null) {
+                return;
+            }
+
+            while (networkInterfaces.hasMoreElements()) {
+                NetworkInterface netIf = networkInterfaces.nextElement();
+                if (netIf == null) {
+                    continue;
+                }
+
+                List<InetAddress> addresses = java.util.Collections.list(netIf.getInetAddresses());
+                for (InetAddress addr : addresses) {
+                    if (addr == null) {
+                        continue;
+                    }
+
+                    String family = addr instanceof Inet4Address ? "IPv4" : "IPv6";
+                    String address = addr.getHostAddress();
+                    boolean internal = addr.isLoopbackAddress() || addr.isLinkLocalAddress() || netIf.isLoopback();
+                    String inferredTransport = internal ? "loopback" : inferTransportFromInterfaceName(netIf.getName());
+
+                    JSONObject ifaceEntry = new JSONObject();
+                    ifaceEntry.put("name", netIf.getName() != null ? netIf.getName() : "unknown");
+                    ifaceEntry.put("family", family);
+                    ifaceEntry.put("address", address);
+                    ifaceEntry.put("netmask", JSONObject.NULL);
+                    ifaceEntry.put("cidr", JSONObject.NULL);
+                    ifaceEntry.put("mac", formatMacAddress(netIf.getHardwareAddress()));
+                    ifaceEntry.put("internal", internal);
+                    ifaceEntry.put("transport", "unknown".equals(activeTransport) ? inferredTransport : activeTransport);
+                    interfaces.put(ifaceEntry);
+                }
+            }
+        } catch (Exception ignored) {
+            // Keep interfaces empty on API errors.
+        }
+    }
+
+    private String buildNetworkSignature(JSONObject snapshot) {
+        if (snapshot == null) {
+            return "";
+        }
+
+        StringBuilder signature = new StringBuilder();
+        signature.append(String.valueOf(snapshot.optBoolean("online", false))).append('|');
+        signature.append(snapshot.optString("primaryInterface", "")).append('|');
+        signature.append(snapshot.optString("primaryAddress", "")).append('|');
+        signature.append(snapshot.optString("subnet", "")).append('|');
+        signature.append(snapshot.optString("gateway", "")).append('|');
+        signature.append(snapshot.optString("transport", "")).append('|');
+        signature.append(snapshot.optString("signal", "")).append('|');
+
+        JSONArray interfaces = snapshot.optJSONArray("interfaces");
+        if (interfaces != null) {
+            for (int i = 0; i < interfaces.length(); i += 1) {
+                JSONObject item = interfaces.optJSONObject(i);
+                if (item == null) {
+                    continue;
+                }
+                signature.append(item.optString("name", "")).append('/');
+                signature.append(item.optString("family", "")).append('/');
+                signature.append(item.optString("address", "")).append('/');
+                signature.append(item.optString("netmask", "")).append('/');
+                signature.append(item.optString("cidr", "")).append('/');
+                signature.append(item.optString("transport", "")).append('/');
+                signature.append(item.optBoolean("internal", false)).append('|');
+            }
+        }
+
+        return signature.toString();
+    }
+
+    private String inferTransport(NetworkCapabilities capabilities) {
+        if (capabilities == null) {
+            return "unknown";
+        }
+        if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+            return "wifi";
+        }
+        if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+            return "cellular";
+        }
+        if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) {
+            return "ethernet";
+        }
+        if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH)) {
+            return "bluetooth";
+        }
+        if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+            return "vpn";
+        }
+        return "unknown";
+    }
+
+    private Integer readSignalStrength(NetworkCapabilities capabilities) {
+        if (capabilities == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return null;
+        }
+        try {
+            int signal = capabilities.getSignalStrength();
+            if (signal == Integer.MIN_VALUE) {
+                return null;
+            }
+            return signal;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private String prefixToNetmask(InetAddress address, int prefixLength) {
+        if (address instanceof Inet4Address) {
+            if (prefixLength < 0 || prefixLength > 32) {
+                return null;
+            }
+            int mask = prefixLength == 0 ? 0 : (int) (0xFFFFFFFFL << (32 - prefixLength));
+            return String.format(
+                    Locale.ROOT,
+                    "%d.%d.%d.%d",
+                    (mask >>> 24) & 0xFF,
+                    (mask >>> 16) & 0xFF,
+                    (mask >>> 8) & 0xFF,
+                    mask & 0xFF
+            );
+        }
+
+        if (prefixLength < 0) {
+            return null;
+        }
+        return "/" + prefixLength;
+    }
+
+    private String inferTransportFromInterfaceName(String interfaceName) {
+        String name = String.valueOf(interfaceName != null ? interfaceName : "").toLowerCase(Locale.ROOT);
+        if (name.startsWith("wlan") || name.startsWith("wifi")) {
+            return "wifi";
+        }
+        if (name.startsWith("rmnet") || name.startsWith("ccmni") || name.startsWith("pdp") || name.startsWith("wwan")) {
+            return "cellular";
+        }
+        if (name.startsWith("eth") || name.startsWith("en")) {
+            return "ethernet";
+        }
+        if (name.startsWith("lo")) {
+            return "loopback";
+        }
+        if (name.startsWith("tun") || name.startsWith("ppp")) {
+            return "vpn";
+        }
+        return "unknown";
+    }
+
+    private String formatMacAddress(byte[] macAddress) {
+        if (macAddress == null || macAddress.length == 0) {
+            return null;
+        }
+
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < macAddress.length; i += 1) {
+            if (i > 0) {
+                out.append(':');
+            }
+            out.append(String.format(Locale.ROOT, "%02x", macAddress[i] & 0xFF));
+        }
+        return out.toString();
     }
 
     private void handleClient(Socket client) {
@@ -736,6 +1136,7 @@ public class ReactorHttpService extends Service {
             boolean hasStreamEndEvent = false;
             boolean streamEndFromAnySender = false;
             List<String> streamEndSenders = new ArrayList<>();
+            boolean hasNetChangeEvent = false;
 
             for (String rawLine : lines) {
                 String line = rawLine.trim();
@@ -778,6 +1179,11 @@ public class ReactorHttpService extends Service {
                                     streamEndSenders.add(normalizedSender);
                                 }
                             }
+                            continue;
+                        }
+
+                        if (upperToken.startsWith("NET_CHANGE")) {
+                            hasNetChangeEvent = true;
                             continue;
                         }
 
@@ -833,7 +1239,7 @@ public class ReactorHttpService extends Service {
                 }
             }
 
-            if (!hasMessageEvent && !hasStreamEvent && !hasStreamEndEvent) {
+            if (!hasMessageEvent && !hasStreamEvent && !hasStreamEndEvent && !hasNetChangeEvent) {
                 return null;
             }
 
@@ -853,6 +1259,7 @@ public class ReactorHttpService extends Service {
             script.hasStreamEndEvent = hasStreamEndEvent;
             script.streamEndFromAnySender = streamEndFromAnySender || streamEndSenders.isEmpty();
             script.streamEndSenders = streamEndSenders;
+            script.hasNetChangeEvent = hasNetChangeEvent;
             return script;
         } catch (Exception ignored) {
             return null;
@@ -989,6 +1396,12 @@ public class ReactorHttpService extends Service {
             }
             fromAnySender = script.streamEndFromAnySender;
             allowedSenders = script.streamEndSenders;
+        } else if ("NET_CHANGE".equals(safeEvent)) {
+            if (!script.hasNetChangeEvent) {
+                return false;
+            }
+            fromAnySender = true;
+            allowedSenders = new ArrayList<>();
         } else {
             if (!script.hasMessageEvent) {
                 return false;

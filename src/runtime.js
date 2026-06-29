@@ -2078,7 +2078,7 @@ class ReactorRuntime {
 		}
 	}
 
-	async emitEvent(eventName) {
+	async emitEvent(eventName, eventData = null) {
 		const listeners = this.eventMap.get(eventName) || [];
 		if (listeners.length === 0) {
 			this.log(`Emitting event ${eventName} - no listeners`);
@@ -2092,7 +2092,11 @@ class ReactorRuntime {
 
 		this.log(`Emitting event ${eventName} to ${listeners.length} script(s): ${listeners.map(s => s.name).join(', ')}`);
 		await Promise.allSettled(
-			listeners.map((script) => this.runScript(script, { trigger: 'EVENT', event: eventName })),
+			listeners.map((script) => this.runScript(script, {
+				trigger: 'EVENT',
+				event: eventName,
+				networkChange: eventName === 'NET_CHANGE' ? eventData : null,
+			})),
 		);
 
 		if (eventName === 'NET_UP' || eventName === 'WIFI_ON') {
@@ -2160,7 +2164,7 @@ class ReactorRuntime {
 	}
 
 	setupNetworkWatcher() {
-		this.networkMonitor = new NetworkMonitor((eventName) => this.emitEvent(eventName));
+		this.networkMonitor = new NetworkMonitor((eventName, eventData) => this.emitEvent(eventName, eventData));
 		this.networkMonitor.start(5000);
 	}
 
