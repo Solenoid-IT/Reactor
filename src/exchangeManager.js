@@ -120,6 +120,32 @@ class ExchangeManager {
 			.filter((script) => script.uuid);
 	}
 
+	_normalizeDiscoveryPort(rawPort) {
+		const port = Number(rawPort);
+		if (!Number.isInteger(port) || port < 1 || port > 65535) {
+			return null;
+		}
+		return port;
+	}
+
+	_sanitizeDiscoveryEndpoint(rawEndpoint) {
+		const value = String(rawEndpoint || '').trim();
+		if (!value) {
+			return null;
+		}
+
+		try {
+			const parsed = new URL(value);
+			if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+				return null;
+			}
+			parsed.hash = '';
+			return parsed.toString();
+		} catch {
+			return null;
+		}
+	}
+
 	async _appendConnectionLog(event, details = {}) {
 		try {
 			const entry = {
@@ -478,6 +504,9 @@ class ExchangeManager {
 				const providedToken = String(packet.token || '').trim();
 				const expectedToken = String(this.runtime.exchangeAuthToken || '').trim();
 				const discoveryScripts = this._sanitizeDiscoveryScripts(packet.scripts);
+				const discoveryPort = this._normalizeDiscoveryPort(packet.httpPort);
+				const discoveryTls = Boolean(packet.httpTls);
+				const scriptsEndpoint = this._sanitizeDiscoveryEndpoint(packet.scriptsEndpoint);
 
 				if (expectedToken && providedToken !== expectedToken) {
 					this.runtime.log(`[Exchange] Registration rejected for ${name || 'unknown'}: invalid token`);
@@ -505,6 +534,9 @@ class ExchangeManager {
 						lastSeenAt: new Date().toISOString(),
 						userAgent,
 						scripts: discoveryScripts,
+						httpPort: discoveryPort,
+						httpTls: discoveryTls,
+						scriptsEndpoint,
 					});
 					void this._writeActiveConnectionsSnapshot();
 					this._appendConnectionLog('CLIENT_REGISTERED', {
@@ -520,9 +552,21 @@ class ExchangeManager {
 				}
 			} else if (packet.type === 'profile' && clientName && this._connectedClientDetails.has(clientName)) {
 				const current = this._connectedClientDetails.get(clientName);
+				const nextPort = Object.prototype.hasOwnProperty.call(packet, 'httpPort')
+					? this._normalizeDiscoveryPort(packet.httpPort)
+					: current?.httpPort ?? null;
+				const nextTls = Object.prototype.hasOwnProperty.call(packet, 'httpTls')
+					? Boolean(packet.httpTls)
+					: Boolean(current?.httpTls);
+				const nextEndpoint = Object.prototype.hasOwnProperty.call(packet, 'scriptsEndpoint')
+					? this._sanitizeDiscoveryEndpoint(packet.scriptsEndpoint)
+					: current?.scriptsEndpoint || null;
 				this._connectedClientDetails.set(clientName, {
 					...current,
 					scripts: this._sanitizeDiscoveryScripts(packet.scripts),
+					httpPort: nextPort,
+					httpTls: nextTls,
+					scriptsEndpoint: nextEndpoint,
 					lastSeenAt: new Date().toISOString(),
 				});
 				void this._writeActiveConnectionsSnapshot();
@@ -716,7 +760,14 @@ class ExchangeManager {
 				const scripts = typeof this.runtime.getDiscoveryScriptEntries === 'function'
 					? this.runtime.getDiscoveryScriptEntries()
 					: [];
-				ws.send(JSON.stringify({ type: 'register', name: safeName, token, scripts }));
+				ws.send(JSON.stringify({
+					type: 'register',
+					name: safeName,
+					token,
+					scripts,
+					httpPort: Number(this.runtime.httpServerPort) || 7070,
+					httpTls: Boolean(this.runtime.tlsEnabled),
+				}));
 				this.runtime.log(`[Exchange] Connected as: ${safeName}`);
 			} catch (err) {
 				this.runtime.log(`[Exchange] Registration error: ${err.message}`);
@@ -1139,6 +1190,9 @@ class ExchangeManager {
 					address: detail?.address || null,
 					ip: detail?.ip || null,
 					port: Number.isFinite(Number(detail?.port)) ? Number(detail.port) : null,
+					httpPort: Number.isFinite(Number(detail?.httpPort)) ? Number(detail.httpPort) : null,
+					httpTls: Boolean(detail?.httpTls),
+					scriptsEndpoint: detail?.scriptsEndpoint || null,
 					connectedAt: connectedAt || null,
 					lastSeenAt: detail?.lastSeenAt || null,
 					userAgent: detail?.userAgent || '',
@@ -1159,6 +1213,8 @@ class ExchangeManager {
 			this.wsClient.send(JSON.stringify({
 				type: 'profile',
 				scripts: this._sanitizeDiscoveryScripts(scripts),
+				httpPort: Number(this.runtime.httpServerPort) || 7070,
+				httpTls: Boolean(this.runtime.tlsEnabled),
 			}));
 		} catch {
 			// Ignore profile update failures: scripts will be re-sent on reconnect.

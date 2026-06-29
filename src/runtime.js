@@ -991,14 +991,15 @@ class ReactorRuntime {
 		const nodes = this.exchangeManager && typeof this.exchangeManager.getConnectedClientsDiscoveryEntries === 'function'
 			? this.exchangeManager.getConnectedClientsDiscoveryEntries(Date.now())
 			: [];
+		const nodesWithScripts = await this.enrichDiscoveryNodesWithScripts(nodes);
 
 		return {
 			ok: true,
 			mode: this.exchangeMode,
 			endpoint: this.exchangeDiscoveryEndpointPath,
 			generatedAt: new Date().toISOString(),
-			total: nodes.length,
-			nodes,
+			total: nodesWithScripts.length,
+			nodes: nodesWithScripts,
 		};
 	}
 
@@ -1043,6 +1044,131 @@ class ReactorRuntime {
 		}
 
 		return Array.from(byUuid.values()).sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+	}
+
+	isValidDiscoveryUrl(rawUrl) {
+		const value = String(rawUrl || '').trim();
+		if (!value) {
+			return false;
+		}
+
+		try {
+			const parsed = new URL(value);
+			return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+		} catch {
+			return false;
+		}
+	}
+
+	buildNodeScriptsEndpointCandidates(node) {
+		const candidates = [];
+		const seen = new Set();
+		const pushCandidate = (url, insecureTls) => {
+			if (!this.isValidDiscoveryUrl(url)) {
+				return;
+			}
+			const key = String(url).trim().toLowerCase();
+			if (seen.has(key)) {
+				return;
+			}
+			seen.add(key);
+			candidates.push({ url: String(url).trim(), insecureTls: Boolean(insecureTls) });
+		};
+
+		const nodeTls = Boolean(node?.httpTls);
+		const nodePort = Number(node?.httpPort);
+		const hasValidPort = Number.isInteger(nodePort) && nodePort > 0 && nodePort <= 65535;
+
+		pushCandidate(node?.scriptsEndpoint, nodeTls);
+
+		if (hasValidPort) {
+			const protocol = nodeTls ? 'https' : 'http';
+			if (node?.ip) {
+				pushCandidate(`${protocol}://${String(node.ip).trim()}:${nodePort}/scripts`, nodeTls);
+			}
+			if (node?.name) {
+				pushCandidate(`${protocol}://${String(node.name).trim()}:${nodePort}/scripts`, nodeTls);
+			}
+		}
+
+		return candidates;
+	}
+
+	async requestWithTimeout(requestPromise, timeoutMs, timeoutMessage) {
+		const safeTimeout = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0 ? Number(timeoutMs) : 2000;
+		return Promise.race([
+			requestPromise,
+			new Promise((_, reject) => {
+				setTimeout(() => reject(new Error(timeoutMessage || 'request timeout')), safeTimeout);
+			}),
+		]);
+	}
+
+	async enrichDiscoveryNodesWithScripts(nodes = []) {
+		const safeNodes = Array.isArray(nodes) ? nodes : [];
+		if (safeNodes.length === 0) {
+			return [];
+		}
+
+		const token = String(this.exchangeAuthToken || '').trim();
+		return Promise.all(
+			safeNodes.map(async (node) => {
+				const fallbackScripts = Array.isArray(node?.scripts) ? node.scripts : [];
+				const endpointCandidates = this.buildNodeScriptsEndpointCandidates(node);
+				if (endpointCandidates.length === 0) {
+					return {
+						...(node || {}),
+						scripts: fallbackScripts,
+					};
+				}
+
+				for (const candidate of endpointCandidates) {
+					try {
+						const response = await this.requestWithTimeout(
+							this.platformServices.httpClient.request({
+								url: candidate.url,
+								method: 'GET',
+								headers: {
+									Accept: 'application/json',
+									...(token ? { Authorization: `Bearer ${token}` } : {}),
+								},
+								insecureTls: Boolean(candidate.insecureTls),
+							}),
+							1500,
+							'node scripts request timeout',
+						);
+
+						if (!response || Number(response.status) !== 200) {
+							continue;
+						}
+
+						let parsed = null;
+						try {
+							parsed = response.body ? JSON.parse(String(response.body)) : null;
+						} catch {
+							parsed = null;
+						}
+
+						if (!parsed || parsed.ok === false || !Array.isArray(parsed.scripts)) {
+							continue;
+						}
+
+						return {
+							...(node || {}),
+							scripts: parsed.scripts,
+							scriptsEndpoint: candidate.url,
+						};
+					} catch {
+						// Try next endpoint candidate.
+					}
+				}
+
+				return {
+					...(node || {}),
+					scripts: fallbackScripts,
+				};
+			}),
+		);
 	}
 
 	async testExchangeClientConnection(timeoutMs = 5000) {
@@ -1955,6 +2081,30 @@ class ReactorRuntime {
 			return;
 		}
 
+		if (method === 'GET' && pathname === '/scripts') {
+			if (String(this.exchangeAuthToken || '').trim() && !this.isExchangeDiscoveryRequestAuthorized(req.headers || {})) {
+				this.addHttpServerLog('GET /scripts -> 401 (invalid bearer token)');
+				res.writeHead(401, { 'content-type': 'application/json' });
+				res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+				return;
+			}
+
+			const scripts = this.getDiscoveryScriptEntries();
+			const nodeName = await this.getReactorName();
+			this.addHttpServerLog(`GET /scripts -> 200 scripts=${scripts.length}`);
+			res.writeHead(200, { 'content-type': 'application/json' });
+			res.end(
+				JSON.stringify({
+					ok: true,
+					node: nodeName,
+					generatedAt: new Date().toISOString(),
+					total: scripts.length,
+					scripts,
+				}),
+			);
+			return;
+		}
+
 		if (method === 'GET' && pathname === this.exchangeDiscoveryEndpointPath) {
 			if (this.exchangeMode !== 'exchange') {
 				this.addHttpServerLog(`GET ${pathname} -> 403 (disabled in mode=${this.exchangeMode})`);
@@ -1993,8 +2143,9 @@ class ReactorRuntime {
 			const nodes = this.exchangeManager && typeof this.exchangeManager.getConnectedClientsDiscoveryEntries === 'function'
 				? this.exchangeManager.getConnectedClientsDiscoveryEntries(Date.now())
 				: [];
+			const nodesWithScripts = await this.enrichDiscoveryNodesWithScripts(nodes);
 
-			this.addHttpServerLog(`GET ${pathname} -> 200 nodes=${nodes.length}`);
+			this.addHttpServerLog(`GET ${pathname} -> 200 nodes=${nodesWithScripts.length}`);
 			res.writeHead(200, { 'content-type': 'application/json' });
 			res.end(
 				JSON.stringify({
@@ -2002,8 +2153,8 @@ class ReactorRuntime {
 					mode: this.exchangeMode,
 					endpoint: this.exchangeDiscoveryEndpointPath,
 					generatedAt: new Date().toISOString(),
-					total: nodes.length,
-					nodes,
+					total: nodesWithScripts.length,
+					nodes: nodesWithScripts,
 				}),
 			);
 			return;
