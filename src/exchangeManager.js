@@ -48,6 +48,8 @@ class ExchangeManager {
 		this._serverTerminatedClients = 0;
 		this._connectedClientDetails = new Map();
 		this._socketClientMeta = new WeakMap();
+		this._serverPendingBinaryChunkMeta = new WeakMap();
+		this._clientPendingBinaryChunkMeta = [];
 		this._clientLastError = '';
 		this._clientLastCloseReason = '';
 		this._clientLastCloseCode = 0;
@@ -412,8 +414,13 @@ class ExchangeManager {
 			this._serverPongsReceived += 1;
 		});
 
-		ws.on('message', (data) => {
+		ws.on('message', (data, isBinary) => {
 			ws.isAlive = true;
+			if (isBinary) {
+				this._routeBinaryChunkData(ws, data, clientName || 'unknown');
+				return;
+			}
+
 			let packet;
 			try { packet = JSON.parse(String(data)); } catch { return; }
 			if (!packet || typeof packet !== 'object') return;
@@ -470,11 +477,14 @@ class ExchangeManager {
 					});
 				}
 				this._routeMessage(packet, clientName);
+			} else if (packet.type === 'stream-chunk-bin') {
+				this._routeBinaryChunkAnnouncement(packet, clientName || 'unknown', ws);
 			}
 		});
 
 		ws.on('close', () => {
 			ws.isAlive = false;
+			this._serverPendingBinaryChunkMeta.delete(ws);
 			if (clientName) {
 				this.connectedClients.delete(clientName);
 				this._connectedClientDetails.delete(clientName);
@@ -529,6 +539,83 @@ class ExchangeManager {
 		}
 	}
 
+	_queueServerPendingBinaryChunkMeta(sourceWs, meta) {
+		const queue = this._serverPendingBinaryChunkMeta.get(sourceWs) || [];
+		queue.push(meta);
+		this._serverPendingBinaryChunkMeta.set(sourceWs, queue);
+	}
+
+	_shiftServerPendingBinaryChunkMeta(sourceWs) {
+		const queue = this._serverPendingBinaryChunkMeta.get(sourceWs) || [];
+		const meta = queue.shift() || null;
+		if (queue.length > 0) {
+			this._serverPendingBinaryChunkMeta.set(sourceWs, queue);
+		} else {
+			this._serverPendingBinaryChunkMeta.delete(sourceWs);
+		}
+		return meta;
+	}
+
+	_routeBinaryChunkAnnouncement(packet, fromName, sourceWs) {
+		const to = String(packet.to || '').trim().toLowerCase();
+		if (!to) {
+			return;
+		}
+
+		const streamId = String(packet.streamId || '').trim();
+		if (!streamId) {
+			return;
+		}
+
+		const targetWs = this.connectedClients.get(to);
+		if (!targetWs || targetWs.readyState !== WebSocket.OPEN) {
+			this.runtime.log(`[Exchange] Binary stream target not found: ${to}`);
+			return;
+		}
+
+		const meta = {
+			to,
+			from: fromName || 'unknown',
+			streamId,
+			index: Number.isFinite(Number(packet.index)) ? Number(packet.index) : -1,
+			size: Number.isFinite(Number(packet.size)) ? Number(packet.size) : 0,
+		};
+
+		this._queueServerPendingBinaryChunkMeta(sourceWs, meta);
+
+		try {
+			targetWs.send(JSON.stringify({
+				type: 'stream-chunk-bin',
+				from: meta.from,
+				streamId: meta.streamId,
+				index: meta.index,
+				size: meta.size,
+			}));
+		} catch (error) {
+			this.runtime.log(`[Exchange] Failed to announce binary chunk to ${to}: ${error.message}`);
+		}
+	}
+
+	_routeBinaryChunkData(sourceWs, data, fromName) {
+		const meta = this._shiftServerPendingBinaryChunkMeta(sourceWs);
+		if (!meta) {
+			this.runtime.log(`[Exchange] Unexpected binary frame from ${fromName || 'unknown'}: missing metadata`);
+			return;
+		}
+
+		const targetWs = this.connectedClients.get(meta.to);
+		if (!targetWs || targetWs.readyState !== WebSocket.OPEN) {
+			this.runtime.log(`[Exchange] Binary chunk dropped: target disconnected ${meta.to}`);
+			return;
+		}
+
+		try {
+			targetWs.send(data, { binary: true });
+		} catch (error) {
+			this.runtime.log(`[Exchange] Failed routing binary chunk to ${meta.to}: ${error.message}`);
+		}
+	}
+
 	// ---------------------------------------------------------------------------
 	// EXCHANGE CLIENT — si connette a ws://host:port
 	// ---------------------------------------------------------------------------
@@ -572,11 +659,37 @@ class ExchangeManager {
 			}
 		});
 
-		ws.on('message', (data) => {
+		ws.on('message', (data, isBinary) => {
 			this._clientLastPongAt = Date.now();
+			if (isBinary) {
+				const meta = this._clientPendingBinaryChunkMeta.shift();
+				if (!meta) {
+					this.runtime.log('[Exchange] Received binary frame without metadata, dropping');
+					return;
+				}
+
+				const binaryChunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+				const payload = {
+					__reactorStream: true,
+					phase: 'chunk',
+					streamId: String(meta.streamId || ''),
+					index: Number.isFinite(Number(meta.index)) ? Number(meta.index) : -1,
+					size: binaryChunk.length,
+					encoding: 'binary',
+					binary: binaryChunk,
+				};
+
+				const sender = String(meta.from || 'unknown');
+				this._handleIncomingStreamEnvelope(sender, payload, '', 'application/octet-stream');
+				return;
+			}
+
 			let packet;
 			try { packet = JSON.parse(String(data)); } catch { return; }
 			if (packet && packet.type === 'message') this._handleIncomingMessage(packet);
+			if (packet && packet.type === 'stream-chunk-bin') {
+				this._clientPendingBinaryChunkMeta.push(packet);
+			}
 			if (packet && packet.type === 'auth-error') {
 				this.runtime.log(`[Exchange] Authentication failed: ${packet.error || 'invalid exchange token'}`);
 			}
@@ -727,6 +840,34 @@ class ExchangeManager {
 			}
 		}
 		const isStreamEnvelope = Boolean(messageJson && typeof messageJson === 'object' && messageJson.__reactorStream === true);
+		if (isStreamEnvelope) {
+			this._handleIncomingStreamEnvelope(from, messageJson, content, contentType);
+			return;
+		}
+
+		this.runtime.log(`[Exchange] Message from: ${from}`);
+		const listeners = this.runtime.findMessageListeners([from.toLowerCase()]);
+
+		Promise.allSettled(
+			listeners.map((script) =>
+				this.runtime.runScript(script, {
+					trigger: 'MESSAGE',
+					event: 'MESSAGE',
+					messageSender: from,
+					messageSenderName: from,
+					messageContent: content,
+					messageContentType: contentType,
+					messageBodyBase64: Buffer.from(content, 'utf8').toString('base64'),
+					messageJson,
+					stream: null,
+					streamEnd: null,
+					messageHeaders: { 'x-exchange-from': from },
+				}),
+			),
+		).catch(() => {});
+	}
+
+	_handleIncomingStreamEnvelope(from, streamEnvelope, rawContent = '', contentType = 'application/json') {
 		const senderMeta = {
 			rawName: from,
 			rawSender: from,
@@ -735,30 +876,31 @@ class ExchangeManager {
 		};
 
 		this.runtime.log(`[Exchange] Message from: ${from}`);
-		const listeners = isStreamEnvelope
-			? this.runtime.findStreamListeners(senderMeta.candidates)
-			: this.runtime.findMessageListeners(senderMeta.candidates);
-		const streamPacket = isStreamEnvelope && this.runtime && this.runtime.createIncomingStreamPacket
-			? this.runtime.createIncomingStreamPacket(messageJson)
+		const listeners = this.runtime.findStreamListeners(senderMeta.candidates);
+		const streamPacket = this.runtime && this.runtime.createIncomingStreamPacket
+			? this.runtime.createIncomingStreamPacket(streamEnvelope)
 			: null;
+
+		const safeRawContent = typeof rawContent === 'string' ? rawContent : '';
+		const safeMessageBodyBase64 = safeRawContent ? Buffer.from(safeRawContent, 'utf8').toString('base64') : '';
 
 		Promise.resolve()
 			.then(async () => {
-				const streamEndData = isStreamEnvelope && this.runtime && typeof this.runtime.processIncomingStreamPacket === 'function'
+				const streamEndData = this.runtime && typeof this.runtime.processIncomingStreamPacket === 'function'
 					? await this.runtime.processIncomingStreamPacket(streamPacket, senderMeta)
 					: null;
 
 				await Promise.allSettled(
 					listeners.map((script) =>
 						this.runtime.runScript(script, {
-							trigger: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
-							event: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
+							trigger: 'STREAM',
+							event: 'STREAM',
 							messageSender: from,
 							messageSenderName: from,
-							messageContent: content,
+							messageContent: safeRawContent,
 							messageContentType: contentType,
-							messageBodyBase64: Buffer.from(content, 'utf8').toString('base64'),
-							messageJson,
+							messageBodyBase64: safeMessageBodyBase64,
+							messageJson: streamEnvelope,
 							stream: streamPacket,
 							streamEnd: null,
 							messageHeaders: { 'x-exchange-from': from },
@@ -804,6 +946,46 @@ class ExchangeManager {
 		this.wsClient.send(JSON.stringify({ type: 'message', to, content: serializedContent, contentType }));
 		return {
 			target: to,
+			via: 'exchange',
+			queued: false,
+		};
+	}
+
+	async sendStreamChunkBinary(target, streamId, index, chunkBuffer) {
+		if (this.mode !== 'client') {
+			throw new Error('not in client mode');
+		}
+		if (!this.wsClient || this.wsClient.readyState !== WebSocket.OPEN) {
+			throw new Error('exchange client not connected');
+		}
+
+		const to = String(target || '').trim().toLowerCase();
+		if (!to) {
+			throw new Error('invalid exchange target');
+		}
+
+		const safeStreamId = String(streamId || '').trim();
+		if (!safeStreamId) {
+			throw new Error('invalid streamId');
+		}
+
+		const buffer = Buffer.isBuffer(chunkBuffer) ? chunkBuffer : Buffer.from(chunkBuffer || []);
+		const safeIndex = Number.isFinite(Number(index)) ? Number(index) : -1;
+
+		this.wsClient.send(JSON.stringify({
+			type: 'stream-chunk-bin',
+			to,
+			streamId: safeStreamId,
+			index: safeIndex,
+			size: buffer.length,
+		}));
+		this.wsClient.send(buffer, { binary: true });
+
+		return {
+			target: to,
+			streamId: safeStreamId,
+			index: safeIndex,
+			size: buffer.length,
 			via: 'exchange',
 			queued: false,
 		};

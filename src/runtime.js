@@ -225,6 +225,15 @@ class IncomingStreamPacket {
 		if (!this.isChunk()) {
 			return Buffer.alloc(0);
 		}
+
+		if (Buffer.isBuffer(this.payload.binary)) {
+			return this.payload.binary;
+		}
+
+		if (this.payload.binary instanceof Uint8Array) {
+			return Buffer.from(this.payload.binary);
+		}
+
 		return Buffer.from(this.getBase64(), 'base64');
 	}
 
@@ -1411,15 +1420,11 @@ class ReactorRuntime {
 		for await (const chunk of iterateStreamSourceChunks(source, safeChunkSize)) {
 			digest.update(chunk);
 			totalBytes += chunk.length;
-			await this.sendExchangeMessage(target, {
-				__reactorStream: true,
-				phase: 'chunk',
-				streamId,
-				index: chunks,
-				encoding: 'base64',
-				size: chunk.length,
-				data: chunk.toString('base64'),
-			});
+			if (!this.exchangeManager || typeof this.exchangeManager.sendStreamChunkBinary !== 'function') {
+				throw new Error('binary exchange streaming is not supported by current exchange manager');
+			}
+
+			await this.exchangeManager.sendStreamChunkBinary(target, streamId, chunks, chunk);
 			chunks += 1;
 		}
 

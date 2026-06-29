@@ -62,6 +62,7 @@ import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.WebSocket;
 import okhttp3.WebSocketListener;
+import okio.ByteString;
 
 public class ReactorHttpService extends Service {
     public static final String ACTION_START = "com.reactor.app.http.START";
@@ -109,6 +110,8 @@ public class ReactorHttpService extends Service {
 
     // Exchange server: gestito tramite handleClient (WS upgrade detection)
     private final ConcurrentHashMap<String, WsConnection> wsExchangeClients = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<WsConnection, List<PendingBinaryChunkMeta>> wsExchangePendingBinaryByConn = new ConcurrentHashMap<>();
+    private final List<PendingBinaryChunkMeta> wsClientPendingBinaryChunks = new ArrayList<>();
 
     // Exchange client
     private OkHttpClient okHttpClient;
@@ -158,8 +161,23 @@ public class ReactorHttpService extends Service {
         String scriptState;
         String source;
         boolean enabled;
+        boolean hasMessageEvent;
         boolean messageFromAnySender;
         List<String> messageSenders;
+        boolean hasStreamEvent;
+        boolean streamFromAnySender;
+        List<String> streamSenders;
+        boolean hasStreamEndEvent;
+        boolean streamEndFromAnySender;
+        List<String> streamEndSenders;
+    }
+
+    private static class PendingBinaryChunkMeta {
+        String to;
+        String from;
+        String streamId;
+        int index;
+        int size;
     }
 
     public static boolean isRunning() {
@@ -574,30 +592,61 @@ public class ReactorHttpService extends Service {
 
                 List<MessageScript> listeners = collectMessageListeners();
                 Set<String> senderCandidates = resolveSenderCandidates(senderName, senderId, remoteHost);
+                JSONObject streamPayload = tryParseJsonObject(bodyText);
+                boolean streamEnvelope = isStreamEnvelope(streamPayload);
+                String streamPhase = streamEnvelope
+                        ? streamPayload.optString("phase", "").trim().toLowerCase(Locale.ROOT)
+                        : "";
+                String primaryEvent = streamEnvelope ? "STREAM" : "MESSAGE";
+                Map<String, String> effectiveHeaders = streamEnvelope
+                        ? withStreamHeaders(headers, streamPayload, primaryEvent)
+                        : new HashMap<>(headers);
                 JSONArray deliveredScripts = new JSONArray();
+                JSONArray streamEndScripts = new JSONArray();
                 int deliveredCount = 0;
+                int streamEndCount = 0;
 
                 for (MessageScript script : listeners) {
-                    if (!matchesMessageSender(script, senderCandidates)) {
+                    if (!matchesEventSender(script, senderCandidates, primaryEvent)) {
                         continue;
                     }
 
                     try {
-                        writeExecutionStart(script, "MESSAGE", "MESSAGE");
-                        executeScriptActions(script, bodyText, headers);
+                        writeExecutionStart(script, primaryEvent, primaryEvent);
+                        executeScriptActions(script, bodyText, effectiveHeaders);
                         deliveredScripts.put(script.scriptName);
                         deliveredCount += 1;
                     } catch (Exception executionError) {
-                        writeExecutionError(script, "MESSAGE", "MESSAGE", executionError.getMessage());
+                        writeExecutionError(script, primaryEvent, primaryEvent, executionError.getMessage());
+                    }
+                }
+
+                if (streamEnvelope && "end".equals(streamPhase)) {
+                    Map<String, String> streamEndHeaders = withStreamHeaders(headers, streamPayload, "STREAMEND");
+                    for (MessageScript script : listeners) {
+                        if (!matchesEventSender(script, senderCandidates, "STREAMEND")) {
+                            continue;
+                        }
+
+                        try {
+                            writeExecutionStart(script, "STREAMEND", "STREAMEND");
+                            executeScriptActions(script, bodyText, streamEndHeaders);
+                            streamEndScripts.put(script.scriptName);
+                            streamEndCount += 1;
+                        } catch (Exception executionError) {
+                            writeExecutionError(script, "STREAMEND", "STREAMEND", executionError.getMessage());
+                        }
                     }
                 }
 
                 JSONObject payload = new JSONObject();
                 payload.put("ok", true);
-                payload.put("trigger", "MESSAGE");
+                payload.put("trigger", primaryEvent);
                 payload.put("delivered", deliveredCount > 0);
                 payload.put("scripts", deliveredScripts);
                 payload.put("deliveredCount", deliveredCount);
+                payload.put("streamEndScripts", streamEndScripts);
+                payload.put("streamEndDeliveredCount", streamEndCount);
                 payload.put("senderCandidates", new JSONArray(senderCandidates));
 
                 if (deliveredCount > 0) {
@@ -681,6 +730,12 @@ public class ReactorHttpService extends Service {
             boolean hasMessageEvent = false;
             boolean messageFromAnySender = false;
             List<String> messageSenders = new ArrayList<>();
+            boolean hasStreamEvent = false;
+            boolean streamFromAnySender = false;
+            List<String> streamSenders = new ArrayList<>();
+            boolean hasStreamEndEvent = false;
+            boolean streamEndFromAnySender = false;
+            List<String> streamEndSenders = new ArrayList<>();
 
             for (String rawLine : lines) {
                 String line = rawLine.trim();
@@ -700,7 +755,57 @@ public class ReactorHttpService extends Service {
                     List<String> tokens = splitDirectiveTokens(value);
                     for (String token : tokens) {
                         String normalizedToken = token.trim();
-                        if (!normalizedToken.toUpperCase(Locale.ROOT).startsWith("MESSAGE")) {
+                        String upperToken = normalizedToken.toUpperCase(Locale.ROOT);
+
+                        if (upperToken.startsWith("STREAMEND")) {
+                            hasStreamEndEvent = true;
+                            int open = normalizedToken.indexOf('(');
+                            int close = normalizedToken.lastIndexOf(')');
+                            if (open < 0 || close <= open) {
+                                streamEndFromAnySender = true;
+                                continue;
+                            }
+
+                            String sendersRaw = normalizedToken.substring(open + 1, close).trim();
+                            if (sendersRaw.isEmpty()) {
+                                streamEndFromAnySender = true;
+                                continue;
+                            }
+
+                            for (String senderCandidate : sendersRaw.split(",")) {
+                                String normalizedSender = normalizeMessageSender(senderCandidate);
+                                if (normalizedSender != null && !streamEndSenders.contains(normalizedSender)) {
+                                    streamEndSenders.add(normalizedSender);
+                                }
+                            }
+                            continue;
+                        }
+
+                        if (upperToken.startsWith("STREAM")) {
+                            hasStreamEvent = true;
+                            int open = normalizedToken.indexOf('(');
+                            int close = normalizedToken.lastIndexOf(')');
+                            if (open < 0 || close <= open) {
+                                streamFromAnySender = true;
+                                continue;
+                            }
+
+                            String sendersRaw = normalizedToken.substring(open + 1, close).trim();
+                            if (sendersRaw.isEmpty()) {
+                                streamFromAnySender = true;
+                                continue;
+                            }
+
+                            for (String senderCandidate : sendersRaw.split(",")) {
+                                String normalizedSender = normalizeMessageSender(senderCandidate);
+                                if (normalizedSender != null && !streamSenders.contains(normalizedSender)) {
+                                    streamSenders.add(normalizedSender);
+                                }
+                            }
+                            continue;
+                        }
+
+                        if (!upperToken.startsWith("MESSAGE")) {
                             continue;
                         }
 
@@ -728,7 +833,7 @@ public class ReactorHttpService extends Service {
                 }
             }
 
-            if (!hasMessageEvent) {
+            if (!hasMessageEvent && !hasStreamEvent && !hasStreamEndEvent) {
                 return null;
             }
 
@@ -739,8 +844,15 @@ public class ReactorHttpService extends Service {
             script.scriptState = state;
             script.source = source;
             script.enabled = enabled;
+            script.hasMessageEvent = hasMessageEvent;
             script.messageFromAnySender = messageFromAnySender || messageSenders.isEmpty();
             script.messageSenders = messageSenders;
+            script.hasStreamEvent = hasStreamEvent;
+            script.streamFromAnySender = streamFromAnySender || streamSenders.isEmpty();
+            script.streamSenders = streamSenders;
+            script.hasStreamEndEvent = hasStreamEndEvent;
+            script.streamEndFromAnySender = streamEndFromAnySender || streamEndSenders.isEmpty();
+            script.streamEndSenders = streamEndSenders;
             return script;
         } catch (Exception ignored) {
             return null;
@@ -853,17 +965,111 @@ public class ReactorHttpService extends Service {
     }
 
     private boolean matchesMessageSender(MessageScript script, Set<String> senderCandidates) {
-        if (script == null || script.messageFromAnySender) {
-            return script != null;
+        return matchesEventSender(script, senderCandidates, "MESSAGE");
+    }
+
+    private boolean matchesEventSender(MessageScript script, Set<String> senderCandidates, String eventName) {
+        if (script == null) {
+            return false;
         }
 
-        for (String expected : script.messageSenders) {
+        String safeEvent = String.valueOf(eventName).trim().toUpperCase(Locale.ROOT);
+        boolean fromAnySender;
+        List<String> allowedSenders;
+
+        if ("STREAM".equals(safeEvent)) {
+            if (!script.hasStreamEvent) {
+                return false;
+            }
+            fromAnySender = script.streamFromAnySender;
+            allowedSenders = script.streamSenders;
+        } else if ("STREAMEND".equals(safeEvent)) {
+            if (!script.hasStreamEndEvent) {
+                return false;
+            }
+            fromAnySender = script.streamEndFromAnySender;
+            allowedSenders = script.streamEndSenders;
+        } else {
+            if (!script.hasMessageEvent) {
+                return false;
+            }
+            fromAnySender = script.messageFromAnySender;
+            allowedSenders = script.messageSenders;
+        }
+
+        if (fromAnySender || allowedSenders == null || allowedSenders.isEmpty()) {
+            return true;
+        }
+
+        for (String expected : allowedSenders) {
             if (senderCandidates.contains(expected)) {
                 return true;
             }
         }
 
         return false;
+    }
+
+    private JSONObject tryParseJsonObject(String value) {
+        String raw = String.valueOf(value);
+        if (raw.trim().isEmpty()) {
+            return null;
+        }
+
+        try {
+            return new JSONObject(raw);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private boolean isStreamEnvelope(JSONObject payload) {
+        return payload != null && payload.optBoolean("__reactorStream", false);
+    }
+
+    private Map<String, String> withStreamHeaders(Map<String, String> incomingHeaders, JSONObject streamPayload, String trigger) {
+        Map<String, String> headers = new HashMap<>();
+        if (incomingHeaders != null) {
+            headers.putAll(incomingHeaders);
+        }
+
+        headers.put("x-reactor-trigger", String.valueOf(trigger));
+
+        if (streamPayload == null) {
+            return headers;
+        }
+
+        String streamId = streamPayload.optString("streamId", "");
+        String phase = streamPayload.optString("phase", "").toLowerCase(Locale.ROOT);
+        String contentType = streamPayload.optString("contentType", "");
+
+        if (!streamId.isEmpty()) {
+            headers.put("x-reactor-stream-id", streamId);
+        }
+        if (!phase.isEmpty()) {
+            headers.put("x-reactor-stream-phase", phase);
+        }
+        if (!contentType.isEmpty()) {
+            headers.put("x-reactor-stream-content-type", contentType);
+        }
+
+        if (streamPayload.has("index")) {
+            headers.put("x-reactor-stream-index", String.valueOf(streamPayload.optInt("index", -1)));
+        }
+        if (streamPayload.has("size")) {
+            headers.put("x-reactor-stream-size", String.valueOf(streamPayload.optLong("size", 0L)));
+        }
+        if (streamPayload.has("chunks")) {
+            headers.put("x-reactor-stream-chunks", String.valueOf(streamPayload.optInt("chunks", 0)));
+        }
+        if (streamPayload.has("totalBytes")) {
+            headers.put("x-reactor-stream-total-bytes", String.valueOf(streamPayload.optLong("totalBytes", 0L)));
+        }
+        if (streamPayload.has("digestSha256")) {
+            headers.put("x-reactor-stream-digest", streamPayload.optString("digestSha256", ""));
+        }
+
+        return headers;
     }
 
     private void writeExecutionStart(MessageScript script, String trigger, String event) {
@@ -1721,7 +1927,11 @@ public class ReactorHttpService extends Service {
                 if (frame.opcode == 0x8) break; // Close
                 if (frame.opcode == 0x9) { conn.sendPong(frame.payload); continue; } // Ping→Pong
                 if (frame.opcode == 0xA) { conn.markPong(); continue; } // Pong
-                if (frame.opcode != 0x1 && frame.opcode != 0x2) continue;
+                if (frame.opcode == 0x2) {
+                    routeExchangeBinaryChunkData(conn, frame.payload);
+                    continue;
+                }
+                if (frame.opcode != 0x1) continue;
 
                 String text = new String(frame.payload, StandardCharsets.UTF_8);
                 try {
@@ -1750,6 +1960,14 @@ public class ReactorHttpService extends Service {
                                 clientName != null ? clientName : "unknown",
                                 packet.optString("content", ""),
                                 packet.optString("contentType", "text/plain"));
+                    } else if ("stream-chunk-bin".equals(type)) {
+                        routeExchangeBinaryChunkAnnouncement(
+                                packet.optString("to", "").trim().toLowerCase(Locale.ROOT),
+                                clientName != null ? clientName : "unknown",
+                                packet.optString("streamId", "").trim(),
+                                packet.optInt("index", -1),
+                                packet.optInt("size", 0),
+                                conn);
                     }
                 } catch (Exception ignored) {}
             }
@@ -1761,6 +1979,9 @@ public class ReactorHttpService extends Service {
             if (clientName != null) {
                 wsExchangeClients.remove(clientName);
                 appendGlobalLog(buildExchangeLog("CLIENT_DISCONNECTED", clientName));
+            }
+            if (conn != null) {
+                wsExchangePendingBinaryByConn.remove(conn);
             }
             try { socket.close(); } catch (IOException ignored) {}
         }
@@ -1813,6 +2034,83 @@ public class ReactorHttpService extends Service {
             appendGlobalLog(buildExchangeLog("ROUTED", from + " → " + to));
         } catch (Exception e) {
             appendGlobalLog(buildExchangeLog("ROUTE_ERROR", "error: " + e.getMessage()));
+        }
+    }
+
+    private void pushPendingBinaryMeta(WsConnection source, PendingBinaryChunkMeta meta) {
+        List<PendingBinaryChunkMeta> queue = wsExchangePendingBinaryByConn.get(source);
+        if (queue == null) {
+            queue = new ArrayList<>();
+            wsExchangePendingBinaryByConn.put(source, queue);
+        }
+        synchronized (queue) {
+            queue.add(meta);
+        }
+    }
+
+    private PendingBinaryChunkMeta shiftPendingBinaryMeta(WsConnection source) {
+        List<PendingBinaryChunkMeta> queue = wsExchangePendingBinaryByConn.get(source);
+        if (queue == null) {
+            return null;
+        }
+
+        synchronized (queue) {
+            if (queue.isEmpty()) {
+                return null;
+            }
+            PendingBinaryChunkMeta meta = queue.remove(0);
+            if (queue.isEmpty()) {
+                wsExchangePendingBinaryByConn.remove(source);
+            }
+            return meta;
+        }
+    }
+
+    private void routeExchangeBinaryChunkAnnouncement(String to, String from, String streamId, int index, int size, WsConnection source) {
+        WsConnection target = wsExchangeClients.get(to);
+        if (target == null) {
+            appendGlobalLog(buildExchangeLog("ROUTE_MISS", "binary target not connected: " + to));
+            return;
+        }
+
+        PendingBinaryChunkMeta meta = new PendingBinaryChunkMeta();
+        meta.to = to;
+        meta.from = from;
+        meta.streamId = streamId;
+        meta.index = index;
+        meta.size = size;
+        pushPendingBinaryMeta(source, meta);
+
+        try {
+            JSONObject packet = new JSONObject();
+            packet.put("type", "stream-chunk-bin");
+            packet.put("from", from);
+            packet.put("streamId", streamId);
+            packet.put("index", index);
+            packet.put("size", size);
+            target.send(packet.toString());
+        } catch (Exception error) {
+            appendGlobalLog(buildExchangeLog("ROUTE_ERROR", "binary announce error: " + error.getMessage()));
+        }
+    }
+
+    private void routeExchangeBinaryChunkData(WsConnection source, byte[] payload) {
+        PendingBinaryChunkMeta meta = shiftPendingBinaryMeta(source);
+        if (meta == null) {
+            appendGlobalLog(buildExchangeLog("ROUTE_ERROR", "binary chunk without metadata"));
+            return;
+        }
+
+        WsConnection target = wsExchangeClients.get(meta.to);
+        if (target == null) {
+            appendGlobalLog(buildExchangeLog("ROUTE_MISS", "binary target disconnected: " + meta.to));
+            return;
+        }
+
+        try {
+            target.sendBinary(payload);
+        } catch (Exception error) {
+            appendGlobalLog(buildExchangeLog("ROUTE_ERROR", "binary route error: " + error.getMessage()));
         }
     }
 
@@ -1896,7 +2194,55 @@ public class ReactorHttpService extends Service {
 
             @Override
             public void onMessage(WebSocket webSocket, String text) {
+                JSONObject packet = tryParseJsonObject(text);
+                if (packet != null && "stream-chunk-bin".equals(packet.optString("type", ""))) {
+                    PendingBinaryChunkMeta meta = new PendingBinaryChunkMeta();
+                    meta.from = packet.optString("from", "unknown");
+                    meta.streamId = packet.optString("streamId", "");
+                    meta.index = packet.optInt("index", -1);
+                    meta.size = packet.optInt("size", 0);
+                    synchronized (wsClientPendingBinaryChunks) {
+                        wsClientPendingBinaryChunks.add(meta);
+                    }
+                    return;
+                }
+
                 handleIncomingExchangeMessage(text);
+            }
+
+            @Override
+            public void onMessage(WebSocket webSocket, ByteString bytes) {
+                PendingBinaryChunkMeta meta = null;
+                synchronized (wsClientPendingBinaryChunks) {
+                    if (!wsClientPendingBinaryChunks.isEmpty()) {
+                        meta = wsClientPendingBinaryChunks.remove(0);
+                    }
+                }
+
+                if (meta == null) {
+                    appendGlobalLog(buildExchangeLog("CLIENT_FAILURE", "received binary frame without metadata"));
+                    return;
+                }
+
+                try {
+                    JSONObject streamPayload = new JSONObject();
+                    streamPayload.put("__reactorStream", true);
+                    streamPayload.put("phase", "chunk");
+                    streamPayload.put("streamId", meta.streamId);
+                    streamPayload.put("index", meta.index);
+                    streamPayload.put("size", bytes.size());
+                    streamPayload.put("encoding", "base64");
+                    streamPayload.put("data", bytes.base64());
+
+                    JSONObject envelope = new JSONObject();
+                    envelope.put("type", "message");
+                    envelope.put("from", meta.from != null ? meta.from : "unknown");
+                    envelope.put("content", streamPayload.toString());
+                    envelope.put("contentType", "application/json");
+                    handleIncomingExchangeMessage(envelope.toString());
+                } catch (Exception ignored) {
+                    // Ignore malformed binary stream payloads.
+                }
             }
 
             @Override
@@ -1907,6 +2253,9 @@ public class ReactorHttpService extends Service {
             @Override
             public void onClosed(WebSocket webSocket, int code, String reason) {
                 wsExchangeClientSocket = null;
+                synchronized (wsClientPendingBinaryChunks) {
+                    wsClientPendingBinaryChunks.clear();
+                }
                 appendGlobalLog(buildExchangeLog("CLIENT_DISCONNECTED", "disconnected from exchange"));
                 synchronized (lock) { lock.notifyAll(); }
             }
@@ -1914,6 +2263,9 @@ public class ReactorHttpService extends Service {
             @Override
             public void onFailure(WebSocket webSocket, Throwable t, Response response) {
                 wsExchangeClientSocket = null;
+                synchronized (wsClientPendingBinaryChunks) {
+                    wsClientPendingBinaryChunks.clear();
+                }
                 String detail = t.getMessage() != null ? t.getMessage() : "unknown error";
                 if (response != null) {
                     detail += " (HTTP " + response.code() + ")";
@@ -2040,18 +2392,40 @@ public class ReactorHttpService extends Service {
             List<MessageScript> listeners = collectMessageListeners();
             Set<String> senderCandidates = new HashSet<>();
             senderCandidates.add(from.toLowerCase(Locale.ROOT));
+            JSONObject streamPayload = tryParseJsonObject(content);
+            boolean streamEnvelope = isStreamEnvelope(streamPayload);
+            String streamPhase = streamEnvelope
+                    ? streamPayload.optString("phase", "").trim().toLowerCase(Locale.ROOT)
+                    : "";
+            String primaryEvent = streamEnvelope ? "STREAM" : "MESSAGE";
 
             Map<String, String> headers = new HashMap<>();
             headers.put("content-type", contentType);
             headers.put("x-exchange-from", from);
+            Map<String, String> effectiveHeaders = streamEnvelope
+                    ? withStreamHeaders(headers, streamPayload, primaryEvent)
+                    : headers;
 
             for (MessageScript script : listeners) {
-                if (!matchesMessageSender(script, senderCandidates)) continue;
+                if (!matchesEventSender(script, senderCandidates, primaryEvent)) continue;
                 try {
-                    writeExecutionStart(script, "MESSAGE", "MESSAGE");
-                    executeScriptActions(script, content, headers);
+                    writeExecutionStart(script, primaryEvent, primaryEvent);
+                    executeScriptActions(script, content, effectiveHeaders);
                 } catch (Exception e) {
-                    writeExecutionError(script, "MESSAGE", "MESSAGE", e.getMessage());
+                    writeExecutionError(script, primaryEvent, primaryEvent, e.getMessage());
+                }
+            }
+
+            if (streamEnvelope && "end".equals(streamPhase)) {
+                Map<String, String> streamEndHeaders = withStreamHeaders(headers, streamPayload, "STREAMEND");
+                for (MessageScript script : listeners) {
+                    if (!matchesEventSender(script, senderCandidates, "STREAMEND")) continue;
+                    try {
+                        writeExecutionStart(script, "STREAMEND", "STREAMEND");
+                        executeScriptActions(script, content, streamEndHeaders);
+                    } catch (Exception e) {
+                        writeExecutionError(script, "STREAMEND", "STREAMEND", e.getMessage());
+                    }
                 }
             }
         } catch (Exception ignored) {}
@@ -2076,6 +2450,11 @@ public class ReactorHttpService extends Service {
         synchronized void send(String message) throws IOException {
             byte[] payload = message.getBytes(StandardCharsets.UTF_8);
             writeWsFrame(output, 0x1, payload);
+            markSeen();
+        }
+
+        synchronized void sendBinary(byte[] payload) throws IOException {
+            writeWsFrame(output, 0x2, payload != null ? payload : new byte[0]);
             markSeen();
         }
 
