@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('reactor', {
 	toggleScriptDirective: (filePath, directive) => ipcRenderer.invoke('toggle-script-directive', filePath, directive),
 	getScriptsInfo: () => ipcRenderer.invoke('get-scripts-info'),
 	getUiSettings: () => ipcRenderer.invoke('get-ui-settings'),
+	stopBackgroundProcess: () => ipcRenderer.invoke('stop-background-process'),
 	pickDefaultProgram: () => ipcRenderer.invoke('pick-default-program'),
 	openEventLog: (filePath) => ipcRenderer.invoke('open-event-log', filePath),
 	clearEventLog: (filePath) => ipcRenderer.invoke('clear-event-log', filePath),

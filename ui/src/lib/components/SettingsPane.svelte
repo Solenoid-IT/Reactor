@@ -25,6 +25,7 @@
 	export let onSaveExchangeConfig = () => {};
 	export let onExportBackup = () => {};
 	export let onImportBackup = () => {};
+	export let onStopBackgroundProcess = () => {};
 	export let messageQueuePending = 0;
 	export let messageQueueDirectPending = 0;
 	export let messageQueueExchangePending = 0;
@@ -90,6 +91,17 @@
 			}
 		}
 		onClearMessageQueue();
+	}
+
+	function confirmStopBackgroundProcess() {
+		if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+			const confirmed = window.confirm('Stop Reactor background process now? The app will terminate immediately until you launch it again.');
+			if (!confirmed) {
+				return;
+			}
+		}
+
+		onStopBackgroundProcess();
 	}
 </script>
 
@@ -302,6 +314,19 @@
 			<button type="button" class="btn-primary" on:click={onImportBackup}>
 				<i class="fa-solid fa-file-import me-2"></i>
 				Import ZIP
+			</button>
+		</div>
+	</section>
+
+	<section class="detail-card settings-backup-card">
+		<h3><i class="fa-solid fa-power-off me-2"></i>Background Process</h3>
+		<div class="detail-value" style="font-size:0.82em; opacity:0.75; margin-bottom:10px;">
+			Force-stop Reactor even when the window is hidden and the app is still running in background.
+		</div>
+		<div class="settings-backup-actions">
+			<button type="button" class="btn-secondary" style="color:#e57373;" on:click={confirmStopBackgroundProcess}>
+				<i class="fa-solid fa-stop me-2"></i>
+				Stop Background Process
 			</button>
 		</div>
 	</section>

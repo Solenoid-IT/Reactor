@@ -9,6 +9,7 @@
 	import {
 		getScriptsInfo,
 		getUiSettings,
+		stopBackgroundProcess,
 		openScriptsFolder,
 		openScriptFile,
 		readScriptContent,
@@ -490,6 +491,17 @@
 		await refreshAll();
 	}
 
+	async function stopBackgroundProcessHandler() {
+		status = 'Stopping background process...';
+		const result = await stopBackgroundProcess();
+		if (!result?.ok) {
+			status = `Error: ${result?.error || 'unknown'}`;
+			return;
+		}
+
+		status = 'Stopping background process...';
+	}
+
 	async function openLog(index) {
 		const script = scripts[index];
 		if (!script) {
@@ -683,6 +695,7 @@
 			onSaveExchangeConfig={saveExchangeConfigValue}
 			onExportBackup={exportBackupHandler}
 			onImportBackup={importBackupHandler}
+			onStopBackgroundProcess={stopBackgroundProcessHandler}
 			onSaveMessageQueueTtlDays={saveMessageQueueTtlDaysHandler}
 			onFlushMessageQueue={flushMessageQueueHandler}
 			onClearMessageQueue={clearMessageQueueHandler}

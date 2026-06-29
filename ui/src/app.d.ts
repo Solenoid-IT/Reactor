@@ -3,6 +3,7 @@ declare global {
 		reactor?: {
 			getScriptsInfo?: () => Promise<any>;
 			getUiSettings?: () => Promise<any>;
+			stopBackgroundProcess?: () => Promise<any>;
 			openScriptsFolder?: () => Promise<any>;
 			openScriptFile?: (filePath: string) => Promise<any>;
 			readScriptContent?: (filePath: string) => Promise<any>;

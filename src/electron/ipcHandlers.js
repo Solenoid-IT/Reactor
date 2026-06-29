@@ -1,4 +1,4 @@
-const { dialog, ipcMain, shell } = require('electron');
+const { app, dialog, ipcMain, shell } = require('electron');
 const fs = require('fs/promises');
 const { spawn } = require('child_process');
 const path = require('path');
@@ -34,7 +34,10 @@ async function openWithConfiguredProgramOrDefault(targetPath) {
 	}
 }
 
-function setupIpcHandlers(runtime) {
+function setupIpcHandlers(runtime, options = {}) {
+	const forceQuitApp = typeof options.forceQuitApp === 'function'
+		? options.forceQuitApp
+		: () => app.exit(0);
 	const scriptsRoot = runtime ? path.resolve(runtime.scriptsDir) : '';
 	const projectRoot = runtime ? path.resolve(runtime.reactorRootDir || path.dirname(runtime.scriptsDir)) : '';
 
@@ -187,6 +190,17 @@ function setupIpcHandlers(runtime) {
 
 	ipcMain.handle('get-ui-settings', async () => {
 		return readUiSettings();
+	});
+
+	ipcMain.handle('stop-background-process', async () => {
+		try {
+			setImmediate(() => {
+				forceQuitApp();
+			});
+			return { ok: true };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
 	});
 
 	ipcMain.handle('get-http-server-config', async () => {

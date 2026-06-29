@@ -92,6 +92,15 @@ export async function getUiSettings() {
 	return { defaultProgramPath: '', httpServerPort: 7070 };
 }
 
+export async function stopBackgroundProcess() {
+	const bridge = getBridge();
+	if (bridge && bridge.stopBackgroundProcess) {
+		return bridge.stopBackgroundProcess();
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
 export async function openScriptsFolder() {
 	const bridge = getBridge();
 	if (bridge && bridge.openScriptsFolder) {

@@ -50,6 +50,28 @@ let runtime;
 let isQuitting = false;
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
+function forceQuitApp() {
+	isQuitting = true;
+
+	try {
+		if (runtime) {
+			runtime.cleanup();
+		}
+	} catch {
+		// Best effort cleanup before forced exit.
+	}
+
+	for (const windowRef of BrowserWindow.getAllWindows()) {
+		try {
+			windowRef.destroy();
+		} catch {
+			// Ignore window teardown failures during forced exit.
+		}
+	}
+
+	app.exit(0);
+}
+
 function wireBackgroundWindowBehavior(windowRef) {
 	if (!windowRef || windowRef.isDestroyed()) {
 		return;
@@ -171,7 +193,7 @@ if (!gotSingleInstanceLock) {
 		configureBackgroundMode();
 
 		runtime = new ReactorRuntime(EXTERNAL_SCRIPTS_DIR, EVENT_LOG_PATH);
-		setupIpcHandlers(runtime);
+		setupIpcHandlers(runtime, { forceQuitApp });
 
 		if (SHOW_WINDOW) {
 			mainWindow = createMainWindow();
