@@ -162,6 +162,9 @@ For a complete Linux server installation and Exchange configuration guide, see:
 For Docker Compose setup as Exchange server, see:
 - `docs/docker-compose-exchange.md`
 
+For WebRTC STUN/TURN server setup (coturn), see:
+- `docs/setup-webrtc.md`
+
 Recommended setup:
 
 1. Copy project to /opt/reactor

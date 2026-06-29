@@ -5,6 +5,7 @@ You can run:
 - only Exchange server
 - only Client node
 - both Exchange and Client in the same compose stack
+- optional STUN/TURN server (coturn) for WebRTC peer connectivity
 
 ## Files included
 
@@ -33,6 +34,10 @@ Edit `.env` for your setup:
 - `REACTOR_CLIENT_PORT`
 - `REACTOR_EXCHANGE_HOST`
 - `REACTOR_EXCHANGE_TLS`
+- `COTURN_REALM`
+- `COTURN_USER`
+- `COTURN_PASSWORD`
+- `COTURN_EXTERNAL_IP`
 
 ## Start profiles
 
@@ -56,11 +61,29 @@ From project root:
 docker compose --profile exchange --profile client up -d --build
 ```
 
+Start only TURN/STUN profile:
+
+```bash
+docker compose --profile turn up -d
+```
+
+Start Exchange + TURN:
+
+```bash
+docker compose --profile exchange --profile turn up -d --build
+```
+
 Check status:
 
 ```bash
 docker compose ps
 docker compose logs -f
+```
+
+Check TURN logs only:
+
+```bash
+docker compose logs -f coturn
 ```
 
 ## Configure name, token, and verify

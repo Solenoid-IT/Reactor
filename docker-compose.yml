@@ -1,4 +1,34 @@
 services:
+  coturn:
+    profiles: ["turn"]
+    image: coturn/coturn:latest
+    container_name: reactor-coturn
+    restart: unless-stopped
+    env_file:
+      - .env
+    command:
+      - -n
+      - --realm=${COTURN_REALM:-reactor.local}
+      - --lt-cred-mech
+      - --user=${COTURN_USER:-reactor}:${COTURN_PASSWORD:-reactor-turn-password}
+      - --fingerprint
+      - --no-cli
+      - --log-file=stdout
+      - --external-ip=${COTURN_EXTERNAL_IP:-}
+      - --listening-port=${COTURN_PORT:-3478}
+      - --tls-listening-port=${COTURN_TLS_PORT:-5349}
+      - --cert=${COTURN_TLS_CERT_PATH:-/var/lib/coturn/certs/cert.pem}
+      - --pkey=${COTURN_TLS_KEY_PATH:-/var/lib/coturn/certs/key.pem}
+      - --min-port=${COTURN_MIN_RELAY_PORT:-49160}
+      - --max-port=${COTURN_MAX_RELAY_PORT:-49200}
+    ports:
+      - "${COTURN_PORT:-3478}:${COTURN_PORT:-3478}/udp"
+      - "${COTURN_PORT:-3478}:${COTURN_PORT:-3478}/tcp"
+      - "${COTURN_TLS_PORT:-5349}:${COTURN_TLS_PORT:-5349}/tcp"
+      - "${COTURN_MIN_RELAY_PORT:-49160}-${COTURN_MAX_RELAY_PORT:-49200}:${COTURN_MIN_RELAY_PORT:-49160}-${COTURN_MAX_RELAY_PORT:-49200}/udp"
+    volumes:
+      - coturn-data:/var/lib/coturn
+
   reactor-exchange:
     profiles: ["exchange"]
     build:
@@ -53,6 +83,8 @@ services:
       start_period: 20s
 
 volumes:
+  coturn-data:
+    name: reactor-coturn-data
   reactor-exchange-data:
     name: reactor-exchange-data
   reactor-client-data:
