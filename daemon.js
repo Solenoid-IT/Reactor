@@ -330,33 +330,60 @@ async function main() {
 
 	// Carica la configurazione exchange (env vars hanno priorità > file > default)
 	async function loadExchangeConfig() {
+		const readEnvString = (name) => {
+			if (!Object.prototype.hasOwnProperty.call(process.env, name)) {
+				return null;
+			}
+			const value = String(process.env[name] || '').trim();
+			return value.length > 0 ? value : null;
+		};
+
+		const readEnvBool = (name) => {
+			if (!Object.prototype.hasOwnProperty.call(process.env, name)) {
+				return null;
+			}
+
+			const value = String(process.env[name] || '').trim().toLowerCase();
+			if (!value) {
+				return null;
+			}
+
+			if (['1', 'true', 'yes', 'on', 'enabled'].includes(value)) {
+				return true;
+			}
+			if (['0', 'false', 'no', 'off', 'disabled'].includes(value)) {
+				return false;
+			}
+
+			return null;
+		};
+
+		const readEnvPort = (name) => {
+			const value = readEnvString(name);
+			if (!value) {
+				return null;
+			}
+
+			const numericPort = Number(value);
+			if (!Number.isFinite(numericPort) || numericPort < 1 || numericPort > 65535) {
+				return null;
+			}
+
+			return numericPort;
+		};
+
+		const fileConfig = await readWorkingModeConfig(workingModeConfigPath);
 		const envWorkingMode = String(process.env.REACTOR_WORKING_MODE || '').trim().toLowerCase();
 		const normalizedWorkingMode = envWorkingMode === 'exchange' ? 'exchange' : envWorkingMode ? 'node' : '';
 
-		// Env vars hanno la priorità massima
-		if (normalizedWorkingMode) {
-			return {
-				mode: normalizedWorkingMode,
-				host: process.env.REACTOR_EXCHANGE_HOST || '',
-				port: Number(process.env.REACTOR_EXCHANGE_PORT) || 7070,
-				tls: process.env.REACTOR_EXCHANGE_TLS === '1' || process.env.REACTOR_EXCHANGE_TLS === 'true',
-				token: process.env.REACTOR_EXCHANGE_TOKEN || '',
-				discovery: process.env.REACTOR_EXCHANGE_DISCOVERY_ENDPOINT === '1' || process.env.REACTOR_EXCHANGE_DISCOVERY_ENDPOINT === 'true',
-			};
-		}
-		try {
-			const parsed = await readWorkingModeConfig(workingModeConfigPath);
-			return {
-				mode: String(parsed.type || 'node'),
-				host: String(parsed.host || ''),
-				port: Number(parsed.port) > 0 ? Number(parsed.port) : 7070,
-				tls: Boolean(parsed.tls),
-				token: String(parsed.token || ''),
-				discovery: Boolean(parsed.discovery),
-			};
-		} catch {
-			return { mode: 'node', host: '', port: 7070, tls: false, token: '', discovery: false };
-		}
+		return {
+			mode: normalizedWorkingMode || String(fileConfig.type || 'node'),
+			host: readEnvString('REACTOR_EXCHANGE_HOST') ?? String(fileConfig.host || ''),
+			port: readEnvPort('REACTOR_EXCHANGE_PORT') ?? (Number(fileConfig.port) > 0 ? Number(fileConfig.port) : 7070),
+			tls: readEnvBool('REACTOR_EXCHANGE_TLS') ?? Boolean(fileConfig.tls),
+			token: readEnvString('REACTOR_EXCHANGE_TOKEN') ?? String(fileConfig.token || ''),
+			discovery: readEnvBool('REACTOR_EXCHANGE_DISCOVERY_ENDPOINT') ?? Boolean(fileConfig.discovery),
+		};
 	}
 
 	async function saveExchangeConfig(mode, host, port, tls, token, discovery = false) {

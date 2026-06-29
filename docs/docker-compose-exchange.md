@@ -89,6 +89,21 @@ Verify Exchange config:
 docker compose exec reactor-exchange node daemonctl.js get-exchange
 ```
 
+Enable discovery endpoint:
+
+```bash
+docker compose exec -T reactor-exchange node daemonctl.js set-discovery on
+```
+
+Disable discovery endpoint:
+
+```bash
+docker compose exec -T reactor-exchange node daemonctl.js set-discovery off
+```
+
+Discovery state is persisted in `/data/working-mode.json`.
+Set `REACTOR_EXCHANGE_DISCOVERY_ENDPOINT=true|false` only if you want an explicit environment override at startup.
+
 If you run the client profile too, verify client config:
 
 ```bash

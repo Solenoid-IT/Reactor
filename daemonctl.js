@@ -142,25 +142,63 @@ async function sendCommand(payload) {
 	return new Promise((resolve, reject) => {
 		const client = net.createConnection(socketPath);
 		let output = '';
+		let settled = false;
+
+		const finish = (error, result) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			client.removeAllListeners('data');
+			client.removeAllListeners('end');
+			client.removeAllListeners('error');
+			client.removeAllListeners('timeout');
+			if (error) {
+				reject(error);
+				return;
+			}
+			resolve(result);
+		};
 
 		client.on('connect', () => {
 			client.end(`${JSON.stringify(payload)}\n`);
 		});
 
+		client.setTimeout(10000);
+
 		client.on('data', (chunk) => {
 			output += chunk.toString('utf8');
+			const newlineIndex = output.indexOf('\n');
+			if (newlineIndex !== -1) {
+				const firstLine = output.slice(0, newlineIndex).trim();
+				if (firstLine) {
+					try {
+						const parsed = JSON.parse(firstLine);
+						client.destroy();
+						finish(null, parsed);
+						return;
+					} catch {
+						// Fall through and wait for 'end' to parse full payload.
+					}
+				}
+			}
 		});
 
 		client.on('end', () => {
 			try {
-				resolve(JSON.parse(output || '{}'));
+				finish(null, JSON.parse(output || '{}'));
 			} catch (error) {
-				reject(new Error(`invalid daemon response: ${error.message}`));
+				finish(new Error(`invalid daemon response: ${error.message}`));
 			}
 		});
 
+		client.on('timeout', () => {
+			client.destroy();
+			finish(new Error(`daemon response timeout (${socketPath})`));
+		});
+
 		client.on('error', (error) => {
-			reject(new Error(`cannot connect to daemon socket (${socketPath}): ${error.message}`));
+			finish(new Error(`cannot connect to daemon socket (${socketPath}): ${error.message}`));
 		});
 	});
 }
