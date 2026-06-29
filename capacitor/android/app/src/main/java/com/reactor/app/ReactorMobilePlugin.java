@@ -52,6 +52,7 @@ public class ReactorMobilePlugin extends Plugin {
     private static final String TAG = "ReactorMobilePlugin";
     private static final String WORKING_MODE_FILE = "working-mode.json";
     private static final String REACTOR_NAME_FILE = "name";
+    private File pendingBackupExportFile = null;
 
     @Override
     public void load() {
@@ -1362,9 +1363,8 @@ public class ReactorMobilePlugin extends Plugin {
         try {
             writeUiSettingsSnapshot();
 
-            File backupsDir = getBackupsDir();
             String timestamp = String.valueOf(System.currentTimeMillis());
-            File target = new File(backupsDir, "reactor-backup-" + timestamp + ".zip");
+            File target = new File(getContext().getCacheDir(), "reactor-backup-" + timestamp + ".zip");
 
             try (ZipOutputStream output = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(target)))) {
                 for (File source : getBackupSourceEntries()) {
@@ -1380,12 +1380,85 @@ public class ReactorMobilePlugin extends Plugin {
                 output.closeEntry();
             }
 
+            pendingBackupExportFile = target;
+
+            Intent pickerIntent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            pickerIntent.addCategory(Intent.CATEGORY_OPENABLE);
+            pickerIntent.setType("application/zip");
+            pickerIntent.putExtra(Intent.EXTRA_TITLE, target.getName());
+            pickerIntent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            pickerIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            pickerIntent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            startActivityForResult(call, pickerIntent, "handleBackupExportPicker");
+        } catch (Exception e) {
+            if (pendingBackupExportFile != null && pendingBackupExportFile.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                pendingBackupExportFile.delete();
+            }
+            pendingBackupExportFile = null;
+            call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
+        }
+    }
+
+    @ActivityCallback
+    private void handleBackupExportPicker(PluginCall call, ActivityResult activityResult) {
+        if (call == null) {
+            cleanupPendingExportBackup();
+            return;
+        }
+
+        if (activityResult == null || activityResult.getResultCode() != Activity.RESULT_OK || activityResult.getData() == null) {
+            cleanupPendingExportBackup();
+            call.resolve(new JSObject().put("ok", false).put("canceled", true));
+            return;
+        }
+
+        Uri pickedUri = activityResult.getData().getData();
+        if (pickedUri == null) {
+            cleanupPendingExportBackup();
+            call.resolve(new JSObject().put("ok", false).put("error", "invalid export destination"));
+            return;
+        }
+
+        try {
+            getContext().getContentResolver().takePersistableUriPermission(
+                    pickedUri,
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION
+            );
+        } catch (Exception ignored) {
+            // Some providers don't support persisted permissions.
+        }
+
+        File exportFile = pendingBackupExportFile;
+        if (exportFile == null || !exportFile.exists() || !exportFile.isFile()) {
+            cleanupPendingExportBackup();
+            call.resolve(new JSObject().put("ok", false).put("error", "backup ZIP not found"));
+            return;
+        }
+
+        try (BufferedInputStream input = new BufferedInputStream(new FileInputStream(exportFile))) {
+            try (java.io.OutputStream output = getContext().getContentResolver().openOutputStream(pickedUri, "w")) {
+                if (output == null) {
+                    call.resolve(new JSObject().put("ok", false).put("error", "unable to open export destination"));
+                    return;
+                }
+
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, read);
+                }
+                output.flush();
+            }
+
             JSObject result = new JSObject();
             result.put("ok", true);
-            result.put("path", target.getAbsolutePath());
+            result.put("path", pickedUri.toString());
             call.resolve(result);
         } catch (Exception e) {
             call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
+        } finally {
+            cleanupPendingExportBackup();
         }
     }
 
@@ -1395,6 +1468,8 @@ public class ReactorMobilePlugin extends Plugin {
         pickerIntent.addCategory(Intent.CATEGORY_OPENABLE);
         pickerIntent.setType("*/*");
         pickerIntent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/zip", "application/x-zip-compressed"});
+        pickerIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        pickerIntent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         startActivityForResult(call, pickerIntent, "handleBackupImportPicker");
     }
 
@@ -1510,5 +1585,13 @@ public class ReactorMobilePlugin extends Plugin {
         } catch (Exception e) {
             return new JSObject().put("ok", false).put("error", e.getMessage());
         }
+    }
+
+    private void cleanupPendingExportBackup() {
+        if (pendingBackupExportFile != null && pendingBackupExportFile.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            pendingBackupExportFile.delete();
+        }
+        pendingBackupExportFile = null;
     }
 }
