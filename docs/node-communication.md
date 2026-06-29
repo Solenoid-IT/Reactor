@@ -16,8 +16,12 @@ There are also two network paths:
 
 Use `sendMessage()` when you need to send a single payload (text, JSON, binary) and process it as one logical message.
 
-`target` supports two logical forms in addition to direct host targets:
+`target` supports these forms:
 
+- `host`
+- `host:port`
+- `host/script_id`
+- `host:port/script_id`
 - `node_name`
 - `node_name/script_id`
 
@@ -29,6 +33,18 @@ When `script_id` is present, Reactor delivers the message only to the project wh
 import { Node } from 'core';
 
 export async function run() {
+	await Node.sendMessage('192.168.1.20:7070', {
+		type: 'status-update',
+		value: 42,
+		ts: Date.now(),
+	});
+
+	await Node.sendMessage('192.168.1.20:7070/550e8400-e29b-41d4-a716-446655440000', {
+		type: 'status-update',
+		value: 42,
+		ts: Date.now(),
+	});
+
 	await Node.sendMessage('target-node', {
 		type: 'status-update',
 		value: 42,
@@ -70,6 +86,17 @@ export async function run(ctx: Context) {
 
 Use `stream()` when you need chunked transfer (large files, long payloads, progressive delivery).
 
+`Node.stream(target, source, options)` supports the same target forms as `Node.sendMessage(target, content)`:
+
+- `host`
+- `host:port`
+- `host/script_id`
+- `host:port/script_id`
+- `node_name`
+- `node_name/script_id`
+
+When `script_id` is present, `STREAM` and the final `STREAMEND` are delivered only to the target project.
+
 ### Direct streaming (`Node.stream`)
 
 ```ts
@@ -86,6 +113,18 @@ export async function run() {
 		chunkSize: 64 * 1024,
 		contentType: 'application/octet-stream',
 		metadata: { fileName: 'demo.bin' },
+	});
+
+	await Node.stream('192.168.1.20:7070/550e8400-e29b-41d4-a716-446655440000', chunks, {
+		chunkSize: 64 * 1024,
+		contentType: 'application/octet-stream',
+		metadata: { fileName: 'demo-targeted.bin' },
+	});
+
+	await Node.stream('target-node/550e8400-e29b-41d4-a716-446655440000', chunks, {
+		chunkSize: 64 * 1024,
+		contentType: 'application/octet-stream',
+		metadata: { fileName: 'demo-targeted-exchange.bin' },
 	});
 }
 ```
@@ -122,6 +161,7 @@ export async function run(ctx: Context) {
 	if (!stream) return;
 
 	const streamId = stream.getId();
+	await log(`target node=${ctx.messageTargetNode || 'n/a'} script=${ctx.messageTargetScriptId || 'broadcast'}`);
 
 	if (stream.isStart()) {
 		buffersByStreamId.set(streamId, []);
@@ -159,6 +199,8 @@ import { log } from 'core';
 export async function run(ctx: Context) {
 	const end = ctx.streamEnd;
 	if (!end) return;
+
+	await log(`target node=${ctx.messageTargetNode || 'n/a'} script=${ctx.messageTargetScriptId || 'broadcast'}`);
 
 	if (!end.isValid()) {
 		await log(`STREAMEND invalid id=${end.getId()} error=${end.getError()}`);

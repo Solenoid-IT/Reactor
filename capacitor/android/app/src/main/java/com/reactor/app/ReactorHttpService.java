@@ -172,6 +172,7 @@ public class ReactorHttpService extends Service {
         File scriptFile;
         String scriptName;
         String scriptPath;
+        String scriptId;
         String scriptState;
         String source;
         boolean enabled;
@@ -193,6 +194,14 @@ public class ReactorHttpService extends Service {
         String streamId;
         int index;
         int size;
+    }
+
+    private static class ParsedTarget {
+        String originalTarget;
+        String baseTarget;
+        String nodeName;
+        String scriptId;
+        boolean directAddress;
     }
 
     public static boolean isRunning() {
@@ -976,6 +985,7 @@ public class ReactorHttpService extends Service {
 
                 String senderName = headers.getOrDefault("reactor-name", "");
                 String senderId = headers.getOrDefault("reactor-sender", "");
+                String targetScriptId = headers.getOrDefault("reactor-target-script-id", "").trim().toLowerCase(Locale.ROOT);
                 String remoteHost = client.getInetAddress() != null ? String.valueOf(client.getInetAddress().getHostAddress()) : "";
 
                 JSONObject entry = new JSONObject();
@@ -1010,6 +1020,9 @@ public class ReactorHttpService extends Service {
                     if (!matchesEventSender(script, senderCandidates, primaryEvent)) {
                         continue;
                     }
+                    if (!matchesTargetScript(script, targetScriptId)) {
+                        continue;
+                    }
 
                     try {
                         writeExecutionStart(script, primaryEvent, primaryEvent);
@@ -1025,6 +1038,9 @@ public class ReactorHttpService extends Service {
                     Map<String, String> streamEndHeaders = withStreamHeaders(headers, streamPayload, "STREAMEND");
                     for (MessageScript script : listeners) {
                         if (!matchesEventSender(script, senderCandidates, "STREAMEND")) {
+                            continue;
+                        }
+                        if (!matchesTargetScript(script, targetScriptId)) {
                             continue;
                         }
 
@@ -1118,6 +1134,58 @@ public class ReactorHttpService extends Service {
         }
 
         return null;
+    }
+
+    private String readProjectScriptId(File projectDir) {
+        try {
+            File uuidFile = new File(projectDir, "uuid");
+            if (!uuidFile.exists()) {
+                return null;
+            }
+
+            String value = readTextFile(uuidFile).trim().toLowerCase(Locale.ROOT);
+            return isUuidV4(value) ? value : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private boolean isUuidV4(String value) {
+        return String.valueOf(value).trim().toLowerCase(Locale.ROOT)
+                .matches("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$");
+    }
+
+    private ParsedTarget parseTarget(String rawTarget) {
+        String trimmed = String.valueOf(rawTarget).trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+
+        ParsedTarget parsed = new ParsedTarget();
+        parsed.originalTarget = trimmed;
+
+        int slashIndex = trimmed.indexOf('/');
+        if (slashIndex < 0) {
+            parsed.baseTarget = trimmed;
+            parsed.nodeName = trimmed.toLowerCase(Locale.ROOT);
+            parsed.scriptId = null;
+        } else {
+            String baseTarget = trimmed.substring(0, slashIndex).trim();
+            String scriptId = trimmed.substring(slashIndex + 1).trim().toLowerCase(Locale.ROOT);
+            if (baseTarget.isEmpty() || !isUuidV4(scriptId)) {
+                return null;
+            }
+            parsed.baseTarget = baseTarget;
+            parsed.nodeName = baseTarget.toLowerCase(Locale.ROOT);
+            parsed.scriptId = scriptId;
+        }
+
+        String loweredBase = String.valueOf(parsed.baseTarget).trim().toLowerCase(Locale.ROOT);
+        parsed.directAddress = loweredBase.matches("^[^:]+:[0-9]{1,5}$")
+                || loweredBase.matches("^\\d+\\.\\d+\\.\\d+\\.\\d+$")
+                || loweredBase.contains(".");
+
+        return parsed;
     }
 
     private MessageScript parseMessageScript(File scriptFile, String projectName) {
@@ -1247,6 +1315,7 @@ public class ReactorHttpService extends Service {
             script.scriptFile = scriptFile;
             script.scriptName = projectName;
             script.scriptPath = scriptFile.getAbsolutePath();
+            script.scriptId = readProjectScriptId(scriptFile.getParentFile());
             script.scriptState = state;
             script.source = source;
             script.enabled = enabled;
@@ -1423,6 +1492,15 @@ public class ReactorHttpService extends Service {
         return false;
     }
 
+    private boolean matchesTargetScript(MessageScript script, String targetScriptId) {
+        String safeTargetScriptId = String.valueOf(targetScriptId).trim().toLowerCase(Locale.ROOT);
+        if (safeTargetScriptId.isEmpty()) {
+            return true;
+        }
+
+        return safeTargetScriptId.equals(String.valueOf(script.scriptId).trim().toLowerCase(Locale.ROOT));
+    }
+
     private JSONObject tryParseJsonObject(String value) {
         String raw = String.valueOf(value);
         if (raw.trim().isEmpty()) {
@@ -1464,6 +1542,11 @@ public class ReactorHttpService extends Service {
         }
         if (!contentType.isEmpty()) {
             headers.put("x-reactor-stream-content-type", contentType);
+        }
+
+        String targetScriptId = headers.getOrDefault("reactor-target-script-id", "").trim().toLowerCase(Locale.ROOT);
+        if (!targetScriptId.isEmpty()) {
+            headers.put("reactor-target-script-id", targetScriptId);
         }
 
         if (streamPayload.has("index")) {
@@ -1764,6 +1847,25 @@ public class ReactorHttpService extends Service {
             throw new RuntimeException("stream source file not found: " + filePath);
         }
 
+        ParsedTarget parsedTarget = parseTarget(target);
+        if (parsedTarget == null) {
+            throw new RuntimeException("invalid target");
+        }
+
+        if (!parsedTarget.directAddress) {
+            streamFileToExchange(target, filePath);
+            return;
+        }
+
+        Map<String, String> effectiveHeaders = new HashMap<>();
+        if (extraHeaders != null) {
+            effectiveHeaders.putAll(extraHeaders);
+        }
+        if (parsedTarget.scriptId != null && !parsedTarget.scriptId.isEmpty()) {
+            effectiveHeaders.put("Reactor-Target-Node", String.valueOf(parsedTarget.baseTarget).trim().toLowerCase(Locale.ROOT));
+            effectiveHeaders.put("Reactor-Target-Script-Id", parsedTarget.scriptId);
+        }
+
         String streamId = UUID.randomUUID().toString();
         String contentType = "application/octet-stream";
         long totalBytes = file.length();
@@ -1775,7 +1877,7 @@ public class ReactorHttpService extends Service {
         start.put("contentType", contentType);
         start.put("chunkSize", DEFAULT_STREAM_CHUNK_SIZE);
         start.put("totalBytes", totalBytes);
-        sendNodeMessageWithContentType(target, start.toString(), "application/json; charset=utf-8", extraHeaders);
+        sendNodeMessageWithContentType(parsedTarget.baseTarget, start.toString(), "application/json; charset=utf-8", effectiveHeaders);
 
         MessageDigest digest;
         try {
@@ -1803,7 +1905,7 @@ public class ReactorHttpService extends Service {
                 packet.put("size", bytes.length);
                 packet.put("data", Base64.encodeToString(bytes, Base64.NO_WRAP));
 
-                sendNodeMessageWithContentType(target, packet.toString(), "application/json; charset=utf-8", extraHeaders);
+                sendNodeMessageWithContentType(parsedTarget.baseTarget, packet.toString(), "application/json; charset=utf-8", effectiveHeaders);
                 index += 1;
             }
         } catch (IOException error) {
@@ -1817,7 +1919,7 @@ public class ReactorHttpService extends Service {
         end.put("chunks", index);
         end.put("totalBytes", sentBytes);
         end.put("digestSha256", bytesToHex(digest.digest()));
-        sendNodeMessageWithContentType(target, end.toString(), "application/json; charset=utf-8", extraHeaders);
+        sendNodeMessageWithContentType(parsedTarget.baseTarget, end.toString(), "application/json; charset=utf-8", effectiveHeaders);
     }
 
     private void streamFileToExchange(String target, String filePath) {
@@ -1826,8 +1928,8 @@ public class ReactorHttpService extends Service {
             throw new RuntimeException("stream source file not found: " + filePath);
         }
 
-        String normalizedTarget = String.valueOf(target).trim().toLowerCase(Locale.ROOT);
-        if (normalizedTarget.isEmpty()) {
+        ParsedTarget parsedTarget = parseTarget(target);
+        if (parsedTarget == null || parsedTarget.baseTarget == null || parsedTarget.baseTarget.trim().isEmpty()) {
             throw new RuntimeException("invalid exchange target");
         }
 
@@ -1842,7 +1944,7 @@ public class ReactorHttpService extends Service {
         start.put("contentType", contentType);
         start.put("chunkSize", DEFAULT_STREAM_CHUNK_SIZE);
         start.put("totalBytes", totalBytes);
-        sendExchangeMessageNow(normalizedTarget, start.toString(), "application/json");
+        sendExchangeMessageNow(parsedTarget.originalTarget, start.toString(), "application/json");
 
         MessageDigest digest;
         try {
@@ -1869,7 +1971,7 @@ public class ReactorHttpService extends Service {
                 packet.put("encoding", "base64");
                 packet.put("size", bytes.length);
                 packet.put("data", Base64.encodeToString(bytes, Base64.NO_WRAP));
-                sendExchangeMessageNow(normalizedTarget, packet.toString(), "application/json");
+                sendExchangeMessageNow(parsedTarget.originalTarget, packet.toString(), "application/json");
                 index += 1;
             }
         } catch (IOException error) {
@@ -1883,7 +1985,7 @@ public class ReactorHttpService extends Service {
         end.put("chunks", index);
         end.put("totalBytes", sentBytes);
         end.put("digestSha256", bytesToHex(digest.digest()));
-        sendExchangeMessageNow(normalizedTarget, end.toString(), "application/json");
+        sendExchangeMessageNow(parsedTarget.originalTarget, end.toString(), "application/json");
     }
 
     private String bytesToHex(byte[] bytes) {
@@ -2253,9 +2355,17 @@ public class ReactorHttpService extends Service {
             throw new RuntimeException("exchange client not connected");
         }
 
+        ParsedTarget parsedTarget = parseTarget(target);
+        if (parsedTarget == null || parsedTarget.baseTarget == null || parsedTarget.baseTarget.trim().isEmpty()) {
+            throw new RuntimeException("invalid exchange target");
+        }
+
         JSONObject packet = new JSONObject();
         packet.put("type", "message");
-        packet.put("to", String.valueOf(target).toLowerCase(Locale.ROOT));
+        packet.put("to", String.valueOf(parsedTarget.baseTarget).toLowerCase(Locale.ROOT));
+        if (parsedTarget.scriptId != null && !parsedTarget.scriptId.isEmpty()) {
+            packet.put("targetScriptId", parsedTarget.scriptId);
+        }
         packet.put("content", String.valueOf(content));
         packet.put("contentType", String.valueOf(contentType));
         if (!wsExchangeClientSocket.send(packet.toString())) {

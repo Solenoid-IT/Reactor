@@ -90,6 +90,32 @@ function parseLogicalNodeTarget(rawTarget) {
 	};
 }
 
+function parseScriptScopedTarget(rawTarget) {
+	const trimmed = String(rawTarget || '').trim();
+	if (!trimmed || trimmed.includes('://')) {
+		return null;
+	}
+
+	const slashIndex = trimmed.indexOf('/');
+	if (slashIndex === -1) {
+		return null;
+	}
+
+	const baseTarget = trimmed.slice(0, slashIndex).trim();
+	const scriptId = trimmed.slice(slashIndex + 1).trim().toLowerCase();
+	if (!baseTarget || !isUuidV4(scriptId)) {
+		return null;
+	}
+
+	const isDirectAddress = baseTarget.includes(':') || /^\d+\.\d+\.\d+\.\d+$/.test(baseTarget) || baseTarget.includes('.');
+	return {
+		baseTarget,
+		scriptId,
+		isDirectAddress,
+		rawTarget: trimmed,
+	};
+}
+
 function detectWatchType(eventType, fullPath, knownEntries) {
 	let currentKind = null;
 	try {
@@ -905,6 +931,24 @@ class ReactorRuntime {
 			.filter((script) => String(script?.scriptId || '').trim().toLowerCase() === targetScriptId);
 	}
 
+	filterStreamListenersByTarget(listeners, targetScriptId = null) {
+		if (!targetScriptId) {
+			return Array.isArray(listeners) ? listeners : [];
+		}
+
+		return (Array.isArray(listeners) ? listeners : [])
+			.filter((script) => String(script?.scriptId || '').trim().toLowerCase() === targetScriptId);
+	}
+
+	filterStreamEndListenersByTarget(listeners, targetScriptId = null) {
+		if (!targetScriptId) {
+			return Array.isArray(listeners) ? listeners : [];
+		}
+
+		return (Array.isArray(listeners) ? listeners : [])
+			.filter((script) => String(script?.scriptId || '').trim().toLowerCase() === targetScriptId);
+	}
+
 	registerScriptStreamListeners(script) {
 		if (!script.enabled || !Array.isArray(script.events) || !script.events.includes('STREAM')) {
 			return;
@@ -1146,7 +1190,11 @@ class ReactorRuntime {
 			return [];
 		}
 
-		const listeners = this.findStreamEndListeners(senderMeta?.candidates || streamEndData.senderCandidates || []);
+		const messageTarget = this.resolveMessageTarget(messageHeaders || {});
+		const listeners = this.filterStreamEndListenersByTarget(
+			this.findStreamEndListeners(senderMeta?.candidates || streamEndData.senderCandidates || []),
+			messageTarget.scriptId,
+		);
 		if (listeners.length === 0) {
 			return [];
 		}
@@ -1159,6 +1207,9 @@ class ReactorRuntime {
 					event: 'STREAMEND',
 					messageSender: senderMeta?.rawSender || senderMeta?.remoteHost || streamEndData.sender || null,
 					messageSenderName: senderMeta?.rawName || null,
+					messageTarget: messageTarget.nodeName || null,
+					messageTargetNode: messageTarget.nodeName || null,
+					messageTargetScriptId: messageTarget.scriptId || null,
 					messageHeaders,
 					stream: null,
 					streamEnd: streamEndInfo,
@@ -1251,21 +1302,39 @@ class ReactorRuntime {
 			throw new Error('invalid target. expected host or host:port');
 		}
 
+		const scriptScopedTarget = parseScriptScopedTarget(targetId);
+		if (scriptScopedTarget && !scriptScopedTarget.isDirectAddress) {
+			return this.sendExchangeMessage(targetId, content, dispatchOptions);
+		}
+
+		const effectiveTarget = scriptScopedTarget && scriptScopedTarget.isDirectAddress
+			? scriptScopedTarget.baseTarget
+			: targetId;
+		const effectiveHeaders = {
+			...(extraHeaders || {}),
+			...(scriptScopedTarget && scriptScopedTarget.isDirectAddress
+				? {
+					'Reactor-Target-Node': String(scriptScopedTarget.baseTarget || '').trim().toLowerCase(),
+					'Reactor-Target-Script-Id': scriptScopedTarget.scriptId,
+				}
+				: {}),
+		};
+
 		const logicalTarget = parseLogicalNodeTarget(targetId);
 		if (logicalTarget) {
 			return this.sendExchangeMessage(targetId, content, dispatchOptions);
 		}
 
 		let hasExplicitPort = false;
-		if (/^https?:\/\//i.test(targetId)) {
+		if (/^https?:\/\//i.test(effectiveTarget)) {
 			try {
-				const parsedTarget = new URL(targetId);
+				const parsedTarget = new URL(effectiveTarget);
 				hasExplicitPort = Boolean(parsedTarget.port);
 			} catch {
 				hasExplicitPort = false;
 			}
 		} else {
-			hasExplicitPort = /^([^:]+):(\d{1,5})$/.test(targetId);
+			hasExplicitPort = /^([^:]+):(\d{1,5})$/.test(effectiveTarget);
 		}
 
 		const preferredPorts = hasExplicitPort
@@ -1273,8 +1342,8 @@ class ReactorRuntime {
 			: Array.from(new Set([this.httpServerPort, 7070].filter((port) => Number.isInteger(port) && port > 0)));
 
 		const normalizedTargets = hasExplicitPort
-			? [normalizeHostPort(targetId, this.httpServerPort)].filter(Boolean)
-			: preferredPorts.map((port) => normalizeHostPort(targetId, port)).filter(Boolean);
+			? [normalizeHostPort(effectiveTarget, this.httpServerPort)].filter(Boolean)
+			: preferredPorts.map((port) => normalizeHostPort(effectiveTarget, port)).filter(Boolean);
 
 		if (normalizedTargets.length === 0) {
 			throw new Error('invalid target. expected host or host:port');
@@ -1308,9 +1377,9 @@ class ReactorRuntime {
 			// Se TLS abilitato localmente, tenta prima HTTPS (cert self-signed → rejectUnauthorized: false)
 			if (this.tlsEnabled) {
 				try {
-					const result = await this._sendHttpsMessage(host, port, payload, contentType, reactorName, senderId, extraHeaders, shortTimeout || 3000);
+					const result = await this._sendHttpsMessage(host, port, payload, contentType, reactorName, senderId, effectiveHeaders, shortTimeout || 3000);
 					return {
-						target: normalizedTarget,
+						target: targetId,
 						endpoint: `https://${host}:${port}/message`,
 						...result,
 					};
@@ -1327,7 +1396,7 @@ class ReactorRuntime {
 					'content-type': contentType,
 					'Reactor-Name': reactorName || '',
 					'Reactor-Sender': senderId,
-					...extraHeaders,
+					...effectiveHeaders,
 				},
 				body: payload,
 			});
@@ -1335,7 +1404,7 @@ class ReactorRuntime {
 			try {
 				const response = await this.runtimeApi.HttpClient.sendRequest(request, shortTimeout);
 				return {
-					target: normalizedTarget,
+					target: targetId,
 					endpoint,
 					status: response.status,
 					headers: response.headers,
@@ -1355,7 +1424,7 @@ class ReactorRuntime {
 			const queueResult = await this.enqueueMessageForRetry({
 				channel: 'direct',
 				target: targetId,
-				headers: extraHeaders || {},
+				headers: effectiveHeaders,
 				payloadType: serialized.payloadType,
 				payload: serialized.payload,
 			});
@@ -1378,7 +1447,7 @@ class ReactorRuntime {
 		const queueResult = await this.enqueueMessageForRetry({
 			channel: 'direct',
 			target: targetId,
-			headers: extraHeaders || {},
+			headers: effectiveHeaders,
 			payloadType: serialized.payloadType,
 			payload: serialized.payload,
 		});
@@ -1698,7 +1767,7 @@ class ReactorRuntime {
 			const messageTarget = this.resolveMessageTarget(req.headers || {});
 			const isStreamEnvelope = Boolean(body.json && typeof body.json === 'object' && body.json.__reactorStream === true);
 			const listeners = isStreamEnvelope
-				? this.findStreamListeners(senderMeta.candidates)
+				? this.filterStreamListenersByTarget(this.findStreamListeners(senderMeta.candidates), messageTarget.scriptId)
 				: this.filterMessageListenersByTarget(this.findMessageListeners(senderMeta.candidates), messageTarget.scriptId);
 
 			this.addHttpServerLog(

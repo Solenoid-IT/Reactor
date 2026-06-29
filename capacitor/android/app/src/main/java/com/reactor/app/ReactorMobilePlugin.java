@@ -1,6 +1,8 @@
 package com.reactor.app;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -1055,6 +1057,42 @@ public class ReactorMobilePlugin extends Plugin {
         config.put("active", ReactorHttpService.isRunning());
         config.put("reactorName", getConfiguredReactorName());
         call.resolve(new JSObject().put("ok", true).put("config", config));
+    }
+
+    @PluginMethod
+    public void stopBackgroundProcess(PluginCall call) {
+        try {
+            ReactorServiceWatchdogWorker.cancel(getContext());
+            stopHttpService();
+            call.resolve(new JSObject()
+                    .put("ok", true)
+                    .put("platform", "android")
+                    .put("stopped", true));
+        } catch (Exception e) {
+            call.resolve(new JSObject()
+                    .put("ok", false)
+                    .put("error", e.getMessage() != null ? e.getMessage() : "unable to stop background process"));
+        }
+    }
+
+    @PluginMethod
+    public void copyTextToClipboard(PluginCall call) {
+        String text = call.getString("text", "");
+        try {
+            ClipboardManager clipboard = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+            if (clipboard == null) {
+                call.resolve(new JSObject().put("ok", false).put("error", "clipboard unavailable"));
+                return;
+            }
+
+            ClipData clip = ClipData.newPlainText("Reactor", text != null ? text : "");
+            clipboard.setPrimaryClip(clip);
+            call.resolve(new JSObject().put("ok", true).put("copied", true));
+        } catch (Exception e) {
+            call.resolve(new JSObject()
+                    .put("ok", false)
+                    .put("error", e.getMessage() != null ? e.getMessage() : "unable to copy text"));
+        }
     }
 
     @PluginMethod

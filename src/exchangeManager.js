@@ -874,7 +874,10 @@ class ExchangeManager {
 		}
 		const isStreamEnvelope = Boolean(messageJson && typeof messageJson === 'object' && messageJson.__reactorStream === true);
 		if (isStreamEnvelope) {
-			this._handleIncomingStreamEnvelope(from, messageJson, content, contentType);
+			this._handleIncomingStreamEnvelope(from, messageJson, content, contentType, {
+				nodeName: String(packet.to || '').trim().toLowerCase() || null,
+				scriptId: String(packet.targetScriptId || '').trim().toLowerCase() || null,
+			});
 			return;
 		}
 
@@ -907,16 +910,21 @@ class ExchangeManager {
 		).catch(() => {});
 	}
 
-	_handleIncomingStreamEnvelope(from, streamEnvelope, rawContent = '', contentType = 'application/json') {
+	_handleIncomingStreamEnvelope(from, streamEnvelope, rawContent = '', contentType = 'application/json', targetMeta = {}) {
 		const senderMeta = {
 			rawName: from,
 			rawSender: from,
 			remoteHost: from,
 			candidates: [from.toLowerCase()],
 		};
+		const targetScriptId = String(targetMeta.scriptId || '').trim().toLowerCase() || null;
+		const targetNode = String(targetMeta.nodeName || '').trim().toLowerCase() || null;
 
 		this.runtime.log(`[Exchange] Message from: ${from}`);
-		const listeners = this.runtime.findStreamListeners(senderMeta.candidates);
+		const listeners = this.runtime.filterStreamListenersByTarget(
+			this.runtime.findStreamListeners(senderMeta.candidates),
+			targetScriptId,
+		);
 		const streamPacket = this.runtime && this.runtime.createIncomingStreamPacket
 			? this.runtime.createIncomingStreamPacket(streamEnvelope)
 			: null;
@@ -937,19 +945,30 @@ class ExchangeManager {
 							event: 'STREAM',
 							messageSender: from,
 							messageSenderName: from,
+							messageTarget: targetNode,
+							messageTargetNode: targetNode,
+							messageTargetScriptId: targetScriptId,
 							messageContent: safeRawContent,
 							messageContentType: contentType,
 							messageBodyBase64: safeMessageBodyBase64,
 							messageJson: streamEnvelope,
 							stream: streamPacket,
 							streamEnd: null,
-							messageHeaders: { 'x-exchange-from': from },
+							messageHeaders: {
+								'x-exchange-from': from,
+								'Reactor-Target-Node': targetNode || '',
+								'Reactor-Target-Script-Id': targetScriptId || '',
+							},
 						}),
 					),
 				);
 
 				if (streamEndData && this.runtime && typeof this.runtime.emitStreamEnd === 'function') {
-					await this.runtime.emitStreamEnd(streamEndData, senderMeta, { 'x-exchange-from': from });
+						await this.runtime.emitStreamEnd(streamEndData, senderMeta, {
+							'x-exchange-from': from,
+							'Reactor-Target-Node': targetNode || '',
+							'Reactor-Target-Script-Id': targetScriptId || '',
+						});
 				}
 			})
 			.catch(() => {});

@@ -9,9 +9,9 @@
 	import {
 		getScriptsInfo,
 		getUiSettings,
+		copyTextToClipboard,
 		stopBackgroundProcess,
 		openScriptsFolder,
-		openScriptFile,
 		readScriptContent,
 		saveScriptContent,
 		pickDefaultProgram,
@@ -213,15 +213,6 @@
 		status = result?.ok ? `Script created (${scriptName || templateKey})` : `Error: ${result?.error || 'unknown'}`;
 		await refreshAll();
 		await refreshAll();
-	}
-
-	async function openScript(index) {
-		const script = scripts[index];
-		if (!script) {
-			return;
-		}
-		const result = await openScriptFile(script.path);
-		status = result?.ok ? `Script opened: ${script.name}` : `Error: ${result?.error || 'unknown'}`;
 	}
 
 	async function editScript(index) {
@@ -509,6 +500,12 @@
 			// Fallback below.
 		}
 
+		const nativeCopyResult = await copyTextToClipboard(scriptId);
+		if (nativeCopyResult?.ok) {
+			status = `Copied ID: ${script.name}`;
+			return;
+		}
+
 		if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
 			window.prompt(`Copy script ID for ${script.name}`, scriptId);
 			status = `Script ID ready to copy: ${script.name}`;
@@ -665,8 +662,7 @@
 				scripts={scripts}
 				selectedIndex={selectedIndex}
 				onSelect={(index) => (selectedIndex = index)}
-				onOpen={openScript}
-				onQuickOpen={editScript}
+				onOpen={editScript}
 				onQuickOpenHover={preloadCodeEditor}
 				onRename={renameScript}
 				onDelete={deleteScript}

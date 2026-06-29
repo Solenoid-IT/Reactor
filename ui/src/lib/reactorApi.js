@@ -98,6 +98,31 @@ export async function stopBackgroundProcess() {
 		return bridge.stopBackgroundProcess();
 	}
 
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.stopBackgroundProcess) {
+		return mobile.stopBackgroundProcess();
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'stopBackgroundProcess');
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function copyTextToClipboard(text) {
+	const safeText = String(text ?? '');
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.copyTextToClipboard) {
+		return mobile.copyTextToClipboard({ text: safeText });
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'copyTextToClipboard', { text: safeText });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
 	return { ok: false, error: 'bridge unavailable' };
 }
 

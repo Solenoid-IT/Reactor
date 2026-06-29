@@ -56,4 +56,8 @@ public class ReactorServiceWatchdogWorker extends Worker {
         WorkManager.getInstance(context)
                 .enqueueUniquePeriodicWork(UNIQUE_WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request);
     }
+
+    public static void cancel(Context context) {
+        WorkManager.getInstance(context).cancelUniqueWork(UNIQUE_WORK_NAME);
+    }
 }
