@@ -779,6 +779,7 @@
 			onSaveMessageQueueTtlDays={saveMessageQueueTtlDaysHandler}
 			onFlushMessageQueue={flushMessageQueueHandler}
 			onClearMessageQueue={clearMessageQueueHandler}
+			onCopyText={(text) => copyTextToClipboard(text)}
 		/>
 	</Modal>
 

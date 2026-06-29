@@ -39,6 +39,7 @@
 	export let onSaveMessageQueueTtlDays = () => {};
 	export let onFlushMessageQueue = () => {};
 	export let onClearMessageQueue = () => {};
+	export let onCopyText = async () => ({ ok: false, error: 'copy handler unavailable' });
 
 	let expandedNodeNames = new Set();
 	let copiedScriptUuid = '';
@@ -85,6 +86,16 @@
 		try {
 			if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
 				await navigator.clipboard.writeText(safeUuid);
+				showCopiedFeedback(safeUuid);
+				return;
+			}
+		} catch {
+			// Fallback below.
+		}
+
+		try {
+			const result = await onCopyText(safeUuid);
+			if (result && result.ok) {
 				showCopiedFeedback(safeUuid);
 				return;
 			}
