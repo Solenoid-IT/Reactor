@@ -45,24 +45,43 @@
 	let copiedScriptUuid = '';
 	let copiedScriptTimer = null;
 
-	function toggleNodeScripts(nodeName) {
-		const safeName = String(nodeName || '').trim().toLowerCase();
-		if (!safeName) {
+	function getNodeExpandKey(node) {
+		const byName = String(node?.name || '').trim().toLowerCase();
+		if (byName) {
+			return `name:${byName}`;
+		}
+
+		const byAddress = String(node?.address || '').trim().toLowerCase();
+		if (byAddress) {
+			return `address:${byAddress}`;
+		}
+
+		const byIpPort = `${String(node?.ip || '').trim().toLowerCase()}:${Number(node?.port) || ''}`.replace(/:$/, '');
+		if (byIpPort && byIpPort !== ':') {
+			return `ip:${byIpPort}`;
+		}
+
+		return '';
+	}
+
+	function toggleNodeScripts(node) {
+		const nodeKey = getNodeExpandKey(node);
+		if (!nodeKey) {
 			return;
 		}
 
 		const next = new Set(expandedNodeNames);
-		if (next.has(safeName)) {
-			next.delete(safeName);
+		if (next.has(nodeKey)) {
+			next.delete(nodeKey);
 		} else {
-			next.add(safeName);
+			next.add(nodeKey);
 		}
 		expandedNodeNames = next;
 	}
 
-	function isNodeExpanded(nodeName) {
-		const safeName = String(nodeName || '').trim().toLowerCase();
-		return safeName ? expandedNodeNames.has(safeName) : false;
+	function isNodeExpanded(node) {
+		const nodeKey = getNodeExpandKey(node);
+		return nodeKey ? expandedNodeNames.has(nodeKey) : false;
 	}
 
 	function showCopiedFeedback(scriptUuid) {
@@ -291,17 +310,17 @@
 											<button
 												type="button"
 												class="btn-secondary"
-												on:click={() => toggleNodeScripts(node.name)}
+												on:click={() => toggleNodeScripts(node)}
 												style="padding:2px 6px; font-size:0.92em;"
 											>
 												<strong>{node.name || 'unknown'}</strong>
 												{node.ip ? ` (${node.ip}${node.port ? `:${node.port}` : ''})` : ''}
-												<span style="opacity:0.7; margin-left:6px;">{isNodeExpanded(node.name) ? '[-]' : '[+]'}</span>
+												<span style="opacity:0.7; margin-left:6px;">{isNodeExpanded(node) ? '[-]' : '[+]'}</span>
 											</button>
 										</div>
 										<div style="opacity:0.7;">Connected: {node.connectedAt || '-'}</div>
 										<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
-										{#if isNodeExpanded(node.name)}
+										{#if isNodeExpanded(node)}
 											{#if Array.isArray(node.scripts) && node.scripts.length > 0}
 												<div style="margin-top:6px; padding-left:8px; border-left:2px solid rgba(255,255,255,0.14);">
 													{#each node.scripts as script}
@@ -402,17 +421,17 @@
 												<button
 													type="button"
 													class="btn-secondary"
-													on:click={() => toggleNodeScripts(node.name)}
+													on:click={() => toggleNodeScripts(node)}
 													style="padding:2px 6px; font-size:0.92em;"
 												>
 													<strong>{node.name || 'unknown'}</strong>
 													{node.ip ? ` (${node.ip}${node.port ? `:${node.port}` : ''})` : ''}
-													<span style="opacity:0.7; margin-left:6px;">{isNodeExpanded(node.name) ? '[-]' : '[+]'}</span>
+													<span style="opacity:0.7; margin-left:6px;">{isNodeExpanded(node) ? '[-]' : '[+]'}</span>
 												</button>
 											</div>
 											<div style="opacity:0.7;">Connected: {node.connectedAt || '-'}</div>
 											<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
-											{#if isNodeExpanded(node.name)}
+											{#if isNodeExpanded(node)}
 												{#if Array.isArray(node.scripts) && node.scripts.length > 0}
 													<div style="margin-top:6px; padding-left:8px; border-left:2px solid rgba(255,255,255,0.14);">
 														{#each node.scripts as script}
