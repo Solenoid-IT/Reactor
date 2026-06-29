@@ -7,6 +7,7 @@ const {
 	PowerAdapter,
 	PositionAdapter,
 	OSAdapter,
+	NotifyAdapter,
 	ProcessAdapter,
 } = require('./runtimeApiContracts');
 
@@ -270,6 +271,49 @@ class AndroidOS extends OSAdapter {
 	}
 }
 
+class AndroidNotify extends NotifyAdapter {
+	async notify(message) {
+		const text = String(message || '').trim();
+		if (!text) {
+			return false;
+		}
+
+		const plugins = getCapacitorPlugins();
+		if (!plugins || !plugins.LocalNotifications || typeof plugins.LocalNotifications.schedule !== 'function') {
+			return false;
+		}
+
+		try {
+			if (typeof plugins.LocalNotifications.checkPermissions === 'function') {
+				const status = await plugins.LocalNotifications.checkPermissions();
+				const display = String(status && status.display ? status.display : '').toLowerCase();
+				if (display !== 'granted' && typeof plugins.LocalNotifications.requestPermissions === 'function') {
+					const requested = await plugins.LocalNotifications.requestPermissions();
+					const requestedDisplay = String(requested && requested.display ? requested.display : '').toLowerCase();
+					if (requestedDisplay !== 'granted') {
+						return false;
+					}
+				}
+			}
+
+			await plugins.LocalNotifications.schedule({
+				notifications: [
+					{
+						title: 'Reactor',
+						body: text,
+						id: Date.now() % 2147483647,
+					},
+				],
+			});
+			return true;
+		} catch {
+			return false;
+		}
+
+		return false;
+	}
+}
+
 class AndroidProcess extends ProcessAdapter {
 	constructor(command) {
 		super(command);
@@ -331,6 +375,7 @@ function createAndroidRuntimeApi() {
 			Power: AndroidPower,
 			Position: AndroidPosition,
 			OS: AndroidOS,
+			notify: async (message) => new AndroidNotify().notify(message),
 		},
 		System: {
 			Process: AndroidProcess,
@@ -348,5 +393,6 @@ module.exports = {
 	AndroidPower,
 	AndroidPosition,
 	AndroidOS,
+	AndroidNotify,
 	AndroidProcess,
 };

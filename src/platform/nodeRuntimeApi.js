@@ -12,6 +12,7 @@ const {
 	PowerAdapter,
 	PositionAdapter,
 	OSAdapter,
+	NotifyAdapter,
 	ProcessAdapter,
 } = require('./runtimeApiContracts');
 
@@ -209,6 +210,61 @@ class NodeOS extends OSAdapter {
 	}
 }
 
+class NodeNotify extends NotifyAdapter {
+	async notify(message) {
+		const text = String(message || '').trim();
+		if (!text) {
+			return false;
+		}
+
+		try {
+			if (process.platform === 'darwin') {
+				await new Promise((resolve, reject) => {
+					const child = spawn('osascript', ['-e', `display notification ${JSON.stringify(text)} with title "Reactor"`]);
+					child.on('error', reject);
+					child.on('exit', (code) => {
+						if (code === 0) resolve();
+						else reject(new Error(`osascript exited with code ${code}`));
+					});
+				});
+				return true;
+			}
+
+			if (process.platform === 'linux') {
+				await new Promise((resolve, reject) => {
+					const child = spawn('notify-send', ['Reactor', text]);
+					child.on('error', reject);
+					child.on('exit', (code) => {
+						if (code === 0) resolve();
+						else reject(new Error(`notify-send exited with code ${code}`));
+					});
+				});
+				return true;
+			}
+
+			if (process.platform === 'win32') {
+				await new Promise((resolve, reject) => {
+					const script = [
+						"[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms')",
+						`[System.Windows.Forms.MessageBox]::Show(${JSON.stringify(text)}, 'Reactor') | Out-Null`,
+					].join('; ');
+					const child = spawn('powershell', ['-NoProfile', '-Command', script]);
+					child.on('error', reject);
+					child.on('exit', (code) => {
+						if (code === 0) resolve();
+						else reject(new Error(`powershell exited with code ${code}`));
+					});
+				});
+				return true;
+			}
+		} catch {
+			return false;
+		}
+
+		return false;
+	}
+}
+
 class NodeProcess extends ProcessAdapter {
 	constructor(command) {
 		super(command);
@@ -268,6 +324,7 @@ function createNodeRuntimeApi() {
 			Power: NodePower,
 			Position: NodePosition,
 			OS: NodeOS,
+			notify: async (message) => new NodeNotify().notify(message),
 		},
 		System: {
 			Process: NodeProcess,
@@ -285,5 +342,6 @@ module.exports = {
 	NodePower,
 	NodePosition,
 	NodeOS,
+	NodeNotify,
 	NodeProcess,
 };

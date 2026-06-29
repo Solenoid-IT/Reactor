@@ -121,6 +121,7 @@ declare module 'core' {
 		Power: new () => PowerApi;
 		Position: PositionApi;
 		OS: new () => OSApi;
+		notify(message: string): Promise<boolean>;
 	}
 
 	export interface ProcessApi {

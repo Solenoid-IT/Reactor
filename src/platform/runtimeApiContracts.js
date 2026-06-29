@@ -89,6 +89,12 @@ class OSAdapter {
 	}
 }
 
+class NotifyAdapter {
+	async notify(_message) {
+		throw new Error('NotifyAdapter.notify not implemented');
+	}
+}
+
 class ProcessAdapter {
 	constructor(_command) {}
 	async spawn() {
@@ -108,5 +114,6 @@ module.exports = {
 	PowerAdapter,
 	PositionAdapter,
 	OSAdapter,
+	NotifyAdapter,
 	ProcessAdapter,
 };
