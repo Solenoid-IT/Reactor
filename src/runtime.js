@@ -26,6 +26,9 @@ const ALL_WATCH_LISTENERS = new Set([
 
 const DEFAULT_MESSAGE_QUEUE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MESSAGE_QUEUE_RETRY_MS = 30 * 1000;
+const DEFAULT_STREAM_MAX_ACTIVE = 24;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_STREAM_CLEANUP_INTERVAL_MS = 30 * 1000;
 
 function collectKnownEntries(rootPath, map) {
 	let entries = [];
@@ -172,6 +175,200 @@ function pickPrimaryLocalHost() {
 	return '127.0.0.1';
 }
 
+class IncomingStreamPacket {
+	constructor(payload = {}) {
+		this.payload = payload && typeof payload === 'object' ? payload : {};
+	}
+
+	getId() {
+		return String(this.payload.streamId || '');
+	}
+
+	getPhase() {
+		return String(this.payload.phase || '').toLowerCase();
+	}
+
+	isStart() {
+		return this.getPhase() === 'start';
+	}
+
+	isChunk() {
+		return this.getPhase() === 'chunk';
+	}
+
+	isEnd() {
+		return this.getPhase() === 'end';
+	}
+
+	getMetadata() {
+		const value = this.payload.metadata;
+		return value && typeof value === 'object' ? value : {};
+	}
+
+	getContentType() {
+		return String(this.payload.contentType || 'application/octet-stream');
+	}
+
+	getChunkIndex() {
+		return Number.isFinite(Number(this.payload.index)) ? Number(this.payload.index) : -1;
+	}
+
+	getChunkSize() {
+		return Number.isFinite(Number(this.payload.size)) ? Number(this.payload.size) : 0;
+	}
+
+	getBase64() {
+		return String(this.payload.data || '');
+	}
+
+	readChunkBuffer() {
+		if (!this.isChunk()) {
+			return Buffer.alloc(0);
+		}
+		return Buffer.from(this.getBase64(), 'base64');
+	}
+
+	readChunkText(encoding = 'utf8') {
+		return this.readChunkBuffer().toString(encoding);
+	}
+}
+
+class IncomingStreamEndInfo {
+	constructor(payload = {}) {
+		this.payload = payload && typeof payload === 'object' ? payload : {};
+	}
+
+	getId() {
+		return String(this.payload.streamId || '');
+	}
+
+	getSender() {
+		return String(this.payload.sender || '');
+	}
+
+	getPath() {
+		return String(this.payload.path || '');
+	}
+
+	getBytes() {
+		return Number.isFinite(Number(this.payload.totalBytes)) ? Number(this.payload.totalBytes) : 0;
+	}
+
+	getChunks() {
+		return Number.isFinite(Number(this.payload.chunks)) ? Number(this.payload.chunks) : 0;
+	}
+
+	getDigestSha256() {
+		return String(this.payload.digestSha256 || '');
+	}
+
+	isValid() {
+		return Boolean(this.payload.valid !== false);
+	}
+
+	getError() {
+		return String(this.payload.error || '');
+	}
+
+	getMetadata() {
+		const value = this.payload.metadata;
+		return value && typeof value === 'object' ? value : {};
+	}
+}
+
+function splitBufferIntoChunks(buffer, chunkSize) {
+	const safeChunkSize = Math.max(1024, Number(chunkSize) || 64 * 1024);
+	const out = [];
+	for (let offset = 0; offset < buffer.length; offset += safeChunkSize) {
+		out.push(buffer.subarray(offset, Math.min(offset + safeChunkSize, buffer.length)));
+	}
+	return out;
+}
+
+function toBufferChunk(value) {
+	if (Buffer.isBuffer(value)) {
+		return value;
+	}
+
+	if (value instanceof Uint8Array) {
+		return Buffer.from(value);
+	}
+
+	if (value instanceof ArrayBuffer) {
+		return Buffer.from(new Uint8Array(value));
+	}
+
+	if (typeof value === 'string') {
+		return Buffer.from(value, 'utf8');
+	}
+
+	if (value && typeof value === 'object' && value.buffer instanceof ArrayBuffer && Number.isFinite(value.byteLength)) {
+		return Buffer.from(new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength));
+	}
+
+	throw new Error('stream chunk type not supported. expected Buffer, Uint8Array, ArrayBuffer or string');
+}
+
+async function* iterateStreamSourceChunks(source, chunkSize) {
+	if (source === null || source === undefined) {
+		throw new Error('invalid stream source');
+	}
+
+	const emitBuffer = async function* emitBufferChunks(raw) {
+		const buffer = toBufferChunk(raw);
+		if (buffer.length === 0) {
+			return;
+		}
+		for (const chunk of splitBufferIntoChunks(buffer, chunkSize)) {
+			yield chunk;
+		}
+	};
+
+	if (
+		Buffer.isBuffer(source)
+		|| source instanceof Uint8Array
+		|| source instanceof ArrayBuffer
+		|| typeof source === 'string'
+	) {
+		yield* emitBuffer(source);
+		return;
+	}
+
+	if (typeof source.getReader === 'function') {
+		const reader = source.getReader();
+		try {
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) {
+					break;
+				}
+				yield* emitBuffer(value);
+			}
+		} finally {
+			if (typeof reader.releaseLock === 'function') {
+				reader.releaseLock();
+			}
+		}
+		return;
+	}
+
+	if (typeof source[Symbol.asyncIterator] === 'function') {
+		for await (const value of source) {
+			yield* emitBuffer(value);
+		}
+		return;
+	}
+
+	if (typeof source[Symbol.iterator] === 'function') {
+		for (const value of source) {
+			yield* emitBuffer(value);
+		}
+		return;
+	}
+
+	throw new Error('stream source not iterable/readable');
+}
+
 class ReactorRuntime {
 	constructor(scriptsDir, eventLogPath, options = {}) {
 		this.scripts = [];
@@ -188,6 +385,14 @@ class ReactorRuntime {
 		this.pendingReloadReason = null;
 		this.watchers = [];
 		this.messageListenerMap = new Map();
+		this.streamListenerMap = new Map();
+		this.streamEndListenerMap = new Map();
+		this.activeIncomingStreams = new Map();
+		this.streamStorageDir = path.join(this.reactorRootDir, 'temp_files', 'streams');
+		this.streamMaxActive = this.readQueueDuration('REACTOR_STREAM_MAX_ACTIVE', DEFAULT_STREAM_MAX_ACTIVE, 1);
+		this.streamIdleTimeoutMs = this.readQueueDuration('REACTOR_STREAM_IDLE_TIMEOUT_MS', DEFAULT_STREAM_IDLE_TIMEOUT_MS, 30 * 1000);
+		this.streamCleanupIntervalMs = this.readQueueDuration('REACTOR_STREAM_CLEANUP_INTERVAL_MS', DEFAULT_STREAM_CLEANUP_INTERVAL_MS, 5 * 1000);
+		this.streamCleanupTimer = null;
 		this.httpServer = null;
 		this.httpServerPort = Number(options.httpServerPort || process.env.REACTOR_HTTP_PORT || 7070);
 		this.httpServerLogs = [];
@@ -443,6 +648,14 @@ class ReactorRuntime {
 				sender,
 				scripts: scripts.map((script) => script.name),
 			})),
+			streamListeners: Array.from(this.streamListenerMap.entries()).map(([sender, scripts]) => ({
+				sender,
+				scripts: scripts.map((script) => script.name),
+			})),
+			streamEndListeners: Array.from(this.streamEndListenerMap.entries()).map(([sender, scripts]) => ({
+				sender,
+				scripts: scripts.map((script) => script.name),
+			})),
 		};
 	}
 
@@ -631,6 +844,270 @@ class ReactorRuntime {
 		}
 
 		return listeners;
+	}
+
+	registerScriptStreamListeners(script) {
+		if (!script.enabled || !Array.isArray(script.events) || !script.events.includes('STREAM')) {
+			return;
+		}
+
+		if (script.streamFromAnySender || !Array.isArray(script.streamSenders) || script.streamSenders.length === 0) {
+			const wildcardListeners = this.streamListenerMap.get('*') || [];
+			wildcardListeners.push(script);
+			this.streamListenerMap.set('*', wildcardListeners);
+			return;
+		}
+
+		for (const sender of script.streamSenders) {
+			const key = String(sender || '').trim().toLowerCase();
+			if (!key) {
+				continue;
+			}
+
+			const listeners = this.streamListenerMap.get(key) || [];
+			listeners.push(script);
+			this.streamListenerMap.set(key, listeners);
+		}
+	}
+
+	findStreamListeners(senderCandidates) {
+		const listeners = [];
+		for (const script of this.streamListenerMap.get('*') || []) {
+			listeners.push(script);
+		}
+
+		for (const sender of senderCandidates || []) {
+			for (const script of this.streamListenerMap.get(sender) || []) {
+				if (!listeners.includes(script)) {
+					listeners.push(script);
+				}
+			}
+		}
+
+		return listeners;
+	}
+
+	registerScriptStreamEndListeners(script) {
+		if (!script.enabled || !Array.isArray(script.events) || !script.events.includes('STREAMEND')) {
+			return;
+		}
+
+		if (script.streamEndFromAnySender || !Array.isArray(script.streamEndSenders) || script.streamEndSenders.length === 0) {
+			const wildcardListeners = this.streamEndListenerMap.get('*') || [];
+			wildcardListeners.push(script);
+			this.streamEndListenerMap.set('*', wildcardListeners);
+			return;
+		}
+
+		for (const sender of script.streamEndSenders) {
+			const key = String(sender || '').trim().toLowerCase();
+			if (!key) {
+				continue;
+			}
+
+			const listeners = this.streamEndListenerMap.get(key) || [];
+			listeners.push(script);
+			this.streamEndListenerMap.set(key, listeners);
+		}
+	}
+
+	findStreamEndListeners(senderCandidates) {
+		const listeners = [];
+		for (const script of this.streamEndListenerMap.get('*') || []) {
+			listeners.push(script);
+		}
+
+		for (const sender of senderCandidates || []) {
+			for (const script of this.streamEndListenerMap.get(sender) || []) {
+				if (!listeners.includes(script)) {
+					listeners.push(script);
+				}
+			}
+		}
+
+		return listeners;
+	}
+
+	createIncomingStreamPacket(payload) {
+		return new IncomingStreamPacket(payload);
+	}
+
+	createIncomingStreamEndInfo(payload) {
+		return new IncomingStreamEndInfo(payload);
+	}
+
+	makeStreamSenderKey(senderMeta = {}) {
+		return String(senderMeta.rawSender || senderMeta.rawName || senderMeta.remoteHost || 'unknown').trim().toLowerCase();
+	}
+
+	makeActiveStreamKey(senderMeta, streamId) {
+		return `${this.makeStreamSenderKey(senderMeta)}|${String(streamId || '').trim()}`;
+	}
+
+	sanitizeStreamFileSegment(value) {
+		return String(value || 'unknown').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 64) || 'unknown';
+	}
+
+	startStreamCleanupTimer() {
+		if (this.streamCleanupTimer) {
+			clearInterval(this.streamCleanupTimer);
+		}
+
+		this.streamCleanupTimer = setInterval(() => {
+			const now = Date.now();
+			for (const [key, state] of this.activeIncomingStreams.entries()) {
+				if (!state || Number(state.lastActivityAt || 0) + this.streamIdleTimeoutMs > now) {
+					continue;
+				}
+
+				this.activeIncomingStreams.delete(key);
+				fs.unlink(state.partPath).catch(() => {});
+				this.log(`[STREAM] dropped stale stream key=${key}`);
+			}
+		}, this.streamCleanupIntervalMs);
+	}
+
+	async cleanupOrphanStreamFiles() {
+		try {
+			await fs.mkdir(this.streamStorageDir, { recursive: true });
+			const entries = await fs.readdir(this.streamStorageDir, { withFileTypes: true });
+			for (const entry of entries) {
+				if (!entry.isFile()) {
+					continue;
+				}
+				const filePath = path.join(this.streamStorageDir, entry.name);
+				if (!entry.name.endsWith('.part')) {
+					continue;
+				}
+				await fs.unlink(filePath).catch(() => {});
+			}
+		} catch (error) {
+			this.log(`[STREAM] orphan cleanup failed: ${error.message}`);
+		}
+	}
+
+	async processIncomingStreamPacket(packet, senderMeta = {}) {
+		if (!packet || typeof packet.getId !== 'function') {
+			return null;
+		}
+
+		const streamId = packet.getId();
+		if (!streamId) {
+			return null;
+		}
+
+		const key = this.makeActiveStreamKey(senderMeta, streamId);
+		const now = Date.now();
+
+		if (packet.isStart()) {
+			if (!this.activeIncomingStreams.has(key) && this.activeIncomingStreams.size >= this.streamMaxActive) {
+				this.log(`[STREAM] max active streams reached (${this.streamMaxActive}), dropping streamId=${streamId}`);
+				return null;
+			}
+
+			await fs.mkdir(this.streamStorageDir, { recursive: true });
+			const senderSegment = this.sanitizeStreamFileSegment(this.makeStreamSenderKey(senderMeta));
+			const streamSegment = this.sanitizeStreamFileSegment(streamId);
+			const partPath = path.join(this.streamStorageDir, `${Date.now()}-${senderSegment}-${streamSegment}.part`);
+			await fs.writeFile(partPath, Buffer.alloc(0));
+
+			this.activeIncomingStreams.set(key, {
+				key,
+				streamId,
+				sender: this.makeStreamSenderKey(senderMeta),
+				partPath,
+				lastActivityAt: now,
+				createdAt: now,
+				chunks: 0,
+				totalBytes: 0,
+				digest: crypto.createHash('sha256'),
+				metadata: packet.getMetadata(),
+				contentType: packet.getContentType(),
+				senderCandidates: senderMeta.candidates || [],
+			});
+			return null;
+		}
+
+		const state = this.activeIncomingStreams.get(key);
+		if (!state) {
+			return null;
+		}
+
+		state.lastActivityAt = now;
+
+		if (packet.isChunk()) {
+			const chunk = packet.readChunkBuffer();
+			if (chunk.length > 0) {
+				await fs.appendFile(state.partPath, chunk);
+				state.digest.update(chunk);
+				state.totalBytes += chunk.length;
+			}
+			state.chunks += 1;
+			return null;
+		}
+
+		if (!packet.isEnd()) {
+			return null;
+		}
+
+		this.activeIncomingStreams.delete(key);
+		const digestSha256 = state.digest.digest('hex');
+		const expectedDigest = String(packet.payload?.digestSha256 || '').trim().toLowerCase();
+		const expectedBytes = Number(packet.payload?.totalBytes);
+		const hasExpectedBytes = Number.isFinite(expectedBytes) && expectedBytes >= 0;
+		const validDigest = !expectedDigest || expectedDigest === digestSha256;
+		const validBytes = !hasExpectedBytes || expectedBytes === state.totalBytes;
+		const isValid = validDigest && validBytes;
+
+		const finalPath = state.partPath.replace(/\.part$/i, isValid ? '.bin' : '.failed');
+		await fs.rename(state.partPath, finalPath).catch(async () => {
+			await fs.copyFile(state.partPath, finalPath).catch(() => {});
+			await fs.unlink(state.partPath).catch(() => {});
+		});
+
+		return {
+			streamId,
+			sender: state.sender,
+			path: finalPath,
+			totalBytes: state.totalBytes,
+			chunks: state.chunks,
+			digestSha256,
+			expectedDigestSha256: expectedDigest,
+			expectedTotalBytes: hasExpectedBytes ? expectedBytes : null,
+			valid: isValid,
+			error: isValid ? '' : 'stream validation failed',
+			metadata: state.metadata,
+			contentType: state.contentType,
+			senderCandidates: state.senderCandidates,
+		};
+	}
+
+	async emitStreamEnd(streamEndData, senderMeta, messageHeaders = {}) {
+		if (!streamEndData) {
+			return [];
+		}
+
+		const listeners = this.findStreamEndListeners(senderMeta?.candidates || streamEndData.senderCandidates || []);
+		if (listeners.length === 0) {
+			return [];
+		}
+
+		const streamEndInfo = this.createIncomingStreamEndInfo(streamEndData);
+		await Promise.allSettled(
+			listeners.map((script) =>
+				this.runScript(script, {
+					trigger: 'STREAMEND',
+					event: 'STREAMEND',
+					messageSender: senderMeta?.rawSender || senderMeta?.remoteHost || streamEndData.sender || null,
+					messageSenderName: senderMeta?.rawName || null,
+					messageHeaders,
+					stream: null,
+					streamEnd: streamEndInfo,
+				}),
+			),
+		);
+
+		return listeners.map((script) => script.name);
 	}
 
 	parseMessageBody(req, rawBuffer) {
@@ -851,6 +1328,121 @@ class ReactorRuntime {
 		}
 	}
 
+	async streamToNode(target, source, options = {}) {
+		const safeOptions = options && typeof options === 'object' ? options : {};
+		const safeChunkSize = Math.max(1024, Math.min(1024 * 1024, Number(safeOptions.chunkSize) || 64 * 1024));
+		const streamId = String(safeOptions.streamId || crypto.randomUUID());
+		const contentType = String(safeOptions.contentType || 'application/octet-stream');
+		const metadata = safeOptions.metadata && typeof safeOptions.metadata === 'object' ? safeOptions.metadata : {};
+		const headers = safeOptions.headers && typeof safeOptions.headers === 'object' ? safeOptions.headers : {};
+		const totalBytesHint = Number.isFinite(Number(safeOptions.totalBytes)) ? Math.max(0, Number(safeOptions.totalBytes)) : null;
+
+		await this.sendNodeMessage(target, {
+			__reactorStream: true,
+			phase: 'start',
+			streamId,
+			contentType,
+			chunkSize: safeChunkSize,
+			totalBytes: totalBytesHint,
+			metadata,
+		}, headers);
+
+		let totalBytes = 0;
+		let chunks = 0;
+		const digest = crypto.createHash('sha256');
+
+		for await (const chunk of iterateStreamSourceChunks(source, safeChunkSize)) {
+			digest.update(chunk);
+			totalBytes += chunk.length;
+			await this.sendNodeMessage(target, {
+				__reactorStream: true,
+				phase: 'chunk',
+				streamId,
+				index: chunks,
+				encoding: 'base64',
+				size: chunk.length,
+				data: chunk.toString('base64'),
+			}, headers);
+			chunks += 1;
+		}
+
+		const digestSha256 = digest.digest('hex');
+		await this.sendNodeMessage(target, {
+			__reactorStream: true,
+			phase: 'end',
+			streamId,
+			chunks,
+			totalBytes,
+			digestSha256,
+		}, headers);
+
+		return {
+			target: String(target || '').trim(),
+			via: 'direct',
+			streamId,
+			chunks,
+			totalBytes,
+			digestSha256,
+		};
+	}
+
+	async streamToExchange(target, source, options = {}) {
+		const safeOptions = options && typeof options === 'object' ? options : {};
+		const safeChunkSize = Math.max(1024, Math.min(1024 * 1024, Number(safeOptions.chunkSize) || 64 * 1024));
+		const streamId = String(safeOptions.streamId || crypto.randomUUID());
+		const contentType = String(safeOptions.contentType || 'application/octet-stream');
+		const metadata = safeOptions.metadata && typeof safeOptions.metadata === 'object' ? safeOptions.metadata : {};
+		const totalBytesHint = Number.isFinite(Number(safeOptions.totalBytes)) ? Math.max(0, Number(safeOptions.totalBytes)) : null;
+
+		await this.sendExchangeMessage(target, {
+			__reactorStream: true,
+			phase: 'start',
+			streamId,
+			contentType,
+			chunkSize: safeChunkSize,
+			totalBytes: totalBytesHint,
+			metadata,
+		});
+
+		let totalBytes = 0;
+		let chunks = 0;
+		const digest = crypto.createHash('sha256');
+
+		for await (const chunk of iterateStreamSourceChunks(source, safeChunkSize)) {
+			digest.update(chunk);
+			totalBytes += chunk.length;
+			await this.sendExchangeMessage(target, {
+				__reactorStream: true,
+				phase: 'chunk',
+				streamId,
+				index: chunks,
+				encoding: 'base64',
+				size: chunk.length,
+				data: chunk.toString('base64'),
+			});
+			chunks += 1;
+		}
+
+		const digestSha256 = digest.digest('hex');
+		await this.sendExchangeMessage(target, {
+			__reactorStream: true,
+			phase: 'end',
+			streamId,
+			chunks,
+			totalBytes,
+			digestSha256,
+		});
+
+		return {
+			target: String(target || '').trim().toLowerCase(),
+			via: 'exchange',
+			streamId,
+			chunks,
+			totalBytes,
+			digestSha256,
+		};
+	}
+
 	/**
 	 * Invia una richiesta HTTPS a /message con rejectUnauthorized: false
 	 * (supporta certificati self-signed).
@@ -904,12 +1496,35 @@ class ReactorRuntime {
 			sendRequest: (request, timeout) => sendRequest(request, timeout),
 		};
 
+		const fileFacade = {
+			readStream: (filePath, options = {}) => {
+				const safePath = String(filePath || '').trim();
+				if (!safePath) {
+					throw new Error('File.readStream requires a file path');
+				}
+
+				const fileInstance = new this.runtimeApi.FileSystem.File(safePath);
+				if (fileInstance && typeof fileInstance.readStream === 'function') {
+					return fileInstance.readStream(options || {});
+				}
+
+				if (fsNative && typeof fsNative.createReadStream === 'function') {
+					return fsNative.createReadStream(safePath, options || {});
+				}
+
+				throw new Error('File.readStream not supported on this platform');
+			},
+		};
+
 		return {
 			Node: {
 				sendMessage: async (target, content, options = {}) => {
 					const normalizedOptions = options && typeof options === 'object' ? options : {};
 					const headers = normalizedOptions.headers || {};
 					return this.sendNodeMessage(target, content, headers);
+				},
+				stream: async (target, source, options = {}) => {
+					return this.streamToNode(target, source, options);
 				},
 				exchange: () => ({
 					sendMessage: async (target, content) => {
@@ -918,8 +1533,15 @@ class ReactorRuntime {
 						}
 						return this.sendExchangeMessage(target, content);
 					},
+					stream: async (target, source, options = {}) => {
+						if (this.exchangeMode !== 'node') {
+							throw new Error('exchange routing is available only when REACTOR_WORKING_MODE=node');
+						}
+						return this.streamToExchange(target, source, options);
+					},
 				}),
 			},
+			File: fileFacade,
 			api: this.runtimeApi,
 			FileSystem: this.runtimeApi.FileSystem,
 			HttpClient: httpClient,
@@ -986,20 +1608,31 @@ class ReactorRuntime {
 			const rawBuffer = Buffer.concat(bodyChunks);
 			const body = this.parseMessageBody(req, rawBuffer);
 			const senderMeta = this.resolveSenderCandidates(req);
-			const listeners = this.findMessageListeners(senderMeta.candidates);
+			const isStreamEnvelope = Boolean(body.json && typeof body.json === 'object' && body.json.__reactorStream === true);
+			const listeners = isStreamEnvelope
+				? this.findStreamListeners(senderMeta.candidates)
+				: this.findMessageListeners(senderMeta.candidates);
 
 			this.addHttpServerLog(
 				`POST /message sender=${senderMeta.rawSender || senderMeta.rawName || senderMeta.remoteHost || 'unknown'} -> ${listeners.length} script(s)`,
 			);
 
+			const streamPacket = isStreamEnvelope ? this.createIncomingStreamPacket(body.json) : null;
+			const streamEndData = isStreamEnvelope ? await this.processIncomingStreamPacket(streamPacket, senderMeta) : null;
+			let streamEndScripts = [];
+
 			if (listeners.length === 0) {
+				streamEndScripts = streamEndData
+					? await this.emitStreamEnd(streamEndData, senderMeta, req.headers || {})
+					: [];
 				res.writeHead(202, { 'content-type': 'application/json' });
 				res.end(
 					JSON.stringify({
 						ok: true,
-						trigger: 'MESSAGE',
+						trigger: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
 						delivered: false,
 						reason: 'no listeners',
+						streamEndScripts,
 						senderCandidates: senderMeta.candidates,
 					}),
 				);
@@ -1009,26 +1642,33 @@ class ReactorRuntime {
 			await Promise.allSettled(
 				listeners.map((script) =>
 					this.runScript(script, {
-						trigger: 'MESSAGE',
-						event: 'MESSAGE',
+						trigger: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
+						event: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
 						messageSender: senderMeta.rawSender || senderMeta.remoteHost || null,
 						messageSenderName: senderMeta.rawName || null,
 						messageContent: body.text,
 						messageContentType: body.contentType,
 						messageBodyBase64: body.base64,
 						messageJson: body.json,
+						stream: streamPacket,
+						streamEnd: null,
 						messageHeaders: req.headers || {},
 					}),
 				),
 			);
 
+			streamEndScripts = streamEndData
+				? await this.emitStreamEnd(streamEndData, senderMeta, req.headers || {})
+				: [];
+
 			res.writeHead(200, { 'content-type': 'application/json' });
 			res.end(
 				JSON.stringify({
 					ok: true,
-					trigger: 'MESSAGE',
+					trigger: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
 					delivered: true,
 					scripts: listeners.map((script) => script.name),
+					streamEndScripts,
 					senderCandidates: senderMeta.candidates,
 				}),
 			);
@@ -1157,6 +1797,9 @@ class ReactorRuntime {
 	async init() {
 		await this.loadMessageQueueConfig();
 		await fs.mkdir(this.scriptsDir, { recursive: true });
+		await fs.mkdir(this.streamStorageDir, { recursive: true });
+		await this.cleanupOrphanStreamFiles();
+		this.startStreamCleanupTimer();
 		await this.getReactorName();
 		await this.discoverScripts();
 		this.setupSchedules();
@@ -1288,6 +1931,8 @@ class ReactorRuntime {
 		this.scripts = [];
 		this.eventMap.clear();
 		this.messageListenerMap.clear();
+		this.streamListenerMap.clear();
+		this.streamEndListenerMap.clear();
 
 		try {
 			await fs.mkdir(this.scriptsDir, { recursive: true });
@@ -1329,6 +1974,10 @@ class ReactorRuntime {
 					events: metadata.events,
 					messageSenders: metadata.messageSenders || [],
 					messageFromAnySender: Boolean(metadata.messageFromAnySender),
+					streamSenders: metadata.streamSenders || [],
+					streamFromAnySender: Boolean(metadata.streamFromAnySender),
+					streamEndSenders: metadata.streamEndSenders || [],
+					streamEndFromAnySender: Boolean(metadata.streamEndFromAnySender),
 					state: metadata.state,
 					enabled: metadata.state !== 'DISABLED',
 					mutex: metadata.mutex,
@@ -1347,6 +1996,18 @@ class ReactorRuntime {
 								? '*'
 								: script.messageSenders.join(', ')
 							: 'none'
+					} @streamFrom=${
+						script.events.includes('STREAM')
+							? script.streamFromAnySender || !Array.isArray(script.streamSenders) || script.streamSenders.length === 0
+								? '*'
+								: script.streamSenders.join(', ')
+							: 'none'
+					} @streamEndFrom=${
+						script.events.includes('STREAMEND')
+							? script.streamEndFromAnySender || !Array.isArray(script.streamEndSenders) || script.streamEndSenders.length === 0
+								? '*'
+								: script.streamEndSenders.join(', ')
+							: 'none'
 					} @watch=${script.watch.length > 0 ? script.watch.join(', ') : 'none'} @mutex=${script.mutex ? 'on' : 'off'} (from ${this.scriptsDir})`,
 				);
 
@@ -1362,6 +2023,8 @@ class ReactorRuntime {
 				}
 
 				this.registerScriptMessageListeners(script);
+				this.registerScriptStreamListeners(script);
+				this.registerScriptStreamEndListeners(script);
 			} catch (error) {
 				this.log(`Failed to load script ${scriptPath}: ${error.message}`);
 			}
@@ -1570,6 +2233,18 @@ class ReactorRuntime {
 
 	cleanup() {
 		this.clearSchedules();
+
+		if (this.streamCleanupTimer) {
+			clearInterval(this.streamCleanupTimer);
+			this.streamCleanupTimer = null;
+		}
+
+		for (const [, state] of this.activeIncomingStreams.entries()) {
+			if (state && state.partPath) {
+				fs.unlink(state.partPath).catch(() => {});
+			}
+		}
+		this.activeIncomingStreams.clear();
 
 		if (this.reloadDebounceTimer) {
 			clearTimeout(this.reloadDebounceTimer);

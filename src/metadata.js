@@ -150,6 +150,10 @@ function parseOnDirective(rawValue) {
 		events: [],
 		messageSenders: [],
 		messageFromAnySender: false,
+		streamSenders: [],
+		streamFromAnySender: false,
+		streamEndSenders: [],
+		streamEndFromAnySender: false,
 	};
 
 	for (const token of splitDirectiveTokens(rawValue)) {
@@ -174,6 +178,48 @@ function parseOnDirective(rawValue) {
 			continue;
 		}
 
+		const streamMatch = token.match(/^STREAM(?:\((.*)\))?$/i);
+		if (streamMatch) {
+			if (!parsed.events.includes('STREAM')) {
+				parsed.events.push('STREAM');
+			}
+
+			const rawSenders = String(streamMatch[1] || '').trim();
+			if (!rawSenders) {
+				parsed.streamFromAnySender = true;
+				continue;
+			}
+
+			for (const senderRaw of rawSenders.split(',')) {
+				const normalized = normalizeMessageSender(senderRaw);
+				if (normalized && !parsed.streamSenders.includes(normalized)) {
+					parsed.streamSenders.push(normalized);
+				}
+			}
+			continue;
+		}
+
+		const streamEndMatch = token.match(/^STREAMEND(?:\((.*)\))?$/i);
+		if (streamEndMatch) {
+			if (!parsed.events.includes('STREAMEND')) {
+				parsed.events.push('STREAMEND');
+			}
+
+			const rawSenders = String(streamEndMatch[1] || '').trim();
+			if (!rawSenders) {
+				parsed.streamEndFromAnySender = true;
+				continue;
+			}
+
+			for (const senderRaw of rawSenders.split(',')) {
+				const normalized = normalizeMessageSender(senderRaw);
+				if (normalized && !parsed.streamEndSenders.includes(normalized)) {
+					parsed.streamEndSenders.push(normalized);
+				}
+			}
+			continue;
+		}
+
 		const normalizedEvent = token.trim().toUpperCase();
 		if (normalizedEvent && !parsed.events.includes(normalizedEvent)) {
 			parsed.events.push(normalizedEvent);
@@ -189,6 +235,10 @@ function parseScriptMetadata(sourceCode) {
 		events: [],
 		messageSenders: [],
 		messageFromAnySender: false,
+		streamSenders: [],
+		streamFromAnySender: false,
+		streamEndSenders: [],
+		streamEndFromAnySender: false,
 		state: 'DISABLED',
 		mutex: false,
 		watch: [],
@@ -206,6 +256,10 @@ function parseScriptMetadata(sourceCode) {
 		metadata.events = parsedOn.events;
 		metadata.messageSenders = parsedOn.messageSenders;
 		metadata.messageFromAnySender = parsedOn.messageFromAnySender;
+		metadata.streamSenders = parsedOn.streamSenders;
+		metadata.streamFromAnySender = parsedOn.streamFromAnySender;
+		metadata.streamEndSenders = parsedOn.streamEndSenders;
+		metadata.streamEndFromAnySender = parsedOn.streamEndFromAnySender;
 	}
 
 	const stateMatch = sourceCode.match(/@state\s+(.+)/i);

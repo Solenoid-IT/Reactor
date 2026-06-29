@@ -53,9 +53,17 @@ declare module 'core' {
 
 	export interface FileApi {
 		read(): Promise<string | null>;
+		readStream(options?: { chunkSize?: number; encoding?: string }): AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array>;
 		write(content: string, append?: boolean): Promise<boolean>;
 		delete(): Promise<boolean>;
 		getMeta(): Promise<FileMeta>;
+	}
+
+	export interface FileStaticApi {
+		readStream(
+			filePath: string,
+			options?: { chunkSize?: number; encoding?: string },
+		): AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array>;
 	}
 
 	export interface DirectoryApi {
@@ -127,6 +135,60 @@ declare module 'core' {
 		headers?: HeadersMap;
 	}
 
+	export interface NodeStreamOptions {
+		chunkSize?: number;
+		contentType?: string;
+		metadata?: Record<string, unknown>;
+		totalBytes?: number;
+		headers?: HeadersMap;
+		streamId?: string;
+	}
+
+	export type NodeStreamSource =
+		| ReadableStream<Uint8Array>
+		| AsyncIterable<Uint8Array | Buffer | string | ArrayBuffer>
+		| Iterable<Uint8Array | Buffer | string | ArrayBuffer>
+		| Uint8Array
+		| Buffer
+		| string
+		| ArrayBuffer;
+
+	export interface NodeStreamResponse {
+		target: string;
+		via: 'direct' | 'exchange';
+		streamId: string;
+		chunks: number;
+		totalBytes: number;
+		digestSha256: string;
+	}
+
+	export interface StreamPacketApi {
+		getId(): string;
+		getPhase(): string;
+		isStart(): boolean;
+		isChunk(): boolean;
+		isEnd(): boolean;
+		getMetadata(): Record<string, unknown>;
+		getContentType(): string;
+		getChunkIndex(): number;
+		getChunkSize(): number;
+		getBase64(): string;
+		readChunkBuffer(): Buffer;
+		readChunkText(encoding?: BufferEncoding): string;
+	}
+
+	export interface StreamEndApi {
+		getId(): string;
+		getSender(): string;
+		getPath(): string;
+		getBytes(): number;
+		getChunks(): number;
+		getDigestSha256(): string;
+		isValid(): boolean;
+		getError(): string;
+		getMetadata(): Record<string, unknown>;
+	}
+
 	export interface NodeSendMessageResponse {
 		target: string;
 		endpoint: string;
@@ -146,6 +208,11 @@ declare module 'core' {
 			target: string,
 			content: string | Uint8Array | Buffer | Record<string, unknown>,
 		) => Promise<NodeExchangeSendMessageResponse>;
+		stream: (
+			target: string,
+			source: NodeStreamSource,
+			options?: Omit<NodeStreamOptions, 'headers'>,
+		) => Promise<NodeStreamResponse>;
 	}
 
 	export interface NodeApi {
@@ -154,6 +221,11 @@ declare module 'core' {
 			content: string | Uint8Array | Buffer | Record<string, unknown>,
 			options?: NodeSendMessageOptions,
 		) => Promise<NodeSendMessageResponse>;
+		stream: (
+			target: string,
+			source: NodeStreamSource,
+			options?: NodeStreamOptions,
+		) => Promise<NodeStreamResponse>;
 		exchange: () => NodeExchangeApi;
 	}
 
@@ -174,12 +246,15 @@ declare module 'core' {
 		messageContentType?: string;
 		messageBodyBase64?: string;
 		messageJson?: unknown;
+		stream?: StreamPacketApi | null;
+		streamEnd?: StreamEndApi | null;
 		messageHeaders?: IncomingHeadersMap;
 		watchPath?: string;
 		watchType?: 'file:created' | 'file:deleted' | 'file:moved' | 'dir:created' | 'dir:deleted' | 'dir:moved' | 'file:changed';
 	}
 
 	export const api: RuntimeApi;
+	export const File: FileStaticApi;
 	export const FileSystem: FileSystemApi;
 	export const HttpClient: HttpClientApi;
 	export const Device: DeviceApi;

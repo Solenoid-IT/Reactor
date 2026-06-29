@@ -73,6 +73,29 @@ Node message trigger:
 ```
 `import { Node } from 'core'` and `Node.sendMessage(target, content)` dispatch POST `/message` and trigger matching MESSAGE listeners.
 
+Node stream trigger:
+```typescript
+// @on STREAM
+// @on STREAM(sender_1)
+// @on STREAM(10.20.43.20:7070,sender_2)
+```
+`Node.stream(...)` and `Node.exchange().stream(...)` trigger matching STREAM listeners.
+Inside `run(ctx)` you can read stream packets with `ctx.stream` methods:
+- `ctx.stream.isStart()` / `isChunk()` / `isEnd()`
+- `ctx.stream.getId()`, `getChunkIndex()`, `getChunkSize()`, `getMetadata()`
+- `ctx.stream.readChunkBuffer()` or `ctx.stream.readChunkText()`
+
+Stream finalization trigger:
+```typescript
+// @on STREAMEND
+// @on STREAMEND(sender_1)
+// @on STREAMEND(10.20.43.20:7070,sender_2)
+```
+Runtime reassembles stream chunks on disk and triggers `STREAMEND` when transfer is finalized.
+Inside `run(ctx)` use `ctx.streamEnd` methods:
+- `ctx.streamEnd.getId()`, `getPath()`, `getBytes()`, `getChunks()`
+- `ctx.streamEnd.getDigestSha256()`, `isValid()`, `getError()`, `getMetadata()`
+
 #### `@watch /path/to/folder` (multiple supported)
 File system monitoring. Paths can be absolute or relative to the script directory.
 Triggers `run()` on file/directory changes with `ctx.watchPath` and `ctx.watchType`.
@@ -135,6 +158,16 @@ export async function run(ctx: Context) {
 **`Node.sendMessage` routing logic:**
 1. Tenta HTTP POST diretto a `http://<target>/message` (LAN)
 2. Se il target non è raggiungibile AND mode è `client` → invia via WebSocket all'Exchange
+
+**Streaming API (chunked):**
+- `Node.stream(target, source, options)` → stream diretto HTTP verso un altro nodo
+- `Node.exchange().stream(target, source, options)` → stream triangolato via Exchange (WS)
+- Entrambe inviano eventi JSON `start` / `chunk` / `end` con envelope:
+  - `__reactorStream: true`
+  - `streamId`, `phase`, `contentType`, `index`, `encoding`, `data`, `chunks`, `totalBytes`, `digestSha256`
+- `source` può essere: `ReadableStream`, `AsyncIterable`, `Iterable`, `Buffer`, `Uint8Array`, `ArrayBuffer`, `string`
+- `options`: `chunkSize` (default 64KB), `contentType`, `metadata`, `totalBytes`, `streamId`
+- Il receiver esegue spool su disco in `temp_files/streams` (stato RAM minimo) e valida `totalBytes`/`digestSha256` prima di emettere `STREAMEND`
 
 ### `exchangeManager.js`
 

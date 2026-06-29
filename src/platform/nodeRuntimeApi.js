@@ -29,6 +29,10 @@ class NodeFile extends FileAdapter {
 		}
 	}
 
+	readStream(options = {}) {
+		return fsNative.createReadStream(this.filePath, options || {});
+	}
+
 	async write(content, append = false) {
 		try {
 			await fs.mkdir(path.dirname(this.filePath), { recursive: true });

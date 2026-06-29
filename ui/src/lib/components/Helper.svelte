@@ -2,12 +2,12 @@
 	export let ariaLabel = 'Help';
 </script>
 
-<span class="helper" tabindex="0" aria-label={ariaLabel}>
+<button type="button" class="helper" aria-label={ariaLabel}>
 	<i class="fa-solid fa-circle-info" aria-hidden="true"></i>
 	<span class="helper-tooltip" role="tooltip">
 		<slot />
 	</span>
-</span>
+</button>
 
 <style>
 	.helper {
@@ -21,6 +21,9 @@
 		cursor: help;
 		color: rgba(255, 255, 255, 0.65);
 		transition: color 0.2s ease;
+		padding: 0;
+		border: 0;
+		background: transparent;
 	}
 
 	.helper:hover,

@@ -34,6 +34,36 @@ class AndroidFile extends FileAdapter {
 		}
 	}
 
+	async *readStream(options = {}) {
+		const plugins = getCapacitorPlugins();
+		if (!plugins || !plugins.Filesystem) {
+			throw new Error('Filesystem plugin unavailable');
+		}
+
+		const chunkSize = Math.max(1024, Math.min(1024 * 1024, Number(options.chunkSize) || 64 * 1024));
+		const encoding = String(options.encoding || 'utf8').toLowerCase();
+
+		const out = await plugins.Filesystem.readFile({ path: this.filePath });
+		if (!out || typeof out.data !== 'string') {
+			return;
+		}
+
+		let bytes;
+		if (encoding === 'base64') {
+			const binary = typeof atob === 'function' ? atob(out.data) : '';
+			bytes = new Uint8Array(binary.length);
+			for (let index = 0; index < binary.length; index += 1) {
+				bytes[index] = binary.charCodeAt(index);
+			}
+		} else {
+			bytes = new TextEncoder().encode(out.data);
+		}
+
+		for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+			yield bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
+		}
+	}
+
 	async write(content, append = false) {
 		const plugins = getCapacitorPlugins();
 		if (!plugins || !plugins.Filesystem) {

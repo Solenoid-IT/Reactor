@@ -718,25 +718,59 @@ class ExchangeManager {
 		const from = String(packet.from || 'unknown');
 		const content = packet.content !== undefined ? String(packet.content) : '';
 		const contentType = String(packet.contentType || 'text/plain');
+		let messageJson = null;
+		if (contentType.toLowerCase().includes('application/json')) {
+			try {
+				messageJson = JSON.parse(content);
+			} catch {
+				messageJson = null;
+			}
+		}
+		const isStreamEnvelope = Boolean(messageJson && typeof messageJson === 'object' && messageJson.__reactorStream === true);
+		const senderMeta = {
+			rawName: from,
+			rawSender: from,
+			remoteHost: from,
+			candidates: [from.toLowerCase()],
+		};
 
 		this.runtime.log(`[Exchange] Message from: ${from}`);
-		const listeners = this.runtime.findMessageListeners([from.toLowerCase()]);
+		const listeners = isStreamEnvelope
+			? this.runtime.findStreamListeners(senderMeta.candidates)
+			: this.runtime.findMessageListeners(senderMeta.candidates);
+		const streamPacket = isStreamEnvelope && this.runtime && this.runtime.createIncomingStreamPacket
+			? this.runtime.createIncomingStreamPacket(messageJson)
+			: null;
 
-		Promise.allSettled(
-			listeners.map((script) =>
-				this.runtime.runScript(script, {
-					trigger: 'MESSAGE',
-					event: 'MESSAGE',
-					messageSender: from,
-					messageSenderName: from,
-					messageContent: content,
-					messageContentType: contentType,
-					messageBodyBase64: Buffer.from(content, 'utf8').toString('base64'),
-					messageJson: null,
-					messageHeaders: { 'x-exchange-from': from },
-				}),
-			),
-		).catch(() => {});
+		Promise.resolve()
+			.then(async () => {
+				const streamEndData = isStreamEnvelope && this.runtime && typeof this.runtime.processIncomingStreamPacket === 'function'
+					? await this.runtime.processIncomingStreamPacket(streamPacket, senderMeta)
+					: null;
+
+				await Promise.allSettled(
+					listeners.map((script) =>
+						this.runtime.runScript(script, {
+							trigger: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
+							event: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
+							messageSender: from,
+							messageSenderName: from,
+							messageContent: content,
+							messageContentType: contentType,
+							messageBodyBase64: Buffer.from(content, 'utf8').toString('base64'),
+							messageJson,
+							stream: streamPacket,
+							streamEnd: null,
+							messageHeaders: { 'x-exchange-from': from },
+						}),
+					),
+				);
+
+				if (streamEndData && this.runtime && typeof this.runtime.emitStreamEnd === 'function') {
+					await this.runtime.emitStreamEnd(streamEndData, senderMeta, { 'x-exchange-from': from });
+				}
+			})
+			.catch(() => {});
 	}
 
 	// ---------------------------------------------------------------------------

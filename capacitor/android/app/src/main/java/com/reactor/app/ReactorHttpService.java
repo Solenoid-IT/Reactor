@@ -45,6 +45,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -124,6 +125,31 @@ public class ReactorHttpService extends Service {
             "Node\\.exchange\\s*\\(\\s*\\)\\s*\\.\\s*sendMessage\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\1\\s*,\\s*(['\"])\\s*(.*?)\\s*\\3",
             Pattern.DOTALL
         );
+        private static final Pattern STREAM_FILE_CALL_PATTERN = Pattern.compile(
+            "Node\\.stream\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\1\\s*,\\s*File\\.readStream\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\3",
+            Pattern.DOTALL
+        );
+        private static final Pattern EXCHANGE_STREAM_FILE_CALL_PATTERN = Pattern.compile(
+            "Node\\.exchange\\s*\\(\\s*\\)\\s*\\.\\s*stream\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\1\\s*,\\s*File\\.readStream\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\3",
+            Pattern.DOTALL
+        );
+            private static final Pattern STREAM_CALL_GENERIC_PATTERN = Pattern.compile(
+                "Node\\.stream\\s*\\(\\s*([^,\\)]+)\\s*,\\s*File\\.readStream\\s*\\(\\s*([^\\),]+)",
+                Pattern.DOTALL
+            );
+            private static final Pattern EXCHANGE_STREAM_CALL_GENERIC_PATTERN = Pattern.compile(
+                "Node\\.exchange\\s*\\(\\s*\\)\\s*\\.\\s*stream\\s*\\(\\s*([^,\\)]+)\\s*,\\s*File\\.readStream\\s*\\(\\s*([^\\),]+)",
+                Pattern.DOTALL
+            );
+            private static final Pattern STREAM_VAR_ASSIGN_PATTERN = Pattern.compile(
+                "(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*=\\s*(?:await\\s+)?File\\.readStream\\s*\\(\\s*([^\\),]+)",
+                Pattern.DOTALL
+            );
+            private static final Pattern STRING_VAR_ASSIGN_PATTERN = Pattern.compile(
+                "(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*=\\s*(['\"])(.*?)\\2",
+                Pattern.DOTALL
+            );
+        private static final int DEFAULT_STREAM_CHUNK_SIZE = 64 * 1024;
 
     private static class MessageScript {
         File scriptFile;
@@ -940,6 +966,351 @@ public class ReactorHttpService extends Service {
 
             sendExchangeMessage(target, content);
         }
+
+        Map<String, String> stringVariables = extractStringVariables(script.source);
+        Map<String, String> streamVariables = extractStreamVariables(script.source, stringVariables);
+        Set<String> scheduledStreams = new HashSet<>();
+
+        Matcher directStreamMatcher = STREAM_FILE_CALL_PATTERN.matcher(script.source);
+        while (directStreamMatcher.find()) {
+            String target = directStreamMatcher.group(2) != null ? directStreamMatcher.group(2).trim() : "";
+            String streamPath = directStreamMatcher.group(4) != null ? directStreamMatcher.group(4).trim() : "";
+            if (target.isEmpty() || streamPath.isEmpty()) {
+                continue;
+            }
+
+            String dedupeKey = "direct|" + target + "|" + streamPath;
+            if (scheduledStreams.contains(dedupeKey)) {
+                continue;
+            }
+
+            try {
+                streamFileToNode(target, streamPath, new HashMap<>());
+                scheduledStreams.add(dedupeKey);
+            } catch (Exception error) {
+                appendGlobalLog(buildExchangeLog("STREAM_DIRECT_ERROR", error.getMessage() != null ? error.getMessage() : "stream direct failed"));
+            }
+        }
+
+        Matcher exchangeStreamMatcher = EXCHANGE_STREAM_FILE_CALL_PATTERN.matcher(script.source);
+        while (exchangeStreamMatcher.find()) {
+            String target = exchangeStreamMatcher.group(2) != null ? exchangeStreamMatcher.group(2).trim() : "";
+            String streamPath = exchangeStreamMatcher.group(4) != null ? exchangeStreamMatcher.group(4).trim() : "";
+            if (target.isEmpty() || streamPath.isEmpty()) {
+                continue;
+            }
+
+            String dedupeKey = "exchange|" + target + "|" + streamPath;
+            if (scheduledStreams.contains(dedupeKey)) {
+                continue;
+            }
+
+            try {
+                streamFileToExchange(target, streamPath);
+                scheduledStreams.add(dedupeKey);
+            } catch (Exception error) {
+                appendGlobalLog(buildExchangeLog("STREAM_EXCHANGE_ERROR", error.getMessage() != null ? error.getMessage() : "stream exchange failed"));
+            }
+        }
+
+        Matcher genericDirectStreamMatcher = STREAM_CALL_GENERIC_PATTERN.matcher(script.source);
+        while (genericDirectStreamMatcher.find()) {
+            String targetToken = genericDirectStreamMatcher.group(1);
+            String pathToken = genericDirectStreamMatcher.group(2);
+
+            String target = resolveTokenValue(targetToken, stringVariables);
+            String streamPath = resolveTokenValue(pathToken, stringVariables);
+            if (streamPath.isEmpty()) {
+                streamPath = resolveStreamVariablePath(pathToken, streamVariables);
+            }
+
+            if (target.isEmpty() || streamPath.isEmpty()) {
+                continue;
+            }
+
+            String dedupeKey = "direct|" + target + "|" + streamPath;
+            if (scheduledStreams.contains(dedupeKey)) {
+                continue;
+            }
+
+            try {
+                streamFileToNode(target, streamPath, new HashMap<>());
+                scheduledStreams.add(dedupeKey);
+            } catch (Exception error) {
+                appendGlobalLog(buildExchangeLog("STREAM_DIRECT_ERROR", error.getMessage() != null ? error.getMessage() : "stream direct failed"));
+            }
+        }
+
+        Matcher genericExchangeStreamMatcher = EXCHANGE_STREAM_CALL_GENERIC_PATTERN.matcher(script.source);
+        while (genericExchangeStreamMatcher.find()) {
+            String targetToken = genericExchangeStreamMatcher.group(1);
+            String pathToken = genericExchangeStreamMatcher.group(2);
+
+            String target = resolveTokenValue(targetToken, stringVariables);
+            String streamPath = resolveTokenValue(pathToken, stringVariables);
+            if (streamPath.isEmpty()) {
+                streamPath = resolveStreamVariablePath(pathToken, streamVariables);
+            }
+
+            if (target.isEmpty() || streamPath.isEmpty()) {
+                continue;
+            }
+
+            String dedupeKey = "exchange|" + target + "|" + streamPath;
+            if (scheduledStreams.contains(dedupeKey)) {
+                continue;
+            }
+
+            try {
+                streamFileToExchange(target, streamPath);
+                scheduledStreams.add(dedupeKey);
+            } catch (Exception error) {
+                appendGlobalLog(buildExchangeLog("STREAM_EXCHANGE_ERROR", error.getMessage() != null ? error.getMessage() : "stream exchange failed"));
+            }
+        }
+    }
+
+    private Map<String, String> extractStringVariables(String source) {
+        Map<String, String> vars = new HashMap<>();
+        Matcher matcher = STRING_VAR_ASSIGN_PATTERN.matcher(String.valueOf(source));
+        while (matcher.find()) {
+            String name = matcher.group(1) != null ? matcher.group(1).trim() : "";
+            String value = matcher.group(3) != null ? matcher.group(3) : "";
+            if (!name.isEmpty()) {
+                vars.put(name, value);
+            }
+        }
+        return vars;
+    }
+
+    private Map<String, String> extractStreamVariables(String source, Map<String, String> stringVariables) {
+        Map<String, String> vars = new HashMap<>();
+        Matcher matcher = STREAM_VAR_ASSIGN_PATTERN.matcher(String.valueOf(source));
+        while (matcher.find()) {
+            String name = matcher.group(1) != null ? matcher.group(1).trim() : "";
+            String pathToken = matcher.group(2);
+            if (name.isEmpty()) {
+                continue;
+            }
+
+            String resolvedPath = resolveTokenValue(pathToken, stringVariables);
+            if (!resolvedPath.isEmpty()) {
+                vars.put(name, resolvedPath);
+            }
+        }
+        return vars;
+    }
+
+    private String resolveTokenValue(String rawToken, Map<String, String> stringVariables) {
+        String token = String.valueOf(rawToken).trim();
+        if (token.isEmpty()) {
+            return "";
+        }
+
+        if ((token.startsWith("\"") && token.endsWith("\"")) || (token.startsWith("'") && token.endsWith("'"))) {
+            return token.substring(1, token.length() - 1);
+        }
+
+        String fromVars = stringVariables.get(token);
+        return fromVars != null ? fromVars : "";
+    }
+
+    private String resolveStreamVariablePath(String rawToken, Map<String, String> streamVariables) {
+        String token = String.valueOf(rawToken).trim();
+        if (token.isEmpty()) {
+            return "";
+        }
+
+        String fromVars = streamVariables.get(token);
+        return fromVars != null ? fromVars : "";
+    }
+
+    private File resolveStreamFilePath(String rawPath) {
+        String targetPath = String.valueOf(rawPath).trim();
+        if (targetPath.isEmpty()) {
+            return null;
+        }
+
+        File file = new File(targetPath);
+        if (file.isAbsolute()) {
+            return file;
+        }
+
+        return new File(getFilesDir(), targetPath);
+    }
+
+    private void streamFileToNode(String target, String filePath, Map<String, String> extraHeaders) {
+        File file = resolveStreamFilePath(filePath);
+        if (file == null || !file.exists() || !file.isFile()) {
+            throw new RuntimeException("stream source file not found: " + filePath);
+        }
+
+        String streamId = UUID.randomUUID().toString();
+        String contentType = "application/octet-stream";
+        long totalBytes = file.length();
+
+        JSONObject start = new JSONObject();
+        start.put("__reactorStream", true);
+        start.put("phase", "start");
+        start.put("streamId", streamId);
+        start.put("contentType", contentType);
+        start.put("chunkSize", DEFAULT_STREAM_CHUNK_SIZE);
+        start.put("totalBytes", totalBytes);
+        sendNodeMessageWithContentType(target, start.toString(), "application/json; charset=utf-8", extraHeaders);
+
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException error) {
+            throw new RuntimeException("sha256 unavailable");
+        }
+
+        int index = 0;
+        long sentBytes = 0L;
+        byte[] chunk = new byte[DEFAULT_STREAM_CHUNK_SIZE];
+        try (FileInputStream input = new FileInputStream(file)) {
+            int read;
+            while ((read = input.read(chunk)) > 0) {
+                byte[] bytes = read == chunk.length ? chunk : java.util.Arrays.copyOf(chunk, read);
+                digest.update(bytes, 0, bytes.length);
+                sentBytes += bytes.length;
+
+                JSONObject packet = new JSONObject();
+                packet.put("__reactorStream", true);
+                packet.put("phase", "chunk");
+                packet.put("streamId", streamId);
+                packet.put("index", index);
+                packet.put("encoding", "base64");
+                packet.put("size", bytes.length);
+                packet.put("data", Base64.encodeToString(bytes, Base64.NO_WRAP));
+
+                sendNodeMessageWithContentType(target, packet.toString(), "application/json; charset=utf-8", extraHeaders);
+                index += 1;
+            }
+        } catch (IOException error) {
+            throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "stream read failed");
+        }
+
+        JSONObject end = new JSONObject();
+        end.put("__reactorStream", true);
+        end.put("phase", "end");
+        end.put("streamId", streamId);
+        end.put("chunks", index);
+        end.put("totalBytes", sentBytes);
+        end.put("digestSha256", bytesToHex(digest.digest()));
+        sendNodeMessageWithContentType(target, end.toString(), "application/json; charset=utf-8", extraHeaders);
+    }
+
+    private void streamFileToExchange(String target, String filePath) {
+        File file = resolveStreamFilePath(filePath);
+        if (file == null || !file.exists() || !file.isFile()) {
+            throw new RuntimeException("stream source file not found: " + filePath);
+        }
+
+        String normalizedTarget = String.valueOf(target).trim().toLowerCase(Locale.ROOT);
+        if (normalizedTarget.isEmpty()) {
+            throw new RuntimeException("invalid exchange target");
+        }
+
+        String streamId = UUID.randomUUID().toString();
+        String contentType = "application/octet-stream";
+        long totalBytes = file.length();
+
+        JSONObject start = new JSONObject();
+        start.put("__reactorStream", true);
+        start.put("phase", "start");
+        start.put("streamId", streamId);
+        start.put("contentType", contentType);
+        start.put("chunkSize", DEFAULT_STREAM_CHUNK_SIZE);
+        start.put("totalBytes", totalBytes);
+        sendExchangeMessageNow(normalizedTarget, start.toString(), "application/json");
+
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException error) {
+            throw new RuntimeException("sha256 unavailable");
+        }
+
+        int index = 0;
+        long sentBytes = 0L;
+        byte[] chunk = new byte[DEFAULT_STREAM_CHUNK_SIZE];
+        try (FileInputStream input = new FileInputStream(file)) {
+            int read;
+            while ((read = input.read(chunk)) > 0) {
+                byte[] bytes = read == chunk.length ? chunk : java.util.Arrays.copyOf(chunk, read);
+                digest.update(bytes, 0, bytes.length);
+                sentBytes += bytes.length;
+
+                JSONObject packet = new JSONObject();
+                packet.put("__reactorStream", true);
+                packet.put("phase", "chunk");
+                packet.put("streamId", streamId);
+                packet.put("index", index);
+                packet.put("encoding", "base64");
+                packet.put("size", bytes.length);
+                packet.put("data", Base64.encodeToString(bytes, Base64.NO_WRAP));
+                sendExchangeMessageNow(normalizedTarget, packet.toString(), "application/json");
+                index += 1;
+            }
+        } catch (IOException error) {
+            throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "stream read failed");
+        }
+
+        JSONObject end = new JSONObject();
+        end.put("__reactorStream", true);
+        end.put("phase", "end");
+        end.put("streamId", streamId);
+        end.put("chunks", index);
+        end.put("totalBytes", sentBytes);
+        end.put("digestSha256", bytesToHex(digest.digest()));
+        sendExchangeMessageNow(normalizedTarget, end.toString(), "application/json");
+    }
+
+    private String bytesToHex(byte[] bytes) {
+        StringBuilder builder = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            builder.append(String.format(Locale.ROOT, "%02x", b));
+        }
+        return builder.toString();
+    }
+
+    private void sendNodeMessageWithContentType(String target, String content, String contentType, Map<String, String> extraHeaders) {
+        String targetValue = String.valueOf(target).trim();
+        if (targetValue.isEmpty()) {
+            return;
+        }
+
+        List<String> normalizedTargets = buildTargetCandidates(targetValue);
+        if (normalizedTargets.isEmpty()) {
+            return;
+        }
+
+        String reactorName = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(PREF_REACTOR_NAME, "mobile-reactor");
+        String senderId = String.valueOf(reactorName) + ":" + currentPort;
+
+        RuntimeException lastError = null;
+        for (String normalizedTarget : normalizedTargets) {
+            try {
+                sendDirectMessageNow(normalizedTarget, content, String.valueOf(contentType), reactorName, senderId, extraHeaders);
+                return;
+            } catch (Exception error) {
+                lastError = new RuntimeException(error.getMessage());
+            }
+        }
+
+        if (lastError != null) {
+            try {
+                sendExchangeMessageNow(targetValue.toLowerCase(Locale.ROOT), String.valueOf(content), String.valueOf(contentType));
+                return;
+            } catch (Exception ignored) {
+                enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), String.valueOf(contentType), extraHeaders);
+                return;
+            }
+        }
+
+        enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), String.valueOf(contentType), extraHeaders);
     }
 
     private void sendNodeMessage(String target, String content, Map<String, String> extraHeaders) {
@@ -960,7 +1331,7 @@ public class ReactorHttpService extends Service {
         RuntimeException lastError = null;
         for (String normalizedTarget : normalizedTargets) {
             try {
-                sendDirectMessageNow(normalizedTarget, content, reactorName, senderId, extraHeaders);
+                sendDirectMessageNow(normalizedTarget, content, "text/plain; charset=utf-8", reactorName, senderId, extraHeaders);
                 return;
             } catch (Exception error) {
                 lastError = new RuntimeException(error.getMessage());
@@ -1167,7 +1538,7 @@ public class ReactorHttpService extends Service {
                     String reactorName = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                             .getString(PREF_REACTOR_NAME, "mobile-reactor");
                     String senderId = String.valueOf(reactorName) + ":" + currentPort;
-                    sendDirectMessageNow(target, content, reactorName, senderId, jsonToHeaders(headersJson));
+                    sendDirectMessageNow(target, content, contentType, reactorName, senderId, jsonToHeaders(headersJson));
                 }
                 delivered += 1;
             } catch (Exception error) {
@@ -1219,7 +1590,7 @@ public class ReactorHttpService extends Service {
         }
     }
 
-    private void sendDirectMessageNow(String normalizedTarget, String content, String reactorName, String senderId, Map<String, String> extraHeaders) {
+    private void sendDirectMessageNow(String normalizedTarget, String content, String contentType, String reactorName, String senderId, Map<String, String> extraHeaders) {
         String[] hostPort = String.valueOf(normalizedTarget).split(":", 2);
         if (hostPort.length < 2) {
             throw new RuntimeException("invalid target");
@@ -1233,7 +1604,7 @@ public class ReactorHttpService extends Service {
             connection.setConnectTimeout(2000);
             connection.setReadTimeout(4000);
             connection.setDoOutput(true);
-            connection.setRequestProperty("content-type", "text/plain; charset=utf-8");
+            connection.setRequestProperty("content-type", String.valueOf(contentType == null || contentType.isEmpty() ? "text/plain; charset=utf-8" : contentType));
             connection.setRequestProperty("Reactor-Name", String.valueOf(reactorName));
             connection.setRequestProperty("Reactor-Sender", String.valueOf(senderId));
 
