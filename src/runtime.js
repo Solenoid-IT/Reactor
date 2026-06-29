@@ -397,6 +397,7 @@ class ReactorRuntime {
 		this.streamListenerMap = new Map();
 		this.streamEndListenerMap = new Map();
 		this.activeIncomingStreams = new Map();
+		this.reactorRootDir = options.reactorRootDir || path.dirname(this.scriptsDir);
 		this.streamStorageDir = path.join(this.reactorRootDir, 'temp_files', 'streams');
 		this.streamMaxActive = this.readQueueDuration('REACTOR_STREAM_MAX_ACTIVE', DEFAULT_STREAM_MAX_ACTIVE, 1);
 		this.streamIdleTimeoutMs = this.readQueueDuration('REACTOR_STREAM_IDLE_TIMEOUT_MS', DEFAULT_STREAM_IDLE_TIMEOUT_MS, 30 * 1000);
@@ -405,7 +406,6 @@ class ReactorRuntime {
 		this.httpServer = null;
 		this.httpServerPort = Number(options.httpServerPort || process.env.REACTOR_HTTP_PORT || 7070);
 		this.httpServerLogs = [];
-		this.reactorRootDir = options.reactorRootDir || path.dirname(this.scriptsDir);
 		this.reactorNamePath = path.join(this.reactorRootDir, 'name');
 		this.cachedReactorName = null;
 		this.exchangeManager = new ExchangeManager(this);

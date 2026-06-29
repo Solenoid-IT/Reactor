@@ -157,13 +157,13 @@ if (!gotSingleInstanceLock) {
 		await ensureMacLaunchAgentAutostart();
 		configureBackgroundMode();
 
+		runtime = new ReactorRuntime(EXTERNAL_SCRIPTS_DIR, EVENT_LOG_PATH);
+		setupIpcHandlers(runtime);
+
 		if (SHOW_WINDOW) {
 			mainWindow = createMainWindow();
 			wireBackgroundWindowBehavior(mainWindow);
 		}
-
-		runtime = new ReactorRuntime(EXTERNAL_SCRIPTS_DIR, EVENT_LOG_PATH);
-		setupIpcHandlers(runtime);
 
 		await runtime.init();
 		runtime.log(`Background mode active (window=${SHOW_WINDOW ? 'visible' : 'hidden'}, persist=${PERSIST_BACKGROUND ? 'on' : 'off'})`);
