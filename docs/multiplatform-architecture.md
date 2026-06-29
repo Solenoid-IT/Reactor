@@ -41,6 +41,14 @@ Support both:
 
 Use permission inference from metadata (see src/platform/permissionPlanner.js), then expose a global permissions panel in Settings.
 
+## Network Event Strategy
+
+- Desktop and server can derive network events from host runtime facilities.
+- Android uses `ConnectivityManager.NetworkCallback` as the primary trigger for `@on NET_CHANGE`.
+- Android applies a short debounce before recomputing the network snapshot so transient handoffs do not flood scripts.
+- Android keeps a lightweight fallback poll only when the system callback cannot be registered.
+- `NET_CHANGE` payload is best-effort across platforms and should be treated as a normalized runtime snapshot, not as a strict OS-level contract.
+
 ## Packaging and Build
 
 - dist/desktop: Electron artifacts

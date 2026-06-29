@@ -281,6 +281,7 @@ Supported events:
 - WIFI_OFF
 - NET_UP
 - NET_DOWN
+- NET_CHANGE
 - MESSAGE
 
 MESSAGE sender filter rules:
@@ -306,6 +307,13 @@ Boot/network behavior:
 - On bootstrap, a coherent initial connectivity pair is emitted immediately
 - Online: WIFI_ON and NET_UP
 - Offline: WIFI_OFF and NET_DOWN
+
+NET_CHANGE behavior:
+- `@on NET_CHANGE` receives a JSON payload with `reason`, `previous`, and `current`
+- Android uses `ConnectivityManager.NetworkCallback` as the primary trigger
+- Android applies a debounce window of about 2.5 seconds before evaluating the new network snapshot
+- Android falls back to a lightweight periodic poll only when the system callback is unavailable
+- Snapshot fields are best-effort and may include `online`, `primaryInterface`, `primaryAddress`, `subnet`, `gateway`, `transport`, `signal`, and `interfaces`
 
 ### @watch
 

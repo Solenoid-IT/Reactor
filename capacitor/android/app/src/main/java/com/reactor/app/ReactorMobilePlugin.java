@@ -37,6 +37,7 @@ import java.nio.file.StandardCopyOption;
 import java.security.SecureRandom;
 import java.util.Comparator;
 import java.util.List;
+import java.util.UUID;
 import java.util.stream.Stream;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -521,7 +522,7 @@ public class ReactorMobilePlugin extends Plugin {
         String scriptId = "";
         try {
             if (uuidFile.exists()) {
-                scriptId = Files.readString(uuidFile.toPath(), StandardCharsets.UTF_8).trim().toLowerCase();
+                scriptId = readTextFile(uuidFile).trim().toLowerCase();
             }
         } catch (Exception ignored) {
             scriptId = "";
