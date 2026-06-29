@@ -483,23 +483,32 @@ export async function getExchangeConfig() {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
-export async function setExchangeConfig(mode, host, port, tls = false, token = '') {
+export async function setExchangeConfig(mode, host, port, tls = false, token = '', discovery = false) {
 	const bridge = getBridge();
 	if (bridge && bridge.setExchangeConfig) {
-		return bridge.setExchangeConfig(mode, host, port, tls, token);
+		return bridge.setExchangeConfig(mode, host, port, tls, token, discovery);
 	}
 
 	const mobile = getMobilePlugin();
 	if (mobile && mobile.setExchangeConfig) {
-		return mobile.setExchangeConfig({ mode, host, port, tls, token });
+		return mobile.setExchangeConfig({ mode, host, port, tls, token, discovery });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'setExchangeConfig', { mode, host, port, tls, token });
+	const nativeResult = await invokeNative('ReactorMobile', 'setExchangeConfig', { mode, host, port, tls, token, discovery });
 	if (nativeResult) {
 		return nativeResult;
 	}
 
 	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function getExchangeLinkedNodes() {
+	const bridge = getBridge();
+	if (bridge && bridge.getExchangeLinkedNodes) {
+		return bridge.getExchangeLinkedNodes();
+	}
+
+	return { ok: false, error: 'bridge unavailable', nodes: [], total: 0 };
 }
 
 export async function getExchangeToken() {

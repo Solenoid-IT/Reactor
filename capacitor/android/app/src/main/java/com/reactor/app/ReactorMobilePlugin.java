@@ -149,6 +149,7 @@ public class ReactorMobilePlugin extends Plugin {
         config.put("port", ReactorHttpService.DEFAULT_PORT);
         config.put("tls", false);
         config.put("token", "");
+        config.put("discovery", false);
         return config;
     }
 
@@ -179,19 +180,21 @@ public class ReactorMobilePlugin extends Plugin {
             config.put("port", parsed.optInt("port", ReactorHttpService.DEFAULT_PORT));
             config.put("tls", parsed.optBoolean("tls", false));
             config.put("token", String.valueOf(parsed.optString("token", "")));
+            config.put("discovery", parsed.optBoolean("discovery", false));
             return config;
         } catch (Exception ignored) {
             return getDefaultWorkingModeConfig();
         }
     }
 
-    private JSObject writeWorkingModeConfig(String mode, String host, int port, boolean tls, String token) throws IOException {
+    private JSObject writeWorkingModeConfig(String mode, String host, int port, boolean tls, String token, boolean discovery) throws IOException {
         JSObject config = new JSObject();
         config.put("mode", mode);
         config.put("host", host != null ? host : "");
         config.put("port", port);
         config.put("tls", tls);
         config.put("token", token != null ? token : "");
+        config.put("discovery", discovery);
         writeTextFile(getWorkingModeFile(), config.toString() + "\n");
         return config;
     }
@@ -1226,6 +1229,7 @@ public class ReactorMobilePlugin extends Plugin {
         int port = workingMode.getInteger("port", ReactorHttpService.DEFAULT_PORT);
         boolean tls = workingMode.has("tls") && workingMode.getBool("tls");
         String token = workingMode.getString("token", "");
+        boolean discovery = workingMode.has("discovery") && workingMode.getBool("discovery");
 
         boolean active;
         if ("exchange".equals(ReactorHttpService.getCurrentExchangeMode())) {
@@ -1247,6 +1251,7 @@ public class ReactorMobilePlugin extends Plugin {
         config.put("port", port);
         config.put("tls", tls);
         config.put("token", token);
+        config.put("discovery", discovery);
         config.put("active", active);
         config.put("connectedClients", connectedClients);
 
@@ -1263,6 +1268,7 @@ public class ReactorMobilePlugin extends Plugin {
         int port = call.getInt("port", ReactorHttpService.DEFAULT_PORT);
         boolean tls = call.getBoolean("tls", false);
         String token = call.getString("token", "");
+        boolean discovery = call.getBoolean("discovery", false);
 
         if ("client".equals(mode)) {
             mode = "node";
@@ -1289,7 +1295,7 @@ public class ReactorMobilePlugin extends Plugin {
         editor.apply();
 
         try {
-            writeWorkingModeConfig(mode, host, port, tls, token);
+            writeWorkingModeConfig(mode, host, port, tls, token, discovery);
         } catch (Exception ignored) {
             // Keep prefs as fallback cache even if file write fails.
         }
@@ -1306,6 +1312,7 @@ public class ReactorMobilePlugin extends Plugin {
                 .put("port", port)
                 .put("tls", tls)
                 .put("token", token)
+                .put("discovery", discovery)
         .put("active", ReactorHttpService.isExchangeClientConnected()));
 		result.put("connectionTest", connectionTest);
         call.resolve(result);
@@ -1337,7 +1344,8 @@ public class ReactorMobilePlugin extends Plugin {
                 currentConfig.getString("host", ""),
                 currentConfig.getInteger("port", ReactorHttpService.DEFAULT_PORT),
                 currentConfig.has("tls") && currentConfig.getBool("tls"),
-                token
+                token,
+                currentConfig.has("discovery") && currentConfig.getBool("discovery")
             );
 
             SharedPreferences.Editor editor = getContext()

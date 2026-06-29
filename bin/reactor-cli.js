@@ -30,8 +30,9 @@ function printHelp() {
 	console.log('  reactor-cli build all');
 	console.log('  reactor-cli plugin build <pluginDir>');
 	console.log('  reactor-cli exchange get');
-	console.log('  reactor-cli exchange set exchange [port] [--tls] [--token <token>]');
-	console.log('  reactor-cli exchange set node <host> [port] [--tls] [--token <token>]');
+	console.log('  reactor-cli exchange set exchange [port] [--tls] [--token <token>] [--discovery|--no-discovery]');
+	console.log('  reactor-cli exchange set node <host> [port] [--tls] [--token <token>] [--discovery|--no-discovery]');
+	console.log('  reactor-cli exchange discovery <on|off>');
 	console.log('  reactor-cli exchange token get');
 	console.log('  reactor-cli exchange token generate');
 	console.log('  reactor-cli script id <script-name>');
@@ -94,6 +95,11 @@ async function main() {
 
 	if (command === 'exchange' && subcommand === 'set') {
 		await runDaemonCtl(['set-exchange', arg, ...rest]);
+		return;
+	}
+
+	if (command === 'exchange' && (subcommand === 'discovery' || subcommand === 'nodes')) {
+		await runDaemonCtl(['set-discovery', arg || '']);
 		return;
 	}
 

@@ -14,8 +14,12 @@
 	export let exchangePort = 7070;
 	export let exchangeTls = false;
 	export let exchangeToken = '';
+	export let discovery = false;
 	export let exchangeActive = false;
 	export let exchangeClients = [];
+	export let linkedNodes = [];
+	export let linkedNodesTotal = 0;
+	export let linkedNodesLoading = false;
 	export let onSaveReactorName = () => {};
 	export let onSaveHttpServerData = () => {};
 	export let onOpenServerStatus = () => {};
@@ -23,6 +27,7 @@
 	export let onDeleteTlsCert = () => {};
 	export let onGenerateExchangeToken = () => {};
 	export let onSaveExchangeConfig = () => {};
+	export let onRefreshLinkedNodes = () => {};
 	export let onExportBackup = () => {};
 	export let onImportBackup = () => {};
 	export let onStopBackgroundProcess = () => {};
@@ -62,6 +67,7 @@
 			exchangeValues.tls ?? exchangeTls,
 			exchangeValues.token ?? exchangeToken,
 			exchangeValues.enabled ?? exchangeEnabled,
+			exchangeValues.discovery ?? discovery,
 		);
 	}
 
@@ -171,6 +177,15 @@
 					</div>
 				</div>
 
+				<div class="row mt-2">
+					<div class="col">
+						<label class="d-flex align-items-center m-0">
+							<input type="checkbox" class="input me-2" name="exchange.discovery" data-type="bool" bind:checked={discovery} />
+							Enable discovery
+						</label>
+					</div>
+				</div>
+
 				{#if exchangeActive}
 					<div class="detail-value mt-4" style="color: var(--color-success, #4caf50);">
 						<i class="fa-solid fa-circle me-1"></i>Active — {exchangeClients.length} client(s)
@@ -180,6 +195,30 @@
 					{/if}
 				{:else}
 					<div class="detail-value mt-4" style="opacity:0.5;"><i class="fa-solid fa-circle me-1"></i>Not active</div>
+				{/if}
+
+				{#if discovery}
+					<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
+						<div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+							<span class="detail-label">Linked Nodes ({linkedNodesTotal})</span>
+							<button type="button" class="btn-secondary" on:click={onRefreshLinkedNodes} disabled={linkedNodesLoading}>
+								<i class="fa-solid fa-rotate-right me-1"></i>{linkedNodesLoading ? 'Refreshing...' : 'Refresh'}
+							</button>
+						</div>
+						{#if linkedNodes.length === 0}
+							<div class="detail-value mt-2" style="opacity:0.65;">No linked nodes</div>
+						{:else}
+							<div class="detail-value mt-2" style="max-height:220px; overflow:auto; font-size:0.78em;">
+								{#each linkedNodes as node}
+									<div style="padding:6px 0; border-bottom:1px dashed rgba(255,255,255,0.08);">
+										<div><strong>{node.name || 'unknown'}</strong> {node.ip ? `(${node.ip}${node.port ? `:${node.port}` : ''})` : ''}</div>
+										<div style="opacity:0.7;">Connected: {node.connectedAt || '-'}</div>
+										<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
+									</div>
+								{/each}
+							</div>
+						{/if}
+					</div>
 				{/if}
 			{/if}
 

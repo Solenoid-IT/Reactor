@@ -221,18 +221,35 @@ async function createControlServer(runtime, socketPath, onStopRequested, saveExc
 					const port = Number(payload.port) > 0 ? Number(payload.port) : 7070;
 					const tls = Boolean(payload.tls);
 					const token = String(payload.token || '').trim();
+					const discovery = Object.prototype.hasOwnProperty.call(payload, 'discovery')
+						? Boolean(payload.discovery)
+						: Object.prototype.hasOwnProperty.call(payload, 'exposeDiscoveryEndpoint')
+						? Boolean(payload.exposeDiscoveryEndpoint)
+						: runtime.exchangeDiscoveryEndpointEnabled;
 					if (!['node', 'exchange'].includes(mode)) {
 						response = { ok: false, error: 'invalid mode: use node or exchange' };
 					} else {
-						const config = await runtime.setExchangeConfig(mode, host, port, tls, token);
-						await saveExchangeConfig(mode, host, port, tls, token);
+						const config = await runtime.setExchangeConfig(mode, host, port, tls, token, discovery);
+						await saveExchangeConfig(mode, host, port, tls, token, discovery);
 						response = { ok: true, exchange: config };
 					}
+				} else if (command === 'set-discovery' || command === 'set-exchange-discovery') {
+					const enabled = Boolean(payload.enabled);
+					const config = await runtime.setExchangeConfig(
+						runtime.exchangeMode,
+						runtime.exchangeHost,
+						runtime.exchangePort,
+						runtime.exchangeTls,
+						runtime.exchangeAuthToken,
+						enabled,
+					);
+					await saveExchangeConfig(runtime.exchangeMode, runtime.exchangeHost, runtime.exchangePort, runtime.exchangeTls, runtime.exchangeAuthToken, enabled);
+					response = { ok: true, exchange: config };
 				} else if (command === 'get-exchange-token') {
 					response = { ok: true, exchangeToken: await runtime.getExchangeToken() };
 				} else if (command === 'generate-exchange-token') {
 					const exchangeToken = await runtime.generateExchangeToken();
-					await saveExchangeConfig(runtime.exchangeMode, runtime.exchangeHost, runtime.exchangePort, runtime.exchangeManager.tls, exchangeToken.token);
+					await saveExchangeConfig(runtime.exchangeMode, runtime.exchangeHost, runtime.exchangePort, runtime.exchangeManager.tls, exchangeToken.token, runtime.exchangeDiscoveryEndpointEnabled);
 					response = { ok: true, exchangeToken };
 				} else if (command === 'generate-tls-cert') {
 					const tlsBits = payload.bits;
@@ -324,6 +341,7 @@ async function main() {
 				port: Number(process.env.REACTOR_EXCHANGE_PORT) || 7070,
 				tls: process.env.REACTOR_EXCHANGE_TLS === '1' || process.env.REACTOR_EXCHANGE_TLS === 'true',
 				token: process.env.REACTOR_EXCHANGE_TOKEN || '',
+				discovery: process.env.REACTOR_EXCHANGE_DISCOVERY_ENDPOINT === '1' || process.env.REACTOR_EXCHANGE_DISCOVERY_ENDPOINT === 'true',
 			};
 		}
 		try {
@@ -334,13 +352,14 @@ async function main() {
 				port: Number(parsed.port) > 0 ? Number(parsed.port) : 7070,
 				tls: Boolean(parsed.tls),
 				token: String(parsed.token || ''),
+				discovery: Boolean(parsed.discovery),
 			};
 		} catch {
-			return { mode: 'node', host: '', port: 7070, tls: false, token: '' };
+			return { mode: 'node', host: '', port: 7070, tls: false, token: '', discovery: false };
 		}
 	}
 
-	async function saveExchangeConfig(mode, host, port, tls, token) {
+	async function saveExchangeConfig(mode, host, port, tls, token, discovery = false) {
 		await fs.mkdir(dataDir, { recursive: true });
 		await writeWorkingModeConfig(workingModeConfigPath, {
 			type: mode,
@@ -348,6 +367,7 @@ async function main() {
 			port,
 			tls: Boolean(tls),
 			token: String(token || ''),
+			discovery: Boolean(discovery),
 		});
 	}
 
@@ -360,6 +380,7 @@ async function main() {
 		exchangePort: exchangeCfg.port,
 		exchangeTls: exchangeCfg.tls,
 		exchangeToken: exchangeCfg.token,
+				discovery: exchangeCfg.discovery,
 	});
 	let controlServer = null;
 	let isShuttingDown = false;

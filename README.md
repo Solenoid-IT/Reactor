@@ -121,6 +121,8 @@ node daemonctl.js test "script-name"
 node daemonctl.js delete "script-name"
 node daemonctl.js set-name "my-reactor"
 node daemonctl.js set-port 7071
+node daemonctl.js set-exchange exchange 7070 --token "<token>" --discovery
+node daemonctl.js set-discovery on
 ```
 
 Examples:

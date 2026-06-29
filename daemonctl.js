@@ -28,8 +28,9 @@ function usage() {
 	console.log('  node daemonctl.js delete <script-name>');
 	console.log('  node daemonctl.js set-name <reactor-name>');
 	console.log('  node daemonctl.js set-port <1-65535>');
-	console.log('  node daemonctl.js set-exchange exchange [port] [--tls] [--token <token>]');
-	console.log('  node daemonctl.js set-exchange node <host> [port] [--tls] [--token <token>]');
+	console.log('  node daemonctl.js set-exchange exchange [port] [--tls] [--token <token>] [--discovery|--no-discovery]');
+	console.log('  node daemonctl.js set-exchange node <host> [port] [--tls] [--token <token>] [--discovery|--no-discovery]');
+	console.log('  node daemonctl.js set-discovery <on|off>');
 	console.log('  node daemonctl.js get-exchange');
 	console.log('  node daemonctl.js get-exchange-token');
 	console.log('  node daemonctl.js generate-exchange-token');
@@ -79,6 +80,7 @@ function extractExchangeFlags(args) {
 	const values = [...args];
 	let tls = false;
 	let token = '';
+	let discovery;
 
 	for (let index = 0; index < values.length; index += 1) {
 		const value = String(values[index] || '').trim();
@@ -92,10 +94,46 @@ function extractExchangeFlags(args) {
 			token = String(values[index + 1] || '').trim();
 			values.splice(index, 2);
 			index -= 1;
+			continue;
+		}
+		if (value === '--discovery') {
+			discovery = true;
+			values.splice(index, 1);
+			index -= 1;
+			continue;
+		}
+		if (value === '--no-discovery') {
+			discovery = false;
+			values.splice(index, 1);
+			index -= 1;
+			continue;
+		}
+		if (value === '--enable-discovery') {
+			discovery = true;
+			values.splice(index, 1);
+			index -= 1;
+			continue;
+		}
+		if (value === '--disable-discovery') {
+			discovery = false;
+			values.splice(index, 1);
+			index -= 1;
+			continue;
+		}
+		if (value === '--expose-discovery') {
+			discovery = true;
+			values.splice(index, 1);
+			index -= 1;
+			continue;
+		}
+		if (value === '--hide-discovery') {
+			discovery = false;
+			values.splice(index, 1);
+			index -= 1;
 		}
 	}
 
-	return { args: values, tls, token };
+	return { args: values, tls, token, discovery };
 }
 
 async function sendCommand(payload) {
@@ -262,6 +300,10 @@ async function main() {
 		console.log(`Host:   ${ex.host || '-'}`);
 		console.log(`Port:   ${ex.port || 7070}`);
 		console.log(`TLS:    ${ex.tls ? 'yes' : 'no'}`);
+		console.log(`Discovery:  ${ex.discovery ? 'enabled' : 'disabled'}`);
+		if (ex.discoveryEndpointPath) {
+			console.log(`NodesEP:${ex.discoveryEndpointPath}`);
+		}
 		console.log(`Active: ${ex.active ? 'yes' : 'no'}`);
 		console.log(`Token:  ${ex.token ? 'configured' : 'missing'}`);
 		if (ex.connectionLogPath) {
@@ -381,7 +423,11 @@ async function main() {
 			}
 		}
 
-		const response = await sendCommand({ command: 'set-exchange', mode, host, port, tls: parsed.tls, token: parsed.token });
+		const payload = { command: 'set-exchange', mode, host, port, tls: parsed.tls, token: parsed.token };
+		if (parsed.discovery !== undefined) {
+			payload.discovery = parsed.discovery;
+		}
+		const response = await sendCommand(payload);
 		if (!response.ok) {
 			console.error(`[daemonctl] ${response.error || 'set-exchange failed'}`);
 			process.exit(1);
@@ -391,7 +437,27 @@ async function main() {
 		if (ex.mode === 'node') console.log(`Exchange: ${ex.tls ? 'wss' : 'ws'}://${ex.host}:${ex.port}`);
 		if (ex.mode === 'exchange') console.log(`Exchange server active on port: ${ex.port}`);
 		console.log(`TLS: ${ex.tls ? 'enabled' : 'disabled'}`);
+		console.log(`Discovery: ${ex.discovery ? 'enabled' : 'disabled'}${ex.discoveryEndpointPath ? ` (${ex.discoveryEndpointPath})` : ''}`);
 		if (ex.token) console.log('Token: configured');
+		return;
+	}
+
+	if (command === 'set-discovery' || command === 'set-exchange-discovery') {
+		const rawValue = String(rest[0] || '').trim().toLowerCase();
+		if (!['on', 'off', 'true', 'false', '1', '0'].includes(rawValue)) {
+			console.error('[daemonctl] set-discovery: value must be on|off');
+			usage();
+		}
+
+		const enabled = ['on', 'true', '1'].includes(rawValue);
+		const response = await sendCommand({ command: 'set-discovery', enabled });
+		if (!response.ok) {
+			console.error(`[daemonctl] ${response.error || 'set-discovery failed'}`);
+			process.exit(1);
+		}
+
+		const ex = response.exchange || {};
+		console.log(`Discovery: ${ex.discovery ? 'enabled' : 'disabled'}${ex.discoveryEndpointPath ? ` (${ex.discoveryEndpointPath})` : ''}`);
 		return;
 	}
 

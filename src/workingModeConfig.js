@@ -6,6 +6,7 @@ const DEFAULT_WORKING_MODE_CONFIG = {
 	port: 7070,
 	tls: false,
 	token: '',
+	discovery: false,
 };
 
 function normalizeMode(rawMode) {
@@ -26,6 +27,14 @@ function normalizeWorkingModeConfig(rawConfig = {}) {
 		port: Number(rawConfig.port || rawConfig.exchangePort) > 0 ? Number(rawConfig.port || rawConfig.exchangePort) : 7070,
 		tls: Boolean(rawConfig.tls ?? rawConfig.exchangeTls),
 		token: String(rawConfig.token || rawConfig.exchangeToken || ''),
+		discovery: Boolean(
+			rawConfig.discovery
+			?? rawConfig.exchangeDiscovery
+			?? rawConfig.discoveryEnabled
+			?? rawConfig.exposeDiscoveryEndpoint
+			?? rawConfig.exchangeDiscoveryEndpoint
+			?? rawConfig.discoveryEndpoint,
+		),
 	};
 }
 
@@ -50,6 +59,24 @@ function normalizeWorkingModeUpdate(rawConfig = {}) {
 
 	if (Object.prototype.hasOwnProperty.call(rawConfig, 'token') || Object.prototype.hasOwnProperty.call(rawConfig, 'exchangeToken')) {
 		normalized.token = String(rawConfig.token || rawConfig.exchangeToken || '');
+	}
+
+	if (
+		Object.prototype.hasOwnProperty.call(rawConfig, 'discovery')
+		|| Object.prototype.hasOwnProperty.call(rawConfig, 'exchangeDiscovery')
+		|| Object.prototype.hasOwnProperty.call(rawConfig, 'discoveryEnabled')
+		|| Object.prototype.hasOwnProperty.call(rawConfig, 'exposeDiscoveryEndpoint')
+		|| Object.prototype.hasOwnProperty.call(rawConfig, 'exchangeDiscoveryEndpoint')
+		|| Object.prototype.hasOwnProperty.call(rawConfig, 'discoveryEndpoint')
+	) {
+		normalized.discovery = Boolean(
+			rawConfig.discovery
+			?? rawConfig.exchangeDiscovery
+			?? rawConfig.discoveryEnabled
+			?? rawConfig.exposeDiscoveryEndpoint
+			?? rawConfig.exchangeDiscoveryEndpoint
+			?? rawConfig.discoveryEndpoint,
+		);
 	}
 
 	return normalized;

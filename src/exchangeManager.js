@@ -746,6 +746,7 @@ class ExchangeManager {
 			this._stopClientHeartbeat();
 			this._clientLastError = String(err?.message || 'unknown error');
 			this.runtime.log(`[Exchange] Error: ${err.message}`);
+			this._scheduleReconnect();
 		});
 	}
 
@@ -854,6 +855,7 @@ class ExchangeManager {
 
 	_scheduleReconnect() {
 		if (this._stopped || this.mode !== 'client') return;
+		if (this.reconnectTimer) return;
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = null;
 			this._startClient();
@@ -1060,6 +1062,7 @@ class ExchangeManager {
 		const isClientConnected =
 			this.mode === 'client' && Boolean(this.wsClient) && this.wsClient.readyState === WebSocket.OPEN;
 		const now = Date.now();
+		const connectedClientsDetails = this.getConnectedClientsDiscoveryEntries(now);
 		return {
 			mode: this.mode,
 			host: this.host,
@@ -1067,7 +1070,7 @@ class ExchangeManager {
 			tls: this.tls,
 			active: this.mode === 'exchange' ? Boolean(this.wss) : this.mode === 'client' ? isClientConnected : false,
 			connectedClients: this.mode === 'exchange' ? Array.from(this.connectedClients.keys()) : [],
-			connectedClientsDetails: this.mode === 'exchange' ? Array.from(this._connectedClientDetails.values()) : [],
+			connectedClientsDetails,
 			activeConnectionsPath: this._activeConnectionsPath,
 			heartbeat: {
 				intervalMs: this._heartbeatIntervalMs,
@@ -1087,6 +1090,32 @@ class ExchangeManager {
 			},
 			connectionLogPath: this._connectionLogPath,
 		};
+	}
+
+	getConnectedClientsDiscoveryEntries(nowMs = Date.now()) {
+		if (this.mode !== 'exchange') {
+			return [];
+		}
+
+		return Array.from(this._connectedClientDetails.values())
+			.map((detail) => {
+				const connectedAt = String(detail?.registrationAt || detail?.connectedAt || '').trim();
+				const connectedAtMs = connectedAt ? Date.parse(connectedAt) : NaN;
+				const connectedForMs = Number.isFinite(connectedAtMs) ? Math.max(0, nowMs - connectedAtMs) : null;
+
+				return {
+					name: detail?.name || 'unknown',
+					address: detail?.address || null,
+					ip: detail?.ip || null,
+					port: Number.isFinite(Number(detail?.port)) ? Number(detail.port) : null,
+					connectedAt: connectedAt || null,
+					lastSeenAt: detail?.lastSeenAt || null,
+					userAgent: detail?.userAgent || '',
+					connectedForMs,
+					connectedForSec: Number.isFinite(connectedForMs) ? Math.floor(connectedForMs / 1000) : null,
+				};
+			})
+			.sort((a, b) => String(a.name).localeCompare(String(b.name)));
 	}
 }
 

@@ -155,7 +155,8 @@ export async function run(ctx: Context) {
 
 **Exchange-related methods:**
 - `getExchangeConfig()` → returns current exchange config + status
-- `setExchangeConfig(mode, host, port)` → applies new exchange config at runtime
+- `setExchangeConfig(mode, host, port, tls, token, discovery)` → applies new exchange config at runtime
+- Exchange server optional linked-nodes endpoint: `GET /nodes` (Bearer token auth, same token used by exchange clients)
 
 **`Node.sendMessage` routing logic:**
 1. Tenta HTTP POST diretto a `http://<target>/message` (LAN)

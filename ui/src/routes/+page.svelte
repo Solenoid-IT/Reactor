@@ -31,6 +31,7 @@
 		getWorkflow,
 		saveWorkflow,
 		getExchangeConfig,
+		getExchangeLinkedNodes,
 		setExchangeConfig,
 		getExchangeToken,
 		generateExchangeToken,
@@ -57,8 +58,12 @@
 	let exchangePort = 7070;
 	let exchangeTls = false;
 	let exchangeToken = '';
+	let exchangeDiscovery = false;
 	let exchangeActive = false;
 	let exchangeClients = [];
+	let exchangeLinkedNodes = [];
+	let exchangeLinkedNodesTotal = 0;
+	let exchangeLinkedNodesLoading = false;
 	let tlsEnabled = false;
 	let tlsSubject = '';
 	let tlsNotAfter = '';
@@ -152,6 +157,7 @@
 			exchangePort = Number(ec.port) || 7070;
 			exchangeTls = Boolean(ec.tls);
 			exchangeToken = ec.token || '';
+			exchangeDiscovery = Boolean(ec.discovery ?? ec.exposeDiscoveryEndpoint);
 			exchangeActive = Boolean(ec.active);
 			exchangeClients = Array.isArray(ec.connectedClients) ? ec.connectedClients : [];
 			exchangeEnabled = Boolean((ec.host || '').trim());
@@ -172,7 +178,44 @@
 		if (selectedIndex >= scripts.length) {
 			selectedIndex = -1;
 		}
+
+		if (exchangeMode === 'exchange' && exchangeDiscovery) {
+			await refreshExchangeLinkedNodes(true);
+		} else {
+			exchangeLinkedNodes = [];
+			exchangeLinkedNodesTotal = 0;
+		}
+
 		status = 'Data refreshed';
+	}
+
+	async function refreshExchangeLinkedNodes(silent = false) {
+		if (exchangeMode !== 'exchange' || !exchangeDiscovery) {
+			exchangeLinkedNodes = [];
+			exchangeLinkedNodesTotal = 0;
+			return;
+		}
+
+		exchangeLinkedNodesLoading = true;
+		try {
+			const result = await getExchangeLinkedNodes();
+			if (!result?.ok) {
+				exchangeLinkedNodes = [];
+				exchangeLinkedNodesTotal = 0;
+				if (!silent) {
+					status = `Error: ${result?.error || 'unable to refresh linked nodes'}`;
+				}
+				return;
+			}
+
+			exchangeLinkedNodes = Array.isArray(result.nodes) ? result.nodes : [];
+			exchangeLinkedNodesTotal = Number(result.total || exchangeLinkedNodes.length || 0);
+			if (!silent) {
+				status = `Linked nodes refreshed (${exchangeLinkedNodesTotal})`;
+			}
+		} finally {
+			exchangeLinkedNodesLoading = false;
+		}
 	}
 
 	async function createScript(templateKey) {
@@ -362,15 +405,16 @@
 		status = result?.ok ? `Server status opened: ${result.url}` : `Error: ${result?.error || 'unknown'}`;
 	}
 
-	async function saveExchangeConfigValue(mode, host, port, tls, token, enabled = true) {
+	async function saveExchangeConfigValue(mode, host, port, tls, token, enabled = true, discovery = false) {
 		const numericPort = Number(port);
 		if (!Number.isFinite(numericPort) || numericPort < 1 || numericPort > 65535) {
 			status = 'Error: invalid Exchange port';
 			return;
 		}
 		const safeEnabled = Boolean(enabled);
+		const safeDiscovery = Boolean(discovery);
 		const effectiveHost = mode === 'node' && !safeEnabled ? '' : host || '';
-		const result = await setExchangeConfig(mode, effectiveHost, numericPort, Boolean(tls), token || '');
+		const result = await setExchangeConfig(mode, effectiveHost, numericPort, Boolean(tls), token || '', safeDiscovery);
 		if (!result?.ok) {
 			status = `Error: ${result?.error || 'unknown'}`;
 			await refreshAll();
@@ -393,6 +437,10 @@
 		if (mode === 'node' && !exchangeActive) {
 			await new Promise((resolve) => setTimeout(resolve, 800));
 			await refreshAll();
+		}
+
+		if (mode === 'exchange' && safeDiscovery) {
+			await refreshExchangeLinkedNodes(true);
 		}
 	}
 
@@ -708,8 +756,12 @@
 			{exchangePort}
 			{exchangeTls}
 			{exchangeToken}
+			discovery={exchangeDiscovery}
 			{exchangeActive}
 			{exchangeClients}
+			linkedNodes={exchangeLinkedNodes}
+			linkedNodesTotal={exchangeLinkedNodesTotal}
+			linkedNodesLoading={exchangeLinkedNodesLoading}
 			onSaveReactorName={saveReactorNameValue}
 			onSaveHttpServerData={saveHttpPortValue}
 			onOpenServerStatus={openServerStatusPage}
@@ -717,6 +769,7 @@
 			onDeleteTlsCert={deleteTlsCertHandler}
 			onGenerateExchangeToken={generateExchangeTokenHandler}
 			onSaveExchangeConfig={saveExchangeConfigValue}
+			onRefreshLinkedNodes={() => refreshExchangeLinkedNodes(false)}
 			onExportBackup={exportBackupHandler}
 			onImportBackup={importBackupHandler}
 			onStopBackgroundProcess={stopBackgroundProcessHandler}

@@ -242,6 +242,26 @@ function pickPrimaryLocalHost() {
 	return '127.0.0.1';
 }
 
+function parseBooleanOption(rawValue, fallback = false) {
+	if (rawValue === undefined || rawValue === null || rawValue === '') {
+		return Boolean(fallback);
+	}
+
+	if (typeof rawValue === 'boolean') {
+		return rawValue;
+	}
+
+	const normalized = String(rawValue).trim().toLowerCase();
+	if (['1', 'true', 'yes', 'on', 'enabled'].includes(normalized)) {
+		return true;
+	}
+	if (['0', 'false', 'no', 'off', 'disabled'].includes(normalized)) {
+		return false;
+	}
+
+	return Boolean(fallback);
+}
+
 class IncomingStreamPacket {
 	constructor(payload = {}) {
 		this.payload = payload && typeof payload === 'object' ? payload : {};
@@ -483,6 +503,14 @@ class ReactorRuntime {
 		this.exchangePort = Number(options.exchangePort || process.env.REACTOR_EXCHANGE_PORT || 7070);
 		this.exchangeTls = Boolean(options.exchangeTls || process.env.REACTOR_EXCHANGE_TLS === '1' || process.env.REACTOR_EXCHANGE_TLS === 'true');
 		this.exchangeAuthToken = String(options.exchangeToken || process.env.REACTOR_EXCHANGE_TOKEN || '');
+		this.exchangeDiscoveryEndpointEnabled = parseBooleanOption(
+			options.discovery
+			?? options.exchangeDiscovery
+			?? options.discoveryEnabled
+			?? options.exchangeDiscoveryEndpoint,
+			parseBooleanOption(process.env.REACTOR_EXCHANGE_DISCOVERY_ENDPOINT, false),
+		);
+		this.exchangeDiscoveryEndpointPath = '/nodes';
 		this.workingModeConfigPath = path.join(this.reactorRootDir, 'working-mode.json');
 		this.tlsManager = new TlsManager(path.join(this.reactorRootDir, 'tls'));
 		this.tlsEnabled = false; // impostato da startHttpServer
@@ -781,6 +809,9 @@ class ReactorRuntime {
 			host: this.exchangeHost,
 			port: this.exchangePort,
 			token: this.exchangeAuthToken,
+			discovery: this.exchangeDiscoveryEndpointEnabled,
+			exposeDiscoveryEndpoint: this.exchangeDiscoveryEndpointEnabled,
+			discoveryEndpointPath: this.exchangeDiscoveryEndpointPath,
 		};
 	}
 
@@ -803,6 +834,7 @@ class ReactorRuntime {
 			port: this.exchangePort,
 			tls: this.exchangeTls,
 			token,
+			discovery: this.exchangeDiscoveryEndpointEnabled,
 		});
 		this.exchangeAuthToken = token;
 		return {
@@ -830,12 +862,13 @@ class ReactorRuntime {
 		await this.restartHttpServer();
 	}
 
-	async setExchangeConfig(mode, host, port, tls = false, token = '') {
+	async setExchangeConfig(mode, host, port, tls = false, token = '', discovery = this.exchangeDiscoveryEndpointEnabled) {
 		const requestedMode = String(mode || 'node').trim().toLowerCase();
 		const safeHost = String(host || '').trim();
 		const safePort = Number(port) > 0 ? Number(port) : 7070;
 		const safeTls = Boolean(tls);
 		const safeToken = String(token || '').trim();
+		const safeDiscovery = parseBooleanOption(discovery, this.exchangeDiscoveryEndpointEnabled);
 		const safeMode = requestedMode === 'client' ? 'node' : requestedMode === 'disabled' ? 'node' : requestedMode;
 		const internalMode = safeMode === 'exchange' ? 'exchange' : 'client';
 
@@ -848,9 +881,51 @@ class ReactorRuntime {
 		this.exchangePort = safePort;
 		this.exchangeTls = safeTls;
 		this.exchangeAuthToken = safeToken;
+		this.exchangeDiscoveryEndpointEnabled = safeDiscovery;
 		this.exchangeManager.configure(internalMode, safeHost, safePort, safeTls);
 		await this.exchangeManager.start(this.httpServer);
+		await writeWorkingModeConfig(this.workingModeConfigPath, {
+			type: this.exchangeMode,
+			host: this.exchangeHost,
+			port: this.exchangePort,
+			tls: this.exchangeTls,
+			token: this.exchangeAuthToken,
+			discovery: this.exchangeDiscoveryEndpointEnabled,
+		});
 		return this.getExchangeConfig();
+	}
+
+	getExchangeLinkedNodesSnapshot() {
+		if (this.exchangeMode !== 'exchange') {
+			return {
+				ok: false,
+				error: 'available only in exchange mode',
+				nodes: [],
+				total: 0,
+			};
+		}
+
+		if (!this.exchangeDiscoveryEndpointEnabled) {
+			return {
+				ok: false,
+				error: 'discovery is disabled',
+				nodes: [],
+				total: 0,
+			};
+		}
+
+		const nodes = this.exchangeManager && typeof this.exchangeManager.getConnectedClientsDiscoveryEntries === 'function'
+			? this.exchangeManager.getConnectedClientsDiscoveryEntries(Date.now())
+			: [];
+
+		return {
+			ok: true,
+			mode: this.exchangeMode,
+			endpoint: this.exchangeDiscoveryEndpointPath,
+			generatedAt: new Date().toISOString(),
+			total: nodes.length,
+			nodes,
+		};
 	}
 
 	async testExchangeClientConnection(timeoutMs = 5000) {
@@ -1277,6 +1352,26 @@ class ReactorRuntime {
 			nodeName: rawNode || null,
 			scriptId: isUuidV4(rawScriptId) ? rawScriptId : null,
 		};
+	}
+
+	readBearerToken(headers = {}) {
+		const rawAuthorization = String(headers.authorization || '').trim();
+		if (!rawAuthorization) {
+			return '';
+		}
+
+		const match = rawAuthorization.match(/^Bearer\s+(.+)$/i);
+		return match ? String(match[1] || '').trim() : '';
+	}
+
+	isExchangeDiscoveryRequestAuthorized(headers = {}) {
+		const expectedToken = String(this.exchangeAuthToken || '').trim();
+		if (!expectedToken) {
+			return false;
+		}
+
+		const providedToken = this.readBearerToken(headers);
+		return Boolean(providedToken) && providedToken === expectedToken;
 	}
 
 	async ensureProjectScriptId(projectDir) {
@@ -1738,6 +1833,60 @@ class ReactorRuntime {
 					uptimeSec: Math.floor(process.uptime()),
 					httpPort: this.httpServerPort,
 					scriptsCount: this.scripts.length,
+				}),
+			);
+			return;
+		}
+
+		if (method === 'GET' && pathname === this.exchangeDiscoveryEndpointPath) {
+			if (this.exchangeMode !== 'exchange') {
+				this.addHttpServerLog(`GET ${pathname} -> 403 (disabled in mode=${this.exchangeMode})`);
+				res.writeHead(403, { 'content-type': 'application/json' });
+				res.end(
+					JSON.stringify({
+						ok: false,
+						error: 'endpoint available only in exchange mode',
+						mode: this.exchangeMode,
+					}),
+				);
+				return;
+			}
+
+			if (!this.exchangeDiscoveryEndpointEnabled) {
+				this.addHttpServerLog(`GET ${pathname} -> 404 (endpoint disabled)`);
+				res.writeHead(404, { 'content-type': 'application/json' });
+				res.end(JSON.stringify({ ok: false, error: 'endpoint not found' }));
+				return;
+			}
+
+			if (!String(this.exchangeAuthToken || '').trim()) {
+				this.addHttpServerLog(`GET ${pathname} -> 503 (token not configured)`);
+				res.writeHead(503, { 'content-type': 'application/json' });
+				res.end(JSON.stringify({ ok: false, error: 'exchange token not configured' }));
+				return;
+			}
+
+			if (!this.isExchangeDiscoveryRequestAuthorized(req.headers || {})) {
+				this.addHttpServerLog(`GET ${pathname} -> 401 (invalid bearer token)`);
+				res.writeHead(401, { 'content-type': 'application/json' });
+				res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+				return;
+			}
+
+			const nodes = this.exchangeManager && typeof this.exchangeManager.getConnectedClientsDiscoveryEntries === 'function'
+				? this.exchangeManager.getConnectedClientsDiscoveryEntries(Date.now())
+				: [];
+
+			this.addHttpServerLog(`GET ${pathname} -> 200 nodes=${nodes.length}`);
+			res.writeHead(200, { 'content-type': 'application/json' });
+			res.end(
+				JSON.stringify({
+					ok: true,
+					mode: this.exchangeMode,
+					endpoint: this.exchangeDiscoveryEndpointPath,
+					generatedAt: new Date().toISOString(),
+					total: nodes.length,
+					nodes,
 				}),
 			);
 			return;

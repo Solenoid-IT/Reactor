@@ -36,6 +36,35 @@ REACTOR_DATA_DIR=/var/lib/reactor node daemonctl.js generate-exchange-token
 REACTOR_DATA_DIR=/var/lib/reactor node daemonctl.js get-exchange-token
 ```
 
+## Optional discovery endpoint (HTTP)
+
+Expose an HTTP endpoint that lists currently connected Exchange nodes (name, ip, port, connectedAt, lastSeenAt, userAgent):
+
+```bash
+REACTOR_DATA_DIR=/var/lib/reactor node daemonctl.js set-discovery on
+```
+
+Disable it:
+
+```bash
+REACTOR_DATA_DIR=/var/lib/reactor node daemonctl.js set-discovery off
+```
+
+When enabled, query it with the same Bearer token used by nodes to register against Exchange:
+
+```bash
+TOKEN="$(REACTOR_DATA_DIR=/var/lib/reactor node daemonctl.js get-exchange-token | awk -F'  ' '/Token:/ {print $2}')"
+curl -s \
+	-H "Authorization: Bearer ${TOKEN}" \
+	http://127.0.0.1:7070/nodes | jq .
+```
+
+Notes:
+- endpoint path: `/nodes`
+- available only in `exchange` mode
+- returns `401` when token is missing/invalid
+- returns `404` when discovery is disabled
+
 ## Monitor connected nodes
 
 1. Runtime status and heartbeat metrics:

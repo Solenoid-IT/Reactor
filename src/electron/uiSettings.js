@@ -25,6 +25,7 @@ async function readUiSettings() {
 			exchangePort: workingModeSettings.port,
 			exchangeTls: workingModeSettings.tls,
 			exchangeToken: workingModeSettings.token,
+			exchangeDiscovery: Boolean(workingModeSettings.discovery),
 		};
 		return {
 			defaultProgramPath: parsed.defaultProgramPath || '',
@@ -40,6 +41,7 @@ async function readUiSettings() {
 			exchangePort: DEFAULT_WORKING_MODE_CONFIG.port,
 			exchangeTls: DEFAULT_WORKING_MODE_CONFIG.tls,
 			exchangeToken: DEFAULT_WORKING_MODE_CONFIG.token,
+			exchangeDiscovery: Boolean(DEFAULT_WORKING_MODE_CONFIG.discovery),
 		};
 	}
 }
@@ -47,7 +49,7 @@ async function readUiSettings() {
 async function writeUiSettings(nextSettings) {
 	const current = await readUiSettings();
 	const workingModeUpdates = {};
-	for (const key of ['exchangeMode', 'exchangeHost', 'exchangePort', 'exchangeTls', 'exchangeToken']) {
+	for (const key of ['exchangeMode', 'exchangeHost', 'exchangePort', 'exchangeTls', 'exchangeToken', 'exchangeDiscovery']) {
 		if (Object.prototype.hasOwnProperty.call(nextSettings, key)) {
 			workingModeUpdates[key] = nextSettings[key];
 		}

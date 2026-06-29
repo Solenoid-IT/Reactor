@@ -149,6 +149,7 @@ function setupIpcHandlers(runtime, options = {}) {
 						Number(settings.exchangePort) || 7070,
 						Boolean(settings.exchangeTls),
 						settings.exchangeToken || '',
+						Boolean(settings.exchangeDiscovery),
 					)
 					.catch(() => {});
 			}
@@ -180,6 +181,7 @@ function setupIpcHandlers(runtime, options = {}) {
 						Number(settings.exchangePort) || 7070,
 						Boolean(settings.exchangeTls),
 						settings.exchangeToken || '',
+						Boolean(settings.exchangeDiscovery),
 					)
 					.catch(() => {});
 			}
@@ -975,7 +977,7 @@ function setupIpcHandlers(runtime, options = {}) {
 		return { ok: true, config: runtime.getExchangeConfig() };
 	});
 
-	ipcMain.handle('set-exchange-config', async (_, { mode, host, port, tls, token }) => {
+	ipcMain.handle('set-exchange-config', async (_, { mode, host, port, tls, token, discovery }) => {
 		if (!runtime || !runtime.setExchangeConfig) {
 			return { ok: false, error: 'runtime not ready' };
 		}
@@ -985,16 +987,29 @@ function setupIpcHandlers(runtime, options = {}) {
 		const safePort = Number(port) > 0 ? Number(port) : 7070;
 		const safeTls = Boolean(tls);
 		const safeToken = String(token || '').trim();
+		const safeDiscovery = Boolean(discovery);
 
 		try {
-			await writeUiSettings({ exchangeMode: safeMode, exchangeHost: safeHost, exchangePort: safePort, exchangeTls: safeTls, exchangeToken: safeToken });
-			await runtime.setExchangeConfig(safeMode, safeHost, safePort, safeTls, safeToken);
+			await writeUiSettings({ exchangeMode: safeMode, exchangeHost: safeHost, exchangePort: safePort, exchangeTls: safeTls, exchangeToken: safeToken, exchangeDiscovery: safeDiscovery });
+			await runtime.setExchangeConfig(safeMode, safeHost, safePort, safeTls, safeToken, safeDiscovery);
 			const connectionTest = runtime.testExchangeClientConnection
 				? await runtime.testExchangeClientConnection(5000)
 				: { connected: false, skipped: true, reason: 'connection test unavailable', elapsedMs: 0 };
 			return { ok: true, config: runtime.getExchangeConfig(), connectionTest };
 		} catch (error) {
 			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('get-exchange-linked-nodes', async () => {
+		if (!runtime || !runtime.getExchangeLinkedNodesSnapshot) {
+			return { ok: false, error: 'runtime not ready', nodes: [], total: 0 };
+		}
+
+		try {
+			return runtime.getExchangeLinkedNodesSnapshot();
+		} catch (error) {
+			return { ok: false, error: error.message || 'unable to load linked nodes', nodes: [], total: 0 };
 		}
 	});
 
