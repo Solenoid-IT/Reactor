@@ -508,6 +508,16 @@ export async function getExchangeLinkedNodes() {
 		return bridge.getExchangeLinkedNodes();
 	}
 
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.getExchangeLinkedNodes) {
+		return mobile.getExchangeLinkedNodes();
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'getExchangeLinkedNodes');
+	if (nativeResult) {
+		return nativeResult;
+	}
+
 	return { ok: false, error: 'bridge unavailable', nodes: [], total: 0 };
 }
 

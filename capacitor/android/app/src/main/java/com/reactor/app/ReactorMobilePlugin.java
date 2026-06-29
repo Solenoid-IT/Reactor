@@ -22,6 +22,7 @@ import androidx.activity.result.ActivityResult;
 import android.util.Base64;
 
 import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -35,6 +36,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
@@ -44,6 +46,13 @@ import java.util.Arrays;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
+import java.net.URL;
+import java.net.HttpURLConnection;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 @CapacitorPlugin(name = "ReactorMobile")
@@ -197,6 +206,46 @@ public class ReactorMobilePlugin extends Plugin {
         config.put("discovery", discovery);
         writeTextFile(getWorkingModeFile(), config.toString() + "\n");
         return config;
+    }
+
+    private String readHttpResponseBody(HttpURLConnection connection, int status) throws IOException {
+        InputStream stream = status >= 200 && status < 400 ? connection.getInputStream() : connection.getErrorStream();
+        if (stream == null) {
+            return "";
+        }
+
+        StringBuilder content = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                content.append(line);
+            }
+        }
+        return content.toString();
+    }
+
+    private void applyInsecureTls(HttpsURLConnection connection) throws Exception {
+        X509TrustManager trustAll = new X509TrustManager() {
+            @Override
+            public void checkClientTrusted(X509Certificate[] chain, String authType) {
+                // Intentionally permissive for Exchange discovery over self-signed certs.
+            }
+
+            @Override
+            public void checkServerTrusted(X509Certificate[] chain, String authType) {
+                // Intentionally permissive for Exchange discovery over self-signed certs.
+            }
+
+            @Override
+            public X509Certificate[] getAcceptedIssuers() {
+                return new X509Certificate[0];
+            }
+        };
+
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(null, new TrustManager[] { trustAll }, new SecureRandom());
+        connection.setSSLSocketFactory(sslContext.getSocketFactory());
+        connection.setHostnameVerifier((hostname, session) -> true);
     }
 
     private JSObject waitForExchangeClientConnection(long timeoutMs) {
@@ -1259,6 +1308,107 @@ public class ReactorMobilePlugin extends Plugin {
         result.put("ok", true);
         result.put("config", config);
         call.resolve(result);
+    }
+
+    @PluginMethod
+    public void getExchangeLinkedNodes(PluginCall call) {
+        JSObject workingMode = readWorkingModeConfig();
+        String mode = workingMode.getString("mode", "node");
+        String host = workingMode.getString("host", "").trim();
+        int port = workingMode.getInteger("port", ReactorHttpService.DEFAULT_PORT);
+        boolean tls = workingMode.has("tls") && workingMode.getBool("tls");
+        String token = workingMode.getString("token", "").trim();
+
+        if (!"node".equals(mode)) {
+            call.resolve(new JSObject().put("ok", false).put("error", "available only in node mode").put("nodes", new JSArray()).put("total", 0));
+            return;
+        }
+
+        if (host.isEmpty()) {
+            call.resolve(new JSObject().put("ok", false).put("error", "exchange host is not configured").put("nodes", new JSArray()).put("total", 0));
+            return;
+        }
+
+        if (token.isEmpty()) {
+            call.resolve(new JSObject().put("ok", false).put("error", "exchange token is not configured").put("nodes", new JSArray()).put("total", 0));
+            return;
+        }
+
+        if (port < 1 || port > 65535) {
+            port = ReactorHttpService.DEFAULT_PORT;
+        }
+
+        String endpointUrl = (tls ? "https" : "http") + "://" + host + ":" + port + "/nodes";
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL(endpointUrl);
+            connection = (HttpURLConnection) url.openConnection();
+            if (tls && connection instanceof HttpsURLConnection) {
+                applyInsecureTls((HttpsURLConnection) connection);
+            }
+
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(5000);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Authorization", "Bearer " + token);
+
+            int status = connection.getResponseCode();
+            String body = readHttpResponseBody(connection, status);
+
+            JSONObject parsed = null;
+            try {
+                parsed = body == null || body.isEmpty() ? null : new JSONObject(body);
+            } catch (Exception ignored) {
+                parsed = null;
+            }
+
+            if (status != 200 || parsed == null || !parsed.optBoolean("ok", false)) {
+                String error = parsed != null ? parsed.optString("error", "") : "";
+                if (error == null || error.trim().isEmpty()) {
+                    error = "exchange discovery request failed (" + status + ")";
+                }
+                call.resolve(new JSObject().put("ok", false).put("error", error).put("nodes", new JSArray()).put("total", 0));
+                return;
+            }
+
+            JSONArray parsedNodes = parsed.optJSONArray("nodes");
+            JSArray filteredNodes = new JSArray();
+            String selfName = getConfiguredReactorName().trim().toLowerCase();
+            int total = 0;
+
+            if (parsedNodes != null) {
+                for (int index = 0; index < parsedNodes.length(); index += 1) {
+                    JSONObject node = parsedNodes.optJSONObject(index);
+                    if (node == null) {
+                        continue;
+                    }
+
+                    String nodeName = node.optString("name", "").trim().toLowerCase();
+                    if (!selfName.isEmpty() && selfName.equals(nodeName)) {
+                        continue;
+                    }
+
+                    filteredNodes.put(node);
+                    total += 1;
+                }
+            }
+
+            JSObject result = new JSObject();
+            result.put("ok", true);
+            result.put("mode", mode);
+            result.put("endpoint", endpointUrl);
+            result.put("generatedAt", parsed.optString("generatedAt", Instant.now().toString()));
+            result.put("total", total);
+            result.put("nodes", filteredNodes);
+            call.resolve(result);
+        } catch (Exception error) {
+            call.resolve(new JSObject().put("ok", false).put("error", error.getMessage()).put("nodes", new JSArray()).put("total", 0));
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
     }
 
     @PluginMethod
