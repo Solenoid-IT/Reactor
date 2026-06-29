@@ -81,6 +81,19 @@ function wireBackgroundWindowBehavior(windowRef) {
  * Configures app for background mode: auto-start, hidden dock
  */
 function configureBackgroundMode() {
+	if (process.platform === 'darwin' && app.isPackaged) {
+		app.setLoginItemSettings({
+			openAtLogin: false,
+			openAsHidden: false,
+			args: [],
+		});
+
+		if (!SHOW_WINDOW && app.dock) {
+			app.dock.hide();
+		}
+		return;
+	}
+
 	app.setLoginItemSettings({
 		openAtLogin: true,
 		openAsHidden: true,
