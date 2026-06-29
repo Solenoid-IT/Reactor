@@ -8,6 +8,34 @@ const DEFAULT_WS_HEARTBEAT_TIMEOUT_MS = 45000;
 const DEFAULT_UNDELIVERED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_UNDELIVERED_RETRY_MS = 30 * 1000;
 
+function parseLogicalExchangeTarget(rawTarget) {
+	const trimmed = String(rawTarget || '').trim();
+	if (!trimmed) {
+		return null;
+	}
+
+	const slashIndex = trimmed.indexOf('/');
+	if (slashIndex === -1) {
+		return {
+			nodeName: trimmed.toLowerCase(),
+			scriptId: null,
+			rawTarget: trimmed,
+		};
+	}
+
+	const nodeName = trimmed.slice(0, slashIndex).trim().toLowerCase();
+	const scriptId = trimmed.slice(slashIndex + 1).trim().toLowerCase();
+	if (!nodeName || !scriptId) {
+		return null;
+	}
+
+	return {
+		nodeName,
+		scriptId,
+		rawTarget: trimmed,
+	};
+}
+
 /**
  * ExchangeManager — due modalità:
  *
@@ -123,12 +151,13 @@ class ExchangeManager {
 		await fs.writeFile(this._undeliveredQueuePath, `${JSON.stringify(queue, null, 2)}\n`, 'utf8');
 	}
 
-	async _enqueueUndeliveredMessage(to, from, content, contentType) {
+	async _enqueueUndeliveredMessage(to, from, content, contentType, targetScriptId = null) {
 		const now = Date.now();
 		const queue = await this._readUndeliveredQueue();
 		queue.push({
 			id: `${now}-${Math.random().toString(16).slice(2)}`,
 			to,
+			targetScriptId: targetScriptId || null,
 			from,
 			content,
 			contentType,
@@ -207,6 +236,7 @@ class ExchangeManager {
 					targetWs.send(JSON.stringify({
 						type: 'message',
 						from: item.from || 'unknown',
+						targetScriptId: item.targetScriptId || null,
 						content: item.content !== undefined ? item.content : '',
 						contentType: String(item.contentType || 'text/plain'),
 					}));
@@ -516,6 +546,7 @@ class ExchangeManager {
 				fromName || 'unknown',
 				packet.content !== undefined ? packet.content : '',
 				String(packet.contentType || 'text/plain'),
+				packet.targetScriptId || null,
 			).catch(() => {});
 			return;
 		}
@@ -524,6 +555,7 @@ class ExchangeManager {
 			targetWs.send(JSON.stringify({
 				type: 'message',
 				from: fromName || 'unknown',
+				targetScriptId: packet.targetScriptId || null,
 				content: packet.content !== undefined ? packet.content : '',
 				contentType: String(packet.contentType || 'text/plain'),
 			}));
@@ -535,6 +567,7 @@ class ExchangeManager {
 				fromName || 'unknown',
 				packet.content !== undefined ? packet.content : '',
 				String(packet.contentType || 'text/plain'),
+				packet.targetScriptId || null,
 			).catch(() => {});
 		}
 	}
@@ -846,7 +879,11 @@ class ExchangeManager {
 		}
 
 		this.runtime.log(`[Exchange] Message from: ${from}`);
-		const listeners = this.runtime.findMessageListeners([from.toLowerCase()]);
+		const targetScriptId = String(packet.targetScriptId || '').trim().toLowerCase() || null;
+		const listeners = this.runtime.filterMessageListenersByTarget(
+			this.runtime.findMessageListeners([from.toLowerCase()]),
+			targetScriptId,
+		);
 
 		Promise.allSettled(
 			listeners.map((script) =>
@@ -855,6 +892,9 @@ class ExchangeManager {
 					event: 'MESSAGE',
 					messageSender: from,
 					messageSenderName: from,
+					messageTarget: String(packet.to || '').trim().toLowerCase() || null,
+					messageTargetNode: String(packet.to || '').trim().toLowerCase() || null,
+					messageTargetScriptId: targetScriptId,
 					messageContent: content,
 					messageContentType: contentType,
 					messageBodyBase64: Buffer.from(content, 'utf8').toString('base64'),
@@ -940,12 +980,18 @@ class ExchangeManager {
 			contentType = 'application/json';
 		}
 
-		const to = String(target || '').trim().toLowerCase();
-		if (!to) throw new Error('invalid exchange target');
+		const parsedTarget = parseLogicalExchangeTarget(target);
+		if (!parsedTarget || !parsedTarget.nodeName) throw new Error('invalid exchange target');
 
-		this.wsClient.send(JSON.stringify({ type: 'message', to, content: serializedContent, contentType }));
+		this.wsClient.send(JSON.stringify({
+			type: 'message',
+			to: parsedTarget.nodeName,
+			targetScriptId: parsedTarget.scriptId || null,
+			content: serializedContent,
+			contentType,
+		}));
 		return {
-			target: to,
+			target: parsedTarget.rawTarget,
 			via: 'exchange',
 			queued: false,
 		};

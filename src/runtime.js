@@ -29,6 +29,7 @@ const DEFAULT_MESSAGE_QUEUE_RETRY_MS = 30 * 1000;
 const DEFAULT_STREAM_MAX_ACTIVE = 24;
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_STREAM_CLEANUP_INTERVAL_MS = 30 * 1000;
+const PROJECT_UUID_FILE = 'uuid';
 
 function collectKnownEntries(rootPath, map) {
 	let entries = [];
@@ -47,6 +48,46 @@ function collectKnownEntries(rootPath, map) {
 			map.set(fullPath, 'file');
 		}
 	}
+}
+
+function isUuidV4(value) {
+	return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '').trim());
+}
+
+function parseLogicalNodeTarget(rawTarget) {
+	const trimmed = String(rawTarget || '').trim();
+	if (!trimmed || trimmed.includes('://')) {
+		return null;
+	}
+
+	const slashIndex = trimmed.indexOf('/');
+	if (slashIndex === -1) {
+		if (trimmed.includes(':') || /^\d+\.\d+\.\d+\.\d+$/.test(trimmed) || trimmed.includes('.')) {
+			return null;
+		}
+
+		return {
+			nodeName: trimmed.toLowerCase(),
+			scriptId: null,
+			rawTarget: trimmed,
+		};
+	}
+
+	const nodeName = trimmed.slice(0, slashIndex).trim().toLowerCase();
+	const scriptId = trimmed.slice(slashIndex + 1).trim().toLowerCase();
+	if (!nodeName || !scriptId || !isUuidV4(scriptId)) {
+		return null;
+	}
+
+	if (nodeName.includes(':') || /^\d+\.\d+\.\d+\.\d+$/.test(nodeName) || nodeName.includes('.')) {
+		return null;
+	}
+
+	return {
+		nodeName,
+		scriptId,
+		rawTarget: trimmed,
+	};
 }
 
 function detectWatchType(eventType, fullPath, knownEntries) {
@@ -855,6 +896,15 @@ class ReactorRuntime {
 		return listeners;
 	}
 
+	filterMessageListenersByTarget(listeners, targetScriptId = null) {
+		if (!targetScriptId) {
+			return Array.isArray(listeners) ? listeners : [];
+		}
+
+		return (Array.isArray(listeners) ? listeners : [])
+			.filter((script) => String(script?.scriptId || '').trim().toLowerCase() === targetScriptId);
+	}
+
 	registerScriptStreamListeners(script) {
 		if (!script.enabled || !Array.isArray(script.events) || !script.events.includes('STREAM')) {
 			return;
@@ -1168,10 +1218,42 @@ class ReactorRuntime {
 		};
 	}
 
+	resolveMessageTarget(headers = {}) {
+		const rawNode = String(headers['reactor-target-node'] || '').trim().toLowerCase();
+		const rawScriptId = String(headers['reactor-target-script-id'] || '').trim().toLowerCase();
+
+		return {
+			nodeName: rawNode || null,
+			scriptId: isUuidV4(rawScriptId) ? rawScriptId : null,
+		};
+	}
+
+	async ensureProjectScriptId(projectDir) {
+		const uuidPath = path.join(projectDir, PROJECT_UUID_FILE);
+		try {
+			const raw = await fs.readFile(uuidPath, 'utf8');
+			const existing = String(raw || '').trim().toLowerCase();
+			if (isUuidV4(existing)) {
+				return existing;
+			}
+		} catch {
+			// Generate below when file is missing or unreadable.
+		}
+
+		const nextId = crypto.randomUUID().toLowerCase();
+		await fs.writeFile(uuidPath, `${nextId}\n`, 'utf8');
+		return nextId;
+	}
+
 	async sendNodeMessage(target, content, extraHeaders = {}, dispatchOptions = {}) {
 		const targetId = String(target || '').trim();
 		if (!targetId) {
 			throw new Error('invalid target. expected host or host:port');
+		}
+
+		const logicalTarget = parseLogicalNodeTarget(targetId);
+		if (logicalTarget) {
+			return this.sendExchangeMessage(targetId, content, dispatchOptions);
 		}
 
 		let hasExplicitPort = false;
@@ -1613,10 +1695,11 @@ class ReactorRuntime {
 			const rawBuffer = Buffer.concat(bodyChunks);
 			const body = this.parseMessageBody(req, rawBuffer);
 			const senderMeta = this.resolveSenderCandidates(req);
+			const messageTarget = this.resolveMessageTarget(req.headers || {});
 			const isStreamEnvelope = Boolean(body.json && typeof body.json === 'object' && body.json.__reactorStream === true);
 			const listeners = isStreamEnvelope
 				? this.findStreamListeners(senderMeta.candidates)
-				: this.findMessageListeners(senderMeta.candidates);
+				: this.filterMessageListenersByTarget(this.findMessageListeners(senderMeta.candidates), messageTarget.scriptId);
 
 			this.addHttpServerLog(
 				`POST /message sender=${senderMeta.rawSender || senderMeta.rawName || senderMeta.remoteHost || 'unknown'} -> ${listeners.length} script(s)`,
@@ -1651,6 +1734,9 @@ class ReactorRuntime {
 						event: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
 						messageSender: senderMeta.rawSender || senderMeta.remoteHost || null,
 						messageSenderName: senderMeta.rawName || null,
+						messageTarget: messageTarget.nodeName || null,
+						messageTargetNode: messageTarget.nodeName || null,
+						messageTargetScriptId: messageTarget.scriptId || null,
 						messageContent: body.text,
 						messageContentType: body.contentType,
 						messageBodyBase64: body.base64,
@@ -1957,6 +2043,7 @@ class ReactorRuntime {
 				const scriptBaseName = path.basename(normalizedScriptPath).toLowerCase();
 				const isProjectBootScript = scriptBaseName === 'boot.ts' && path.dirname(scriptDir) === normalizedScriptsDir;
 				const displayName = isProjectBootScript ? path.basename(scriptDir) : path.basename(scriptPath);
+				const scriptId = isProjectBootScript ? await this.ensureProjectScriptId(scriptDir) : null;
 				const coreApi = this.createScriptCoreApi(displayName);
 				const moduleExports = loadScriptModule(scriptPath, source, {
 					virtualModules: {
@@ -1973,6 +2060,8 @@ class ReactorRuntime {
 				const script = {
 					path: scriptPath,
 					name: displayName,
+					projectDir: isProjectBootScript ? scriptDir : null,
+					scriptId,
 					eventLogPath: path.join(path.dirname(normalizedScriptPath), 'activity.log'),
 					run: runner,
 					schedule: metadata.schedule,

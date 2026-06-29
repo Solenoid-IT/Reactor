@@ -24,6 +24,7 @@ function usage() {
 	console.log('  node daemonctl.js status');
 	console.log('  node daemonctl.js run <script-name>');
 	console.log('  node daemonctl.js test <script-name>');
+	console.log('  node daemonctl.js script-id <script-name>');
 	console.log('  node daemonctl.js delete <script-name>');
 	console.log('  node daemonctl.js set-name <reactor-name>');
 	console.log('  node daemonctl.js set-port <1-65535>');
@@ -140,7 +141,7 @@ async function main() {
 		}
 
 		for (const script of response.scripts || []) {
-			console.log(`${script.name}\t${script.state}\t${script.path}`);
+			console.log(`${script.name}\t${script.state}\t${script.scriptId || '-'}\t${script.path}`);
 		}
 		return;
 	}
@@ -171,6 +172,22 @@ async function main() {
 		}
 
 		console.log(`Executed: ${response.script} (${response.path})`);
+		return;
+	}
+
+	if (command === 'script-id') {
+		const name = rest.join(' ').trim();
+		if (!name) {
+			usage();
+		}
+
+		const response = await sendCommand({ command: 'script-id', name });
+		if (!response.ok) {
+			console.error(`[daemonctl] ${response.error || 'script-id failed'}`);
+			process.exit(1);
+		}
+
+		console.log(response.scriptId || '');
 		return;
 	}
 

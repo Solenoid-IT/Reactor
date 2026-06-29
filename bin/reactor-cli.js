@@ -34,6 +34,7 @@ function printHelp() {
 	console.log('  reactor-cli exchange set node <host> [port] [--tls] [--token <token>]');
 	console.log('  reactor-cli exchange token get');
 	console.log('  reactor-cli exchange token generate');
+	console.log('  reactor-cli script id <script-name>');
 }
 
 async function build(target) {
@@ -103,6 +104,17 @@ async function main() {
 
 	if (command === 'exchange' && subcommand === 'token' && arg === 'generate') {
 		await runDaemonCtl(['generate-exchange-token']);
+		return;
+	}
+
+	if (command === 'script' && subcommand === 'id') {
+		const scriptName = [arg, ...rest].filter(Boolean).join(' ').trim();
+		if (!scriptName) {
+			printHelp();
+			throw new Error('script name is required');
+		}
+
+		await runDaemonCtl(['script-id', scriptName]);
 		return;
 	}
 

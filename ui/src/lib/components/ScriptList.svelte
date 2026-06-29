@@ -12,6 +12,7 @@
 	export let onDelete = () => {};
 	export let onOpenLog = () => {};
 	export let onClearLog = () => {};
+	export let onCopyId = () => {};
 
 	function scriptTags(script) {
 		const tags = [];
@@ -72,6 +73,9 @@
 						<i class="fa-solid fa-laptop-code"></i><span class="item-action-label">Quick Open</span>
 					</button>
 					<button class="item-action-btn" on:click|stopPropagation={() => onRename(index)}><i class="fa-solid fa-pen"></i><span class="item-action-label">Rename</span></button>
+					{#if script.scriptId}
+						<button class="item-action-btn" on:click|stopPropagation={() => onCopyId(index)}><i class="fa-solid fa-copy"></i><span class="item-action-label">Copy ID</span></button>
+					{/if}
 					<button class="item-action-btn delete" on:click|stopPropagation={() => onDelete(index)}><i class="fa-solid fa-trash"></i><span class="item-action-label">Delete</span></button>
 					<button class="item-action-btn test" on:click|stopPropagation={() => onRun(index)}><i class="fa-solid fa-play"></i><span class="item-action-label">Test</span></button>
 					<button class="item-action-btn" on:click|stopPropagation={() => onOpenLog(index)}><i class="fa-solid fa-magnifying-glass"></i><span class="item-action-label">View Log</span></button>

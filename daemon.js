@@ -147,6 +147,7 @@ async function createControlServer(runtime, socketPath, onStopRequested, saveExc
 						scripts: runtime.scripts.map((script) => ({
 							name: script.name,
 							path: script.path,
+							scriptId: script.scriptId || null,
 							state: script.state,
 						})),
 					};
@@ -175,6 +176,27 @@ async function createControlServer(runtime, socketPath, onStopRequested, saveExc
 							ok: true,
 							script: script.name,
 							path: script.path,
+						};
+					}
+				} else if (command === 'script-id') {
+					await runtime.reloadScripts('daemonctl-script-id');
+					const script = findScriptByName(runtime, payload.name);
+					if (!script) {
+						response = {
+							ok: false,
+							error: `script not found: ${payload.name || ''}`,
+						};
+					} else if (!script.scriptId) {
+						response = {
+							ok: false,
+							error: `script has no project UUID: ${script.name}`,
+						};
+					} else {
+						response = {
+							ok: true,
+							script: script.name,
+							path: script.path,
+							scriptId: script.scriptId,
 						};
 					}
 				} else if (command === 'set-name') {

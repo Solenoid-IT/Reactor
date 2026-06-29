@@ -290,9 +290,16 @@ MESSAGE sender filter rules:
 - sender can be reactor name or host[:port]
 - host without port uses default 7070
 
+MESSAGE target rules:
+- `Node.sendMessage(target, content)` accepts `target=node_name` or `target=node_name/script_id`
+- `node_name` delivers to MESSAGE listeners on that node as before
+- `node_name/script_id` delivers only to the project whose root contains file `uuid` with that UUID v4 value
+- New script projects automatically create a root file named `uuid`
+
 Message transport notes:
 - import { Node } from 'core' then call Node.sendMessage(target, content)
 - request header Reactor-Name contains current node name
+- request headers may also include Reactor-Target-Node and Reactor-Target-Script-Id when the message is script-targeted
 - content supports string, JSON object, and binary payloads
 
 Boot/network behavior:
@@ -361,6 +368,9 @@ Available ctx fields:
 - expression: schedule expression when trigger is SCHEDULE
 - messageSender: normalized sender identifier for MESSAGE trigger
 - messageSenderName: sender name from Reactor-Name header (if present)
+- messageTarget: target node name for MESSAGE trigger when available
+- messageTargetNode: same as messageTarget, explicit node field
+- messageTargetScriptId: target project UUID when the sender addressed a specific script
 - messageContent: UTF-8 message body text
 - messageContentType: incoming content-type
 - messageBodyBase64: raw body payload encoded as base64

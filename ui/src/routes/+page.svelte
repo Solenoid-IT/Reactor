@@ -491,6 +491,33 @@
 		await refreshAll();
 	}
 
+	async function copyScriptId(index) {
+		const script = scripts[index];
+		const scriptId = String(script?.scriptId || '').trim();
+		if (!script || !scriptId) {
+			status = 'Error: script ID unavailable';
+			return;
+		}
+
+		try {
+			if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+				await navigator.clipboard.writeText(scriptId);
+				status = `Copied ID: ${script.name}`;
+				return;
+			}
+		} catch {
+			// Fallback below.
+		}
+
+		if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
+			window.prompt(`Copy script ID for ${script.name}`, scriptId);
+			status = `Script ID ready to copy: ${script.name}`;
+			return;
+		}
+
+		status = `Script ID: ${scriptId}`;
+	}
+
 	async function stopBackgroundProcessHandler() {
 		status = 'Stopping background process...';
 		const result = await stopBackgroundProcess();
@@ -648,6 +675,7 @@
 				onRun={runNow}
 				onOpenLog={openLog}
 				onClearLog={clearLog}
+				onCopyId={copyScriptId}
 			/>
 		</section>
 		<DetailPane

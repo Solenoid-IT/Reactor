@@ -16,13 +16,26 @@ There are also two network paths:
 
 Use `sendMessage()` when you need to send a single payload (text, JSON, binary) and process it as one logical message.
 
+`target` supports two logical forms in addition to direct host targets:
+
+- `node_name`
+- `node_name/script_id`
+
+When `script_id` is present, Reactor delivers the message only to the project whose root `uuid` file contains that UUID v4.
+
 ### Sender
 
 ```ts
 import { Node } from 'core';
 
 export async function run() {
-	await Node.sendMessage('192.168.1.20:7070', {
+	await Node.sendMessage('target-node', {
+		type: 'status-update',
+		value: 42,
+		ts: Date.now(),
+	});
+
+	await Node.sendMessage('target-node/550e8400-e29b-41d4-a716-446655440000', {
 		type: 'status-update',
 		value: 42,
 		ts: Date.now(),
@@ -41,6 +54,7 @@ import { log } from 'core';
 
 export async function run(ctx: Context) {
 	await log(`MESSAGE from ${ctx.messageSender || 'unknown'}`);
+	await log(`target node=${ctx.messageTargetNode || 'n/a'} script=${ctx.messageTargetScriptId || 'broadcast'}`);
 
 	// Text body
 	await log(`content=${ctx.messageContent || ''}`);

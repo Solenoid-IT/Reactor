@@ -514,6 +514,16 @@ public class ReactorMobilePlugin extends Plugin {
         JSObject script = new JSObject();
         script.put("name", projectName + ".ts");
         script.put("path", scriptFile.getAbsolutePath());
+        File uuidFile = new File(scriptFile.getParentFile(), "uuid");
+        String scriptId = "";
+        try {
+            if (uuidFile.exists()) {
+                scriptId = Files.readString(uuidFile.toPath(), StandardCharsets.UTF_8).trim().toLowerCase();
+            }
+        } catch (Exception ignored) {
+            scriptId = "";
+        }
+        script.put("scriptId", scriptId.isEmpty() ? null : scriptId);
         script.put("eventLogPath", new File(scriptFile.getParentFile(), "activity.log").getAbsolutePath());
         script.put("state", "DISABLED");
         script.put("enabled", false);
@@ -604,6 +614,7 @@ public class ReactorMobilePlugin extends Plugin {
                 throw new IOException("unable to create project directory");
             }
 
+            File uuidFile = new File(projectDir, "uuid");
             File bootFile = new File(projectDir, "boot.ts");
             String source;
             switch (templateKey) {
@@ -621,6 +632,7 @@ public class ReactorMobilePlugin extends Plugin {
                     break;
             }
 
+                        writeTextFile(uuidFile, UUID.randomUUID().toString().toLowerCase() + "\n");
             writeTextFile(bootFile, source);
             writeTextFile(new File(projectDir, "context.ts"), "export {};\n");
             writeTextFile(new File(projectDir, "activity.log"), "");

@@ -192,10 +192,13 @@ declare module 'core' {
 
 	export interface NodeSendMessageResponse {
 		target: string;
-		endpoint: string;
-		status: number;
-		headers: HeadersMap;
-		body: string;
+		endpoint?: string;
+		status?: number;
+		headers?: HeadersMap;
+		body?: string;
+		via?: 'direct' | 'exchange';
+		queued?: boolean;
+		reason?: string;
 	}
 
 	export interface NodeExchangeSendMessageResponse {
@@ -272,6 +275,9 @@ declare module 'core' {
 		expression?: string | null;
 		messageSender?: string | null;
 		messageSenderName?: string | null;
+		messageTarget?: string | null;
+		messageTargetNode?: string | null;
+		messageTargetScriptId?: string | null;
 		messageContent?: string;
 		messageContentType?: string;
 		messageBodyBase64?: string;

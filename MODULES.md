@@ -72,6 +72,8 @@ Node message trigger:
 // @on MESSAGE(10.20.43.20:7070,sender_2)
 ```
 `import { Node } from 'core'` and `Node.sendMessage(target, content)` dispatch POST `/message` and trigger matching MESSAGE listeners.
+- `target` can be a direct host, `node_name`, or `node_name/script_id`.
+- For project scripts, the root file `uuid` stores the UUID v4 used as `script_id`.
 
 Node stream trigger:
 ```typescript
@@ -158,6 +160,7 @@ export async function run(ctx: Context) {
 **`Node.sendMessage` routing logic:**
 1. Tenta HTTP POST diretto a `http://<target>/message` (LAN)
 2. Se il target non è raggiungibile AND mode è `client` → invia via WebSocket all'Exchange
+3. Se `target` è `node_name` o `node_name/script_id`, instrada direttamente via Exchange e, in caso di `script_id`, il receiver esegue solo il progetto target.
 
 **Streaming API (chunked):**
 - `Node.stream(target, source, options)` → stream diretto HTTP verso un altro nodo

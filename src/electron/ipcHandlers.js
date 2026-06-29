@@ -532,6 +532,7 @@ function setupIpcHandlers(runtime, options = {}) {
 
 		const scriptFileName = 'boot.ts';
 		const scriptFilePath = path.join(projectRoot, scriptFileName);
+		const projectUuidPath = path.join(projectRoot, 'uuid');
 		const contextFilePath = path.join(projectRoot, 'context.ts');
 		const packageJsonPath = path.join(projectRoot, 'package.json');
 		const eventLogPath = path.join(projectRoot, 'activity.log');
@@ -632,7 +633,9 @@ function setupIpcHandlers(runtime, options = {}) {
 		};
 
 		try {
+			const projectUuid = require('crypto').randomUUID().toLowerCase();
 			await fs.mkdir(projectRoot);
+			await fs.writeFile(projectUuidPath, `${projectUuid}\n`, { encoding: 'utf8', flag: 'wx' });
 			await fs.writeFile(contextFilePath, contextContent, { encoding: 'utf8', flag: 'wx' });
 			await fs.writeFile(scriptFilePath, initialContent, { encoding: 'utf8', flag: 'wx' });
 			await fs.writeFile(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
@@ -1113,6 +1116,7 @@ function setupIpcHandlers(runtime, options = {}) {
 				scripts: runtime.scripts.map((s) => ({
 					name: s.name,
 					path: s.path,
+					scriptId: s.scriptId || null,
 					eventLogPath: s.eventLogPath,
 					state: s.state,
 					enabled: s.enabled,
