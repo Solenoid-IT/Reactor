@@ -1,6 +1,7 @@
 <script>
 	import { onMount, onDestroy } from 'svelte';
 	import Modal from '$lib/components/Modal.svelte';
+	import reactorApiTypes from '$lib/monaco/reactor-api.d.ts?raw';
 	import './editor-modal.css';
 
 	export let open = false;
@@ -34,6 +35,44 @@
 	}
 
 	let monacoRef = null;
+	let reactorTypesDisposable = null;
+
+	function setupTypeScriptIntelliSense(monaco) {
+		const defaults = monaco.languages.typescript.typescriptDefaults;
+		const jsDefaults = monaco.languages.typescript.javascriptDefaults;
+
+		const compilerOptions = {
+			target: monaco.languages.typescript.ScriptTarget.ES2020,
+			module: monaco.languages.typescript.ModuleKind.ESNext,
+			moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
+			allowNonTsExtensions: true,
+			allowSyntheticDefaultImports: true,
+			esModuleInterop: true,
+			strict: false,
+			noEmit: true,
+		};
+
+		defaults.setCompilerOptions(compilerOptions);
+		jsDefaults.setCompilerOptions(compilerOptions);
+		defaults.setEagerModelSync(true);
+		jsDefaults.setEagerModelSync(true);
+
+		defaults.setDiagnosticsOptions({
+			noSyntaxValidation: false,
+			noSemanticValidation: false,
+		});
+		jsDefaults.setDiagnosticsOptions({
+			noSyntaxValidation: false,
+			noSemanticValidation: false,
+		});
+
+		if (!reactorTypesDisposable) {
+			reactorTypesDisposable = defaults.addExtraLib(
+				reactorApiTypes,
+				'file:///reactor/typings/reactor-api.d.ts',
+			);
+		}
+	}
 
 	function resolveMonacoLanguage() {
 		return String(language || '').toLowerCase() === 'log' ? 'log' : 'typescript';
@@ -56,6 +95,8 @@
 				if (!mounted || !editorContainer) {
 					return;
 				}
+
+				setupTypeScriptIntelliSense(monaco);
 
 				if (!monaco.languages.getLanguages().some((item) => item.id === 'log')) {
 					monaco.languages.register({ id: 'log' });
@@ -117,6 +158,10 @@
 		if (editor) {
 			editor.dispose();
 			editor = null;
+		}
+		if (reactorTypesDisposable) {
+			reactorTypesDisposable.dispose();
+			reactorTypesDisposable = null;
 		}
 	});
 
