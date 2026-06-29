@@ -1003,15 +1003,46 @@ class ReactorRuntime {
 	}
 
 	getDiscoveryScriptEntries() {
-		return (Array.isArray(this.scripts) ? this.scripts : [])
-			.filter((script) => script && script.scriptId)
-			.map((script) => ({
-				uuid: String(script.scriptId || '').trim().toLowerCase(),
+		const byUuid = new Map();
+
+		for (const script of Array.isArray(this.scripts) ? this.scripts : []) {
+			if (!script || !script.scriptId) {
+				continue;
+			}
+
+			const uuid = String(script.scriptId || '').trim().toLowerCase();
+			if (!uuid) {
+				continue;
+			}
+
+			const nextEntry = {
+				uuid,
 				name: String(script.name || '').trim() || 'unknown',
 				triggers: Array.isArray(script.events) ? script.events.map((trigger) => String(trigger || '').trim()).filter(Boolean) : [],
 				enabled: Boolean(script.enabled),
 				mutex: Boolean(script.mutex),
-			}));
+			};
+
+			const previous = byUuid.get(uuid);
+			if (!previous) {
+				byUuid.set(uuid, nextEntry);
+				continue;
+			}
+
+			const preferredEntry = String(nextEntry.name || '').toLowerCase().endsWith('.ts')
+				&& !String(previous.name || '').toLowerCase().endsWith('.ts')
+				? previous
+				: nextEntry;
+
+			byUuid.set(uuid, {
+				...preferredEntry,
+				triggers: Array.from(new Set([...(previous.triggers || []), ...(nextEntry.triggers || [])])),
+				enabled: previous.enabled || nextEntry.enabled,
+				mutex: previous.mutex || nextEntry.mutex,
+			});
+		}
+
+		return Array.from(byUuid.values()).sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
 	}
 
 	async testExchangeClientConnection(timeoutMs = 5000) {
@@ -2345,9 +2376,11 @@ class ReactorRuntime {
 				const normalizedScriptPath = path.resolve(scriptPath);
 				const scriptDir = path.dirname(normalizedScriptPath);
 				const scriptBaseName = path.basename(normalizedScriptPath).toLowerCase();
-				const isProjectBootScript = scriptBaseName === 'boot.ts' && path.dirname(scriptDir) === normalizedScriptsDir;
+				const isProjectScript = path.dirname(scriptDir) === normalizedScriptsDir;
+				const isProjectBootScript = scriptBaseName === 'boot.ts' && isProjectScript;
 				const displayName = isProjectBootScript ? path.basename(scriptDir) : path.basename(scriptPath);
-				const scriptId = isProjectBootScript ? await this.ensureProjectScriptId(scriptDir) : null;
+				const projectDir = isProjectScript ? scriptDir : null;
+				const scriptId = projectDir ? await this.ensureProjectScriptId(projectDir) : null;
 				const coreApi = this.createScriptCoreApi(displayName);
 				const moduleExports = loadScriptModule(scriptPath, source, {
 					virtualModules: {
@@ -2364,7 +2397,7 @@ class ReactorRuntime {
 				const script = {
 					path: scriptPath,
 					name: displayName,
-					projectDir: isProjectBootScript ? scriptDir : null,
+					projectDir,
 					scriptId,
 					eventLogPath: path.join(path.dirname(normalizedScriptPath), 'activity.log'),
 					run: runner,
