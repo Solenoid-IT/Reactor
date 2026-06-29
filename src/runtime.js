@@ -936,6 +936,7 @@ class ReactorRuntime {
 						Accept: 'application/json',
 						Authorization: `Bearer ${token}`,
 					},
+					insecureTls: Boolean(this.exchangeTls),
 				});
 
 				let parsed = null;
