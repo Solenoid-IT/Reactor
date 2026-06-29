@@ -179,7 +179,8 @@
 			selectedIndex = -1;
 		}
 
-		if (exchangeMode === 'exchange' && exchangeDiscovery) {
+		const canLoadLinkedNodes = (exchangeMode === 'exchange' && exchangeDiscovery) || (exchangeMode === 'node' && exchangeEnabled);
+		if (canLoadLinkedNodes) {
 			await refreshExchangeLinkedNodes(true);
 		} else {
 			exchangeLinkedNodes = [];
@@ -190,7 +191,9 @@
 	}
 
 	async function refreshExchangeLinkedNodes(silent = false) {
-		if (exchangeMode !== 'exchange' || !exchangeDiscovery) {
+		const isExchangeServerView = exchangeMode === 'exchange' && exchangeDiscovery;
+		const isNodeView = exchangeMode === 'node' && exchangeEnabled;
+		if (!isExchangeServerView && !isNodeView) {
 			exchangeLinkedNodes = [];
 			exchangeLinkedNodesTotal = 0;
 			return;

@@ -275,6 +275,32 @@
 					{:else}
 						<div class="detail-value mt-4" style="opacity:0.5;"><i class="fa-solid fa-plug-circle-xmark me-1"></i>Not connected</div>
 					{/if}
+
+					{#if exchangeEnabled}
+						<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
+							<div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+								<span class="detail-label">Remote Nodes ({linkedNodesTotal})</span>
+								<button type="button" class="btn-secondary" on:click={onRefreshLinkedNodes} disabled={linkedNodesLoading || !exchangeActive}>
+									<i class="fa-solid fa-rotate-right me-1"></i>{linkedNodesLoading ? 'Refreshing...' : 'Refresh'}
+								</button>
+							</div>
+							{#if !exchangeActive}
+								<div class="detail-value mt-2" style="opacity:0.65;">Connect to Exchange to load remote nodes</div>
+							{:else if linkedNodes.length === 0}
+								<div class="detail-value mt-2" style="opacity:0.65;">No remote nodes found (or discovery disabled on Exchange)</div>
+							{:else}
+								<div class="detail-value mt-2" style="max-height:220px; overflow:auto; font-size:0.78em;">
+									{#each linkedNodes as node}
+										<div style="padding:6px 0; border-bottom:1px dashed rgba(255,255,255,0.08);">
+											<div><strong>{node.name || 'unknown'}</strong> {node.ip ? `(${node.ip}${node.port ? `:${node.port}` : ''})` : ''}</div>
+											<div style="opacity:0.7;">Connected: {node.connectedAt || '-'}</div>
+											<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
+										</div>
+									{/each}
+								</div>
+							{/if}
+						</div>
+					{/if}
 				</fieldset>
 			{/if}
 

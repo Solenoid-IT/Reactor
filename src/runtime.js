@@ -895,14 +895,87 @@ class ReactorRuntime {
 		return this.getExchangeConfig();
 	}
 
-	getExchangeLinkedNodesSnapshot() {
+	async getExchangeLinkedNodesSnapshot() {
 		if (this.exchangeMode !== 'exchange') {
-			return {
-				ok: false,
-				error: 'available only in exchange mode',
-				nodes: [],
-				total: 0,
-			};
+			if (this.exchangeMode !== 'node') {
+				return {
+					ok: false,
+					error: `available only in node or exchange mode (current: ${this.exchangeMode})`,
+					nodes: [],
+					total: 0,
+				};
+			}
+
+			if (!String(this.exchangeHost || '').trim()) {
+				return {
+					ok: false,
+					error: 'exchange host is not configured',
+					nodes: [],
+					total: 0,
+				};
+			}
+
+			const token = String(this.exchangeAuthToken || '').trim();
+			if (!token) {
+				return {
+					ok: false,
+					error: 'exchange token is not configured',
+					nodes: [],
+					total: 0,
+				};
+			}
+
+			const scheme = this.exchangeTls ? 'https' : 'http';
+			const endpointUrl = `${scheme}://${this.exchangeHost}:${this.exchangePort}${this.exchangeDiscoveryEndpointPath}`;
+
+			try {
+				const response = await this.platformServices.httpClient.request({
+					url: endpointUrl,
+					method: 'GET',
+					headers: {
+						Accept: 'application/json',
+						Authorization: `Bearer ${token}`,
+					},
+				});
+
+				let parsed = null;
+				try {
+					parsed = response && response.body ? JSON.parse(String(response.body)) : null;
+				} catch {
+					parsed = null;
+				}
+
+				if (!response || Number(response.status) !== 200 || !parsed || parsed.ok === false) {
+					return {
+						ok: false,
+						error: parsed && parsed.error ? String(parsed.error) : `exchange discovery request failed (${response ? response.status : 'no response'})`,
+						nodes: [],
+						total: 0,
+					};
+				}
+
+				const nodes = Array.isArray(parsed.nodes) ? parsed.nodes : [];
+				const reactorName = (await this.getReactorName()).trim().toLowerCase();
+				const filteredNodes = reactorName
+					? nodes.filter((node) => String(node && node.name ? node.name : '').trim().toLowerCase() !== reactorName)
+					: nodes;
+
+				return {
+					ok: true,
+					mode: this.exchangeMode,
+					endpoint: endpointUrl,
+					generatedAt: parsed.generatedAt || new Date().toISOString(),
+					total: filteredNodes.length,
+					nodes: filteredNodes,
+				};
+			} catch (error) {
+				return {
+					ok: false,
+					error: error.message || 'unable to reach exchange discovery endpoint',
+					nodes: [],
+					total: 0,
+				};
+			}
 		}
 
 		if (!this.exchangeDiscoveryEndpointEnabled) {

@@ -1007,7 +1007,7 @@ function setupIpcHandlers(runtime, options = {}) {
 		}
 
 		try {
-			return runtime.getExchangeLinkedNodesSnapshot();
+			return await runtime.getExchangeLinkedNodesSnapshot();
 		} catch (error) {
 			return { ok: false, error: error.message || 'unable to load linked nodes', nodes: [], total: 0 };
 		}
