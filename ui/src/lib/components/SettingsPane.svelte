@@ -44,8 +44,9 @@
 	let expandedNodeNames = new Set();
 	let copiedScriptUuid = '';
 	let copiedScriptTimer = null;
+	let openAllNodesForDebug = true;
 
-	function getNodeExpandKey(node) {
+	function getNodeExpandKey(node, nodeIndex = -1) {
 		const byName = String(node?.name || '').trim().toLowerCase();
 		if (byName) {
 			return `name:${byName}`;
@@ -61,11 +62,15 @@
 			return `ip:${byIpPort}`;
 		}
 
+		if (Number.isInteger(nodeIndex) && nodeIndex >= 0) {
+			return `idx:${nodeIndex}`;
+		}
+
 		return '';
 	}
 
-	function toggleNodeScripts(node) {
-		const nodeKey = getNodeExpandKey(node);
+	function toggleNodeScripts(node, nodeIndex = -1) {
+		const nodeKey = getNodeExpandKey(node, nodeIndex);
 		if (!nodeKey) {
 			return;
 		}
@@ -79,8 +84,12 @@
 		expandedNodeNames = next;
 	}
 
-	function isNodeExpanded(node) {
-		const nodeKey = getNodeExpandKey(node);
+	function isNodeExpanded(node, nodeIndex = -1) {
+		if (openAllNodesForDebug) {
+			return true;
+		}
+
+		const nodeKey = getNodeExpandKey(node, nodeIndex);
 		return nodeKey ? expandedNodeNames.has(nodeKey) : false;
 	}
 
@@ -304,23 +313,23 @@
 							<div class="detail-value mt-2" style="opacity:0.65;">No linked nodes</div>
 						{:else}
 							<div class="detail-value mt-2" style="max-height:220px; overflow:auto; font-size:0.78em;">
-								{#each linkedNodes as node}
+								{#each linkedNodes as node, nodeIndex}
 									<div style="padding:6px 0; border-bottom:1px dashed rgba(255,255,255,0.08);">
-										<div>
-											<button
-												type="button"
-												class="btn-secondary"
-												on:click={() => toggleNodeScripts(node)}
-												style="padding:2px 6px; font-size:0.92em;"
-											>
+										<button
+											type="button"
+											class="node-accordion-toggle"
+											on:click={() => toggleNodeScripts(node, nodeIndex)}
+											aria-expanded={isNodeExpanded(node, nodeIndex)}
+										>
+											<span class="node-accordion-title">
 												<strong>{node.name || 'unknown'}</strong>
 												{node.ip ? ` (${node.ip}${node.port ? `:${node.port}` : ''})` : ''}
-												<span style="opacity:0.7; margin-left:6px;">{isNodeExpanded(node) ? '[-]' : '[+]'}</span>
-											</button>
-										</div>
+											</span>
+											<i class={`fa-solid ${isNodeExpanded(node, nodeIndex) ? 'fa-chevron-up' : 'fa-chevron-down'} node-accordion-icon`}></i>
+										</button>
 										<div style="opacity:0.7;">Connected: {node.connectedAt || '-'}</div>
 										<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
-										{#if isNodeExpanded(node)}
+										{#if isNodeExpanded(node, nodeIndex)}
 											{#if Array.isArray(node.scripts) && node.scripts.length > 0}
 												<div style="margin-top:6px; padding-left:8px; border-left:2px solid rgba(255,255,255,0.14);">
 													{#each node.scripts as script}
@@ -415,23 +424,23 @@
 								<div class="detail-value mt-2" style="opacity:0.65;">No remote nodes found (or discovery disabled on Exchange)</div>
 							{:else}
 								<div class="detail-value mt-2" style="max-height:220px; overflow:auto; font-size:0.78em;">
-									{#each linkedNodes as node}
+									{#each linkedNodes as node, nodeIndex}
 										<div style="padding:6px 0; border-bottom:1px dashed rgba(255,255,255,0.08);">
-											<div>
-												<button
-													type="button"
-													class="btn-secondary"
-													on:click={() => toggleNodeScripts(node)}
-													style="padding:2px 6px; font-size:0.92em;"
-												>
+											<button
+												type="button"
+												class="node-accordion-toggle"
+												on:click={() => toggleNodeScripts(node, nodeIndex)}
+												aria-expanded={isNodeExpanded(node, nodeIndex)}
+											>
+												<span class="node-accordion-title">
 													<strong>{node.name || 'unknown'}</strong>
 													{node.ip ? ` (${node.ip}${node.port ? `:${node.port}` : ''})` : ''}
-													<span style="opacity:0.7; margin-left:6px;">{isNodeExpanded(node) ? '[-]' : '[+]'}</span>
-												</button>
-											</div>
+												</span>
+												<i class={`fa-solid ${isNodeExpanded(node, nodeIndex) ? 'fa-chevron-up' : 'fa-chevron-down'} node-accordion-icon`}></i>
+											</button>
 											<div style="opacity:0.7;">Connected: {node.connectedAt || '-'}</div>
 											<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
-											{#if isNodeExpanded(node)}
+											{#if isNodeExpanded(node, nodeIndex)}
 												{#if Array.isArray(node.scripts) && node.scripts.length > 0}
 													<div style="margin-top:6px; padding-left:8px; border-left:2px solid rgba(255,255,255,0.14);">
 														{#each node.scripts as script}
@@ -664,6 +673,48 @@
 
 	.settings-backup-actions :global(button) {
 		flex: 1 1 180px;
+	}
+
+	.node-accordion-toggle {
+		width: 100%;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		padding: 8px 10px;
+		border: 1px solid #435063;
+		border-radius: 10px;
+		background: linear-gradient(160deg, #2a3342, #262f3d);
+		color: var(--text);
+		cursor: pointer;
+		user-select: none;
+		text-align: left;
+		transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+	}
+
+	.node-accordion-toggle:hover {
+		border-color: #5e6f88;
+		background: linear-gradient(160deg, #324052, #2b3747);
+		transform: translateY(-1px);
+	}
+
+	.node-accordion-toggle:focus-visible {
+		outline: 2px solid rgba(76, 175, 80, 0.45);
+		outline-offset: 1px;
+	}
+
+	.node-accordion-title {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.node-accordion-icon {
+		opacity: 0.85;
+		font-size: 0.9em;
+		flex-shrink: 0;
+		transition: transform 0.16s ease;
 	}
 
 	@media (max-width: 760px) {

@@ -1293,6 +1293,107 @@ public class ReactorHttpService extends Service {
                 .matches("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$");
     }
 
+    private JSONArray parseScriptTriggersFromSource(String source) {
+        JSONArray triggers = new JSONArray();
+        Set<String> unique = new HashSet<>();
+        if (source == null || source.isEmpty()) {
+            return triggers;
+        }
+
+        String[] lines = source.split("\\r?\\n", -1);
+        for (String rawLine : lines) {
+            String line = String.valueOf(rawLine).trim();
+            if (!line.startsWith("// @on")) {
+                continue;
+            }
+
+            String value = line.replace("// @on", "").trim();
+            List<String> tokens = splitDirectiveTokens(value);
+            for (String token : tokens) {
+                String normalized = String.valueOf(token).trim();
+                if (normalized.isEmpty()) {
+                    continue;
+                }
+
+                int open = normalized.indexOf('(');
+                String trigger = (open >= 0 ? normalized.substring(0, open) : normalized)
+                        .trim()
+                        .toUpperCase(Locale.ROOT);
+                if (trigger.isEmpty() || unique.contains(trigger)) {
+                    continue;
+                }
+
+                unique.add(trigger);
+                triggers.put(trigger);
+            }
+        }
+
+        return triggers;
+    }
+
+    private JSONArray buildDiscoveryScriptsPayload() {
+        JSONArray scripts = new JSONArray();
+        File projectsDir = new File(getFilesDir(), "projects");
+        if (!projectsDir.exists() || !projectsDir.isDirectory()) {
+            return scripts;
+        }
+
+        File[] children = projectsDir.listFiles();
+        if (children == null) {
+            return scripts;
+        }
+
+        for (File child : children) {
+            if (child == null || !child.isDirectory()) {
+                continue;
+            }
+
+            File scriptFile = resolveScriptFileFromProject(child);
+            if (scriptFile == null || !scriptFile.exists()) {
+                continue;
+            }
+
+            try {
+                String source = readTextFile(scriptFile);
+                String scriptId = readProjectScriptId(child);
+                if (scriptId == null || scriptId.trim().isEmpty()) {
+                    continue;
+                }
+
+                boolean enabled = false;
+                boolean mutex = false;
+                String[] lines = source.split("\\r?\\n", -1);
+                for (String rawLine : lines) {
+                    String line = String.valueOf(rawLine).trim();
+                    if (!line.startsWith("// @")) {
+                        continue;
+                    }
+
+                    if (line.startsWith("// @state")) {
+                        enabled = line.toUpperCase(Locale.ROOT).contains("ENABLED");
+                        continue;
+                    }
+
+                    if (line.startsWith("// @mutex")) {
+                        mutex = line.toUpperCase(Locale.ROOT).contains("ON");
+                    }
+                }
+
+                JSONObject script = new JSONObject();
+                script.put("uuid", scriptId);
+                script.put("name", child.getName());
+                script.put("triggers", parseScriptTriggersFromSource(source));
+                script.put("enabled", enabled);
+                script.put("mutex", mutex);
+                scripts.put(script);
+            } catch (Exception ignored) {
+                // Skip malformed script metadata entries.
+            }
+        }
+
+        return scripts;
+    }
+
     private ParsedTarget parseTarget(String rawTarget) {
         String trimmed = String.valueOf(rawTarget).trim();
         if (trimmed.isEmpty()) {
@@ -2888,9 +2989,12 @@ public class ReactorHttpService extends Service {
                     packet.put("type", "register");
                     packet.put("name", reactorName);
                     packet.put("token", registerToken);
+                    packet.put("scripts", buildDiscoveryScriptsPayload());
+                    packet.put("httpPort", currentPort);
+                    packet.put("httpTls", false);
                     webSocket.send(packet.toString());
                 } catch (Exception ignored) {
-                    webSocket.send("{\"type\":\"register\",\"name\":\"mobile-reactor\",\"token\":\"\"}");
+                    webSocket.send("{\"type\":\"register\",\"name\":\"mobile-reactor\",\"token\":\"\",\"scripts\":[],\"httpPort\":7070,\"httpTls\":false}");
                 }
                 appendGlobalLog(buildExchangeLog("CLIENT_CONNECTED", "connected to " + url + " as " + reactorName));
                 flushOutgoingQueue();
