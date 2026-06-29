@@ -2,6 +2,7 @@ const { app, BrowserWindow } = require('electron');
 const fs = require('fs/promises');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const { ReactorRuntime } = require('./src/runtime');
 const { createMainWindow } = require('./src/electron/window');
 const { setupIpcHandlers } = require('./src/electron/ipcHandlers');
@@ -50,8 +51,23 @@ let runtime;
 let isQuitting = false;
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
+function getMacLaunchAgentPath() {
+	return path.join(os.homedir(), 'Library', 'LaunchAgents', 'it.solenoid.reactor.plist');
+}
+
+function unloadMacLaunchAgent() {
+	if (process.platform !== 'darwin') {
+		return;
+	}
+
+	const plistPath = getMacLaunchAgentPath();
+	const domainTarget = `gui/${process.getuid()}`;
+	spawnSync('launchctl', ['bootout', domainTarget, plistPath], { stdio: 'ignore' });
+}
+
 function forceQuitApp() {
 	isQuitting = true;
+	unloadMacLaunchAgent();
 
 	try {
 		if (runtime) {
@@ -134,7 +150,7 @@ async function ensureMacLaunchAgentAutostart() {
 
 	try {
 		const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
-		const plistPath = path.join(launchAgentsDir, 'it.solenoid.reactor.plist');
+		const plistPath = getMacLaunchAgentPath();
 		const executablePath = app.getPath('exe');
 
 		await fs.mkdir(launchAgentsDir, { recursive: true });
@@ -152,8 +168,6 @@ async function ensureMacLaunchAgentAutostart() {
 			'    <string>--reactor-background-startup</string>',
 			'  </array>',
 			'  <key>RunAtLoad</key>',
-			'  <true/>',
-			'  <key>KeepAlive</key>',
 			'  <true/>',
 			'  <key>ProcessType</key>',
 			'  <string>Background</string>',
