@@ -102,6 +102,24 @@ class ExchangeManager {
 		return Math.max(minValue, Math.floor(raw));
 	}
 
+	_sanitizeDiscoveryScripts(rawScripts) {
+		if (!Array.isArray(rawScripts)) {
+			return [];
+		}
+
+		return rawScripts
+			.map((script) => ({
+				uuid: String(script?.uuid || '').trim().toLowerCase(),
+				name: String(script?.name || '').trim() || 'unknown',
+				triggers: Array.isArray(script?.triggers)
+					? script.triggers.map((trigger) => String(trigger || '').trim()).filter(Boolean)
+					: [],
+				enabled: Boolean(script?.enabled),
+				mutex: Boolean(script?.mutex),
+			}))
+			.filter((script) => script.uuid);
+	}
+
 	async _appendConnectionLog(event, details = {}) {
 		try {
 			const entry = {
@@ -459,6 +477,7 @@ class ExchangeManager {
 				const name = String(packet.name || '').trim().toLowerCase();
 				const providedToken = String(packet.token || '').trim();
 				const expectedToken = String(this.runtime.exchangeAuthToken || '').trim();
+				const discoveryScripts = this._sanitizeDiscoveryScripts(packet.scripts);
 
 				if (expectedToken && providedToken !== expectedToken) {
 					this.runtime.log(`[Exchange] Registration rejected for ${name || 'unknown'}: invalid token`);
@@ -485,6 +504,7 @@ class ExchangeManager {
 						connectedAt,
 						lastSeenAt: new Date().toISOString(),
 						userAgent,
+						scripts: discoveryScripts,
 					});
 					void this._writeActiveConnectionsSnapshot();
 					this._appendConnectionLog('CLIENT_REGISTERED', {
@@ -498,6 +518,14 @@ class ExchangeManager {
 					ws.send(JSON.stringify({ type: 'registered', name: clientName }));
 					this._flushUndeliveredQueue(clientName).catch(() => {});
 				}
+			} else if (packet.type === 'profile' && clientName && this._connectedClientDetails.has(clientName)) {
+				const current = this._connectedClientDetails.get(clientName);
+				this._connectedClientDetails.set(clientName, {
+					...current,
+					scripts: this._sanitizeDiscoveryScripts(packet.scripts),
+					lastSeenAt: new Date().toISOString(),
+				});
+				void this._writeActiveConnectionsSnapshot();
 			} else if (packet.type === 'message') {
 				if (clientName && this._connectedClientDetails.has(clientName)) {
 					const current = this._connectedClientDetails.get(clientName);
@@ -685,7 +713,10 @@ class ExchangeManager {
 				const name = await this.runtime.getReactorName();
 				const safeName = String(name || '').trim() || 'unnamed';
 				const token = String(this.runtime.exchangeAuthToken || '').trim();
-				ws.send(JSON.stringify({ type: 'register', name: safeName, token }));
+				const scripts = typeof this.runtime.getDiscoveryScriptEntries === 'function'
+					? this.runtime.getDiscoveryScriptEntries()
+					: [];
+				ws.send(JSON.stringify({ type: 'register', name: safeName, token, scripts }));
 				this.runtime.log(`[Exchange] Connected as: ${safeName}`);
 			} catch (err) {
 				this.runtime.log(`[Exchange] Registration error: ${err.message}`);
@@ -1111,11 +1142,27 @@ class ExchangeManager {
 					connectedAt: connectedAt || null,
 					lastSeenAt: detail?.lastSeenAt || null,
 					userAgent: detail?.userAgent || '',
+					scripts: this._sanitizeDiscoveryScripts(detail?.scripts),
 					connectedForMs,
 					connectedForSec: Number.isFinite(connectedForMs) ? Math.floor(connectedForMs / 1000) : null,
 				};
 			})
 			.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+	}
+
+	updateClientDiscoveryScripts(scripts = []) {
+		if (this.mode !== 'client' || !this.wsClient || this.wsClient.readyState !== WebSocket.OPEN) {
+			return;
+		}
+
+		try {
+			this.wsClient.send(JSON.stringify({
+				type: 'profile',
+				scripts: this._sanitizeDiscoveryScripts(scripts),
+			}));
+		} catch {
+			// Ignore profile update failures: scripts will be re-sent on reconnect.
+		}
 	}
 }
 

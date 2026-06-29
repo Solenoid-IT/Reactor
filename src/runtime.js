@@ -1002,6 +1002,18 @@ class ReactorRuntime {
 		};
 	}
 
+	getDiscoveryScriptEntries() {
+		return (Array.isArray(this.scripts) ? this.scripts : [])
+			.filter((script) => script && script.scriptId)
+			.map((script) => ({
+				uuid: String(script.scriptId || '').trim().toLowerCase(),
+				name: String(script.name || '').trim() || 'unknown',
+				triggers: Array.isArray(script.events) ? script.events.map((trigger) => String(trigger || '').trim()).filter(Boolean) : [],
+				enabled: Boolean(script.enabled),
+				mutex: Boolean(script.mutex),
+			}));
+	}
+
 	async testExchangeClientConnection(timeoutMs = 5000) {
 		if (this.exchangeMode !== 'node') {
 			return {
@@ -2414,6 +2426,10 @@ class ReactorRuntime {
 			} catch (error) {
 				this.log(`Failed to load script ${scriptPath}: ${error.message}`);
 			}
+		}
+
+		if (this.exchangeManager && typeof this.exchangeManager.updateClientDiscoveryScripts === 'function') {
+			this.exchangeManager.updateClientDiscoveryScripts(this.getDiscoveryScriptEntries());
 		}
 	}
 

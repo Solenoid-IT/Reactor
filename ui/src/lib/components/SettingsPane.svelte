@@ -1,4 +1,5 @@
 <script>
+	import { onDestroy } from 'svelte';
 	import Form from './Form.svelte';
 	import Helper from './Helper.svelte';
 
@@ -38,6 +39,70 @@
 	export let onSaveMessageQueueTtlDays = () => {};
 	export let onFlushMessageQueue = () => {};
 	export let onClearMessageQueue = () => {};
+
+	let expandedNodeNames = new Set();
+	let copiedScriptUuid = '';
+	let copiedScriptTimer = null;
+
+	function toggleNodeScripts(nodeName) {
+		const safeName = String(nodeName || '').trim().toLowerCase();
+		if (!safeName) {
+			return;
+		}
+
+		const next = new Set(expandedNodeNames);
+		if (next.has(safeName)) {
+			next.delete(safeName);
+		} else {
+			next.add(safeName);
+		}
+		expandedNodeNames = next;
+	}
+
+	function isNodeExpanded(nodeName) {
+		const safeName = String(nodeName || '').trim().toLowerCase();
+		return safeName ? expandedNodeNames.has(safeName) : false;
+	}
+
+	function showCopiedFeedback(scriptUuid) {
+		copiedScriptUuid = String(scriptUuid || '').trim();
+		if (copiedScriptTimer) {
+			clearTimeout(copiedScriptTimer);
+		}
+
+		copiedScriptTimer = setTimeout(() => {
+			copiedScriptUuid = '';
+			copiedScriptTimer = null;
+		}, 1500);
+	}
+
+	async function copyNodeScriptUuid(scriptUuid) {
+		const safeUuid = String(scriptUuid || '').trim();
+		if (!safeUuid) {
+			return;
+		}
+
+		try {
+			if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+				await navigator.clipboard.writeText(safeUuid);
+				showCopiedFeedback(safeUuid);
+				return;
+			}
+		} catch {
+			// Fallback below.
+		}
+
+		if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
+			window.prompt('Copy script UUID', safeUuid);
+			showCopiedFeedback(safeUuid);
+		}
+	}
+
+	onDestroy(() => {
+		if (copiedScriptTimer) {
+			clearTimeout(copiedScriptTimer);
+		}
+	});
 
 	function onNameSubmit(event) {
 		if (!event.detail.valid) {
@@ -211,9 +276,39 @@
 							<div class="detail-value mt-2" style="max-height:220px; overflow:auto; font-size:0.78em;">
 								{#each linkedNodes as node}
 									<div style="padding:6px 0; border-bottom:1px dashed rgba(255,255,255,0.08);">
-										<div><strong>{node.name || 'unknown'}</strong> {node.ip ? `(${node.ip}${node.port ? `:${node.port}` : ''})` : ''}</div>
+										<div>
+											<button
+												type="button"
+												class="btn-secondary"
+												on:click={() => toggleNodeScripts(node.name)}
+												style="padding:2px 6px; font-size:0.92em;"
+											>
+												<strong>{node.name || 'unknown'}</strong>
+												{node.ip ? ` (${node.ip}${node.port ? `:${node.port}` : ''})` : ''}
+												<span style="opacity:0.7; margin-left:6px;">{isNodeExpanded(node.name) ? '[-]' : '[+]'}</span>
+											</button>
+										</div>
 										<div style="opacity:0.7;">Connected: {node.connectedAt || '-'}</div>
 										<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
+										{#if isNodeExpanded(node.name)}
+											{#if Array.isArray(node.scripts) && node.scripts.length > 0}
+												<div style="margin-top:6px; padding-left:8px; border-left:2px solid rgba(255,255,255,0.14);">
+													{#each node.scripts as script}
+														<div style="padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.06);">
+															<div><strong>{script.name || 'unnamed'}</strong></div>
+															<div style="display:flex; align-items:center; gap:6px; opacity:0.78;">
+																<span>{script.uuid || '-'}</span>
+																<button type="button" class="btn-secondary" style="padding:1px 6px; font-size:0.9em;" on:click={() => copyNodeScriptUuid(script.uuid)}>{copiedScriptUuid && copiedScriptUuid === String(script.uuid || '').trim() ? 'Copied' : 'Copy'}</button>
+															</div>
+															<div style="opacity:0.68;">Triggers: {Array.isArray(script.triggers) && script.triggers.length > 0 ? script.triggers.join(', ') : '-'}</div>
+															<div style="opacity:0.68;">Enabled: {script.enabled ? 'yes' : 'no'} · Mutex: {script.mutex ? 'yes' : 'no'}</div>
+														</div>
+													{/each}
+												</div>
+											{:else}
+												<div style="margin-top:6px; opacity:0.65;">No scripts exposed by this node</div>
+											{/if}
+										{/if}
 									</div>
 								{/each}
 							</div>
@@ -292,9 +387,39 @@
 								<div class="detail-value mt-2" style="max-height:220px; overflow:auto; font-size:0.78em;">
 									{#each linkedNodes as node}
 										<div style="padding:6px 0; border-bottom:1px dashed rgba(255,255,255,0.08);">
-											<div><strong>{node.name || 'unknown'}</strong> {node.ip ? `(${node.ip}${node.port ? `:${node.port}` : ''})` : ''}</div>
+											<div>
+												<button
+													type="button"
+													class="btn-secondary"
+													on:click={() => toggleNodeScripts(node.name)}
+													style="padding:2px 6px; font-size:0.92em;"
+												>
+													<strong>{node.name || 'unknown'}</strong>
+													{node.ip ? ` (${node.ip}${node.port ? `:${node.port}` : ''})` : ''}
+													<span style="opacity:0.7; margin-left:6px;">{isNodeExpanded(node.name) ? '[-]' : '[+]'}</span>
+												</button>
+											</div>
 											<div style="opacity:0.7;">Connected: {node.connectedAt || '-'}</div>
 											<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
+											{#if isNodeExpanded(node.name)}
+												{#if Array.isArray(node.scripts) && node.scripts.length > 0}
+													<div style="margin-top:6px; padding-left:8px; border-left:2px solid rgba(255,255,255,0.14);">
+														{#each node.scripts as script}
+															<div style="padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.06);">
+																<div><strong>{script.name || 'unnamed'}</strong></div>
+																<div style="display:flex; align-items:center; gap:6px; opacity:0.78;">
+																	<span>{script.uuid || '-'}</span>
+																	<button type="button" class="btn-secondary" style="padding:1px 6px; font-size:0.9em;" on:click={() => copyNodeScriptUuid(script.uuid)}>{copiedScriptUuid && copiedScriptUuid === String(script.uuid || '').trim() ? 'Copied' : 'Copy'}</button>
+																</div>
+																<div style="opacity:0.68;">Triggers: {Array.isArray(script.triggers) && script.triggers.length > 0 ? script.triggers.join(', ') : '-'}</div>
+																<div style="opacity:0.68;">Enabled: {script.enabled ? 'yes' : 'no'} · Mutex: {script.mutex ? 'yes' : 'no'}</div>
+															</div>
+														{/each}
+													</div>
+												{:else}
+													<div style="margin-top:6px; opacity:0.65;">No scripts exposed by this node</div>
+												{/if}
+											{/if}
 										</div>
 									{/each}
 								</div>
