@@ -39,7 +39,7 @@
 		<img class="logo" src="/logo.jpg" alt="Reactor logo" />
 		<div class="title-copy">
 			<h1>Reactor</h1>
-			<p>Automate your nodes</p>
+			<p>Distribute your workflow</p>
 		</div>
 	</div>
 	<div class="connection-status" aria-label="Connection status">
@@ -62,18 +62,21 @@
 				<button type="button" class="template-menu-item" on:click={() => { templateOpen = false; onCreateWatch(); }}><i class="fa-solid fa-eye"></i><span>Watch</span></button>
 			</div>
 		</div>
-		<button type="button" class="btn-secondary icon-button" on:click={onRefresh} title="refresh scripts" aria-label="Refresh scripts"><i class="fa-solid fa-rotate-right"></i></button>
-		<button type="button" class="btn-secondary icon-button" on:click={onOpenFolder} title="open project folder" aria-label="Open project folder"><i class="fa-regular fa-folder-open"></i></button>
-		<button type="button" class="btn-secondary" on:click={onOpenNetworkView} title="view network topology"><i class="fa-solid fa-diagram-project"></i><span class="ms-2">NETWORK</span></button>
-		<!-- svelte-ignore a11y_consider_explicit_label -->
+
 		<button type="button" class="btn-secondary" on:click={onOpenSettings} title="settings"><i class="fa-solid fa-cog"></i></button>
+
 		<div class="log-picker" class:open={logOpen}>
-			<button type="button" class="btn-secondary" on:click={() => (logOpen = !logOpen)} title="log actions"><i class="fa-solid fa-list"></i><span class="ms-2">LOG</span></button>
+			<button type="button" class="btn-secondary" on:click={() => (logOpen = !logOpen)} title="log actions"><i class="fa-solid fa-list"></i></button>
 			<div class="log-menu" aria-hidden={!logOpen}>
 				<button type="button" class="log-menu-item" on:click={() => { logOpen = false; onOpenGlobalLog(); }}><i class="fa-solid fa-magnifying-glass"></i><span>View</span></button>
 				<button type="button" class="log-menu-item danger" on:click={() => { logOpen = false; onClearGlobalLog(); }}><i class="fa-solid fa-trash"></i><span>Clear</span></button>
 			</div>
 		</div>
+
+		<button type="button" class="btn-secondary" on:click={onOpenNetworkView} title="view node network"><i class="fa-solid fa-diagram-project"></i></button>
+
+		<button type="button" class="btn-secondary icon-button" on:click={onRefresh} title="refresh scripts" aria-label="Refresh scripts"><i class="fa-solid fa-rotate-right"></i></button>
+		<button type="button" class="btn-secondary icon-button" on:click={onOpenFolder} title="open projects folder" aria-label="Open projects folder"><i class="fa-regular fa-folder-open"></i></button>
 	</div>
 </header>
 
