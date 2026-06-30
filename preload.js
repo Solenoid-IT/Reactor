@@ -1,5 +1,15 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+function createStatusListener(channel, callback) {
+	if (typeof callback !== 'function') {
+		return () => {};
+	}
+
+	const handler = (_, payload) => callback(payload);
+	ipcRenderer.on(channel, handler);
+	return () => ipcRenderer.removeListener(channel, handler);
+}
+
 contextBridge.exposeInMainWorld('reactor', {
 	openScriptsFolder: () => ipcRenderer.invoke('open-scripts-folder'),
 	openScriptFile: (filePath) => ipcRenderer.invoke('open-script-file', filePath),
@@ -45,4 +55,5 @@ contextBridge.exposeInMainWorld('reactor', {
 	clearMessageQueue: () => ipcRenderer.invoke('clear-message-queue'),
 	exportBackup: () => ipcRenderer.invoke('export-backup'),
 	importBackup: () => ipcRenderer.invoke('import-backup'),
+	onRuntimeStatus: (callback) => createStatusListener('reactor-runtime-status', callback),
 });

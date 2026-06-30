@@ -82,6 +82,7 @@ class ExchangeManager {
 		this._clientLastCloseReason = '';
 		this._clientLastCloseCode = 0;
 		this._clientConnectedAt = 0;
+		this._clientRegistered = false;
 		this._knownRemotePeers = new Set();
 		this._heartbeatIntervalMs = this._readHeartbeatValue('REACTOR_EXCHANGE_HEARTBEAT_INTERVAL_MS', DEFAULT_WS_HEARTBEAT_INTERVAL_MS, 3000);
 		this._heartbeatTimeoutMs = this._readHeartbeatValue('REACTOR_EXCHANGE_HEARTBEAT_TIMEOUT_MS', DEFAULT_WS_HEARTBEAT_TIMEOUT_MS, this._heartbeatIntervalMs + 1000);
@@ -92,6 +93,72 @@ class ExchangeManager {
 		this._undeliveredQueueRetryMs = this._readHeartbeatValue('REACTOR_MESSAGE_QUEUE_RETRY_MS', DEFAULT_UNDELIVERED_RETRY_MS, 5 * 1000);
 		this._undeliveredFlushTimer = null;
 		this._isFlushingUndelivered = false;
+	}
+
+	_emitConnectionStatus(reason = '') {
+		if (!this.runtime || typeof this.runtime.publishUiStatusSnapshot !== 'function') {
+			return;
+		}
+
+		this.runtime.publishUiStatusSnapshot(reason);
+	}
+
+	getConnectionStatus() {
+		if (this.mode === 'exchange') {
+			return {
+				mode: this.mode,
+				state: this.wss ? 'connected' : 'disconnected',
+				connected: Boolean(this.wss),
+				authenticated: true,
+				reason: '',
+				lastError: '',
+				lastCloseReason: '',
+				lastCloseCode: 0,
+				lastPongAt: null,
+			};
+		}
+
+		const wsState = this.wsClient ? this.wsClient.readyState : WebSocket.CLOSED;
+		if (wsState === WebSocket.OPEN) {
+			return {
+				mode: this.mode,
+				state: 'connected',
+				connected: true,
+				authenticated: true,
+				reason: '',
+				lastError: '',
+				lastCloseReason: '',
+				lastCloseCode: 0,
+				lastPongAt: this._clientLastPongAt ? new Date(this._clientLastPongAt).toISOString() : null,
+			};
+		}
+
+		if (wsState === WebSocket.CONNECTING) {
+			return {
+				mode: this.mode,
+				state: 'connecting',
+				connected: false,
+				authenticated: false,
+				reason: 'connecting to exchange',
+				lastError: this._clientLastError,
+				lastCloseReason: this._clientLastCloseReason,
+				lastCloseCode: this._clientLastCloseCode,
+				lastPongAt: this._clientLastPongAt ? new Date(this._clientLastPongAt).toISOString() : null,
+			};
+		}
+
+		const reason = this._clientLastError || this._clientLastCloseReason || (this._clientLastTimeoutAt ? 'heartbeat timeout' : '') || 'disconnected';
+		return {
+			mode: this.mode,
+			state: 'disconnected',
+			connected: false,
+			authenticated: false,
+			reason,
+			lastError: this._clientLastError,
+			lastCloseReason: this._clientLastCloseReason,
+			lastCloseCode: this._clientLastCloseCode,
+			lastPongAt: this._clientLastPongAt ? new Date(this._clientLastPongAt).toISOString() : null,
+		};
 	}
 
 	_readHeartbeatValue(envName, fallback, minValue) {
@@ -585,6 +652,7 @@ class ExchangeManager {
 					if (clientName && clientName !== name) this.connectedClients.delete(clientName);
 					clientName = name;
 					this.connectedClients.set(clientName, ws);
+					this._clientRegistered = true;
 					this._connectedClientDetails.set(clientName, {
 						name: clientName,
 						address,
@@ -609,6 +677,7 @@ class ExchangeManager {
 					});
 					this.runtime.log(`[Exchange] Client registered: ${clientName}`);
 					ws.send(JSON.stringify({ type: 'registered', name: clientName }));
+					this._emitConnectionStatus('exchange-registered');
 					this._broadcastClientPeerList();
 					this._flushUndeliveredQueue(clientName).catch(() => {});
 				}
@@ -662,6 +731,7 @@ class ExchangeManager {
 				this.connectedClients.delete(clientName);
 				this._connectedClientDetails.delete(clientName);
 				this._broadcastClientPeerList();
+					this._emitConnectionStatus('exchange-server-client-close');
 				void this._writeActiveConnectionsSnapshot();
 				this._appendConnectionLog('CLIENT_DISCONNECTED', {
 					name: clientName,
@@ -850,6 +920,8 @@ class ExchangeManager {
 
 		this.wsClient = ws;
 		this._knownRemotePeers.clear();
+		this._clientRegistered = false;
+		this._emitConnectionStatus('exchange-connecting');
 
 		ws.on('open', async () => {
 			this._clientLastError = '';
@@ -857,6 +929,7 @@ class ExchangeManager {
 			this._clientLastCloseCode = 0;
 			this._clientConnectedAt = Date.now();
 			this._clientLastPongAt = Date.now();
+			this._emitConnectionStatus('exchange-open');
 			this._startClientHeartbeat(ws);
 			try {
 				const name = await this.runtime.getReactorName();
@@ -914,6 +987,9 @@ class ExchangeManager {
 			}
 			if (packet && packet.type === 'auth-error') {
 				this.runtime.log(`[Exchange] Authentication failed: ${packet.error || 'invalid exchange token'}`);
+				this._clientLastError = String(packet.error || 'invalid exchange token');
+				this._clientRegistered = false;
+				this._emitConnectionStatus('exchange-auth-error');
 			}
 		});
 
@@ -926,9 +1002,11 @@ class ExchangeManager {
 			if (this.wsClient === ws) this.wsClient = null;
 			this._knownRemotePeers.clear();
 			this._clientConnectedAt = 0;
+			this._clientRegistered = false;
 			this._clientLastCloseCode = Number(code) || 0;
 			this._clientLastCloseReason = String(reason || '').trim();
 			this.runtime.log('[Exchange] Connection closed, reconnecting...');
+			this._emitConnectionStatus('exchange-close');
 			this._scheduleReconnect();
 		});
 
@@ -936,7 +1014,9 @@ class ExchangeManager {
 			this._stopClientHeartbeat();
 			this._knownRemotePeers.clear();
 			this._clientLastError = String(err?.message || 'unknown error');
+			this._clientRegistered = false;
 			this.runtime.log(`[Exchange] Error: ${err.message}`);
+			this._emitConnectionStatus('exchange-error');
 			this._scheduleReconnect();
 		});
 	}

@@ -69,12 +69,23 @@
 	let exchangeToken = '';
 	let exchangeDiscovery = false;
 	let exchangeActive = false;
+	let exchangeStatus = { state: 'disconnected', connected: false, authenticated: false, reason: '', mode: 'node' };
 	let exchangeClients = [];
 	let exchangeLinkedNodes = [];
 	let exchangeLinkedNodesTotal = 0;
 	let exchangeLinkedNodesLoading = false;
 	let exchangeConfigSaving = false;
-	let p2pStatus = { enabled: false, signalingViaExchange: true, sessions: [], remotePeers: [], iceServersConfigured: false, iceServers: [] };
+	let p2pStatus = {
+		enabled: false,
+		signalingViaExchange: true,
+		connectedToExchange: false,
+		dataChannelSupported: false,
+		dataChannelSessions: 0,
+		sessions: [],
+		remotePeers: [],
+		iceServersConfigured: false,
+		iceServers: [],
+	};
 	let networkViewOpen = false;
 	let networkSelectedNode = '';
 	let networkNodeScripts = {};
@@ -189,12 +200,82 @@
 
 	$: selectedNetworkScriptsSource = selectedNetworkNodeData?.scriptsEntry?.source || (selectedNetworkScripts.length > 0 ? 'discovery' : 'none');
 
+	$: exchangeIndicator = (() => {
+		const state = String(exchangeStatus?.state || '').trim().toLowerCase();
+		if (state === 'connected' || state === 'active') {
+			return {
+				level: 'green',
+				label: 'EXCHANGE active',
+				title: exchangeStatus?.mode === 'exchange' ? 'EXCHANGE server active' : 'Connected to EXCHANGE',
+			};
+		}
+
+		if (state === 'connecting') {
+			return {
+				level: 'yellow',
+				label: 'EXCHANGE connecting',
+				title: exchangeStatus?.reason || 'Waiting for EXCHANGE connection to be established',
+			};
+		}
+
+		if (!exchangeEnabled) {
+			return {
+				level: 'red',
+				label: 'EXCHANGE inactive',
+				title: 'EXCHANGE is not configured',
+			};
+		}
+
+		return {
+			level: 'red',
+			label: 'EXCHANGE inactive',
+			title: exchangeStatus?.reason || 'EXCHANGE connection lost or unavailable',
+		};
+	})();
+
+	$: p2pConnectionStatus = (() => {
+		const sessions = Array.isArray(p2pStatus?.sessions) ? p2pStatus.sessions : [];
+		const connectedSession = sessions.find((session) => {
+			const state = String(session?.state || '').trim().toLowerCase();
+			return state === 'connected-p2p' || state === 'connected-turn';
+		});
+		const negotiatingSession = sessions.find((session) => {
+			const state = String(session?.state || '').trim().toLowerCase();
+			return state === 'signaling' || state === 'connecting';
+		});
+
+		if (connectedSession) {
+			return {
+				level: 'green',
+				label: 'P2P active',
+				title: `P2P connected to ${connectedSession.target || 'a peer'}`,
+			};
+		}
+
+		if (negotiatingSession || (Array.isArray(p2pStatus?.remotePeers) && p2pStatus.remotePeers.length > 0)) {
+			return {
+				level: 'yellow',
+				label: 'P2P negotiating',
+				title: 'P2P negotiation is in progress',
+			};
+		}
+
+		return {
+			level: 'red',
+			label: p2pStatus?.dataChannelSupported ? 'P2P inactive' : 'P2P unavailable',
+			title: p2pStatus?.dataChannelSupported ? 'No active P2P session' : 'P2P transport is unavailable',
+		};
+	})();
+
 	function applyP2PStatusResult(result) {
 		if (result?.ok && result?.p2p) {
 			const nextP2P = result.p2p;
 			p2pStatus = {
 				enabled: Boolean(nextP2P.enabled),
 				signalingViaExchange: Boolean(nextP2P.signalingViaExchange ?? true),
+				connectedToExchange: Boolean(nextP2P.connectedToExchange),
+				dataChannelSupported: Boolean(nextP2P.dataChannelSupported),
+				dataChannelSessions: Number(nextP2P.dataChannelSessions || 0),
 				sessions: Array.isArray(nextP2P.sessions) ? nextP2P.sessions : [],
 				remotePeers: Array.isArray(nextP2P.remotePeers) ? nextP2P.remotePeers : [],
 				iceServersConfigured: Boolean(nextP2P.iceServersConfigured),
@@ -203,7 +284,58 @@
 			return;
 		}
 
-		p2pStatus = { enabled: false, signalingViaExchange: true, sessions: [], remotePeers: [], iceServersConfigured: false, iceServers: [] };
+		p2pStatus = {
+			enabled: false,
+			signalingViaExchange: true,
+			connectedToExchange: false,
+			dataChannelSupported: false,
+			dataChannelSessions: 0,
+			sessions: [],
+			remotePeers: [],
+			iceServersConfigured: false,
+			iceServers: [],
+		};
+	}
+
+	function applyExchangeConfigResult(result) {
+		if (result?.ok && result?.config) {
+			const ec = result.config;
+			exchangeMode = ec.mode || 'node';
+			exchangeHost = ec.host || '';
+			exchangePort = Number(ec.port) || 7070;
+			exchangeTls = Boolean(ec.tls);
+			exchangeToken = ec.token || '';
+			exchangeDiscovery = Boolean(ec.discovery ?? ec.exposeDiscoveryEndpoint);
+			exchangeActive = Boolean(ec.active || ec.connection?.connected);
+			exchangeClients = Array.isArray(ec.connectedClients) ? ec.connectedClients : [];
+			exchangeEnabled = Boolean((ec.host || '').trim());
+			exchangeStatus = ec.connection && typeof ec.connection === 'object'
+				? ec.connection
+				: {
+					state: ec.mode === 'node' && Boolean((ec.host || '').trim()) ? 'connecting' : (ec.active ? 'connected' : 'disconnected'),
+					connected: Boolean(ec.active),
+					authenticated: Boolean(ec.active),
+					reason: ec.active ? '' : (ec.mode === 'node' && Boolean((ec.host || '').trim()) ? 'Connecting to Exchange' : 'Exchange connection unavailable'),
+					mode: ec.mode || 'node',
+				};
+			return;
+		}
+
+		exchangeActive = false;
+		exchangeStatus = { state: 'disconnected', connected: false, authenticated: false, reason: 'Exchange connection unavailable', mode: 'node' };
+	}
+
+	function applyRuntimeStatusSnapshot(snapshot) {
+		if (!snapshot || typeof snapshot !== 'object') {
+			return;
+		}
+
+		if (snapshot.exchangeConfig) {
+			applyExchangeConfigResult({ ok: true, config: snapshot.exchangeConfig });
+			if (snapshot.exchangeConfig.p2p) {
+				applyP2PStatusResult({ ok: true, p2p: snapshot.exchangeConfig.p2p });
+			}
+		}
 	}
 
 	async function refreshP2PStatusOnly() {
@@ -388,10 +520,6 @@
 
 		if (exchangeConfigResult?.ok && exchangeConfigResult?.config) {
 			const ec = exchangeConfigResult.config;
-			exchangeMode = ec.mode || 'node';
-			exchangeHost = ec.host || '';
-			exchangePort = Number(ec.port) || 7070;
-			exchangeTls = Boolean(ec.tls);
 			stunHost = String(ec.stun?.host || '');
 			stunPort = Number(ec.stun?.port) || 3478;
 			turnHost = String(ec.turn?.host || '');
@@ -399,12 +527,9 @@
 			turnTls = Boolean(ec.turn?.tls);
 			turnUsername = String(ec.turn?.username || '');
 			turnPassword = String(ec.turn?.password || '');
-			exchangeToken = ec.token || '';
-			exchangeDiscovery = Boolean(ec.discovery ?? ec.exposeDiscoveryEndpoint);
-			exchangeActive = Boolean(ec.active);
-			exchangeClients = Array.isArray(ec.connectedClients) ? ec.connectedClients : [];
-			exchangeEnabled = Boolean((ec.host || '').trim());
 		}
+
+		applyExchangeConfigResult(exchangeConfigResult);
 
 		applyP2PStatusResult(p2pStatusResult);
 
@@ -940,8 +1065,19 @@
 		status = result?.ok ? `Cleared activity.log for ${script.name}` : `Error: ${result?.error || 'unknown'}`;
 	}
 
-	onMount(async () => {
-		await refreshAll();
+	onMount(() => {
+		void refreshAll();
+		const unsubscribe = typeof window !== 'undefined' && window.reactor && typeof window.reactor.onRuntimeStatus === 'function'
+			? window.reactor.onRuntimeStatus((snapshot) => {
+				applyRuntimeStatusSnapshot(snapshot);
+			})
+			: null;
+
+		return () => {
+			if (typeof unsubscribe === 'function') {
+				unsubscribe();
+			}
+		};
 	});
 
 	async function openGlobalLog() {
@@ -1001,6 +1137,8 @@
 		onCreateSchedule={() => createScript('schedule')}
 		onCreateEvent={() => createScript('event')}
 		onCreateWatch={() => createScript('watch')}
+		exchangeStatus={exchangeIndicator}
+		p2pStatus={p2pConnectionStatus}
 	/>
 	<main class="content">
 		<section class="list-pane">

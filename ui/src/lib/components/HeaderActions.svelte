@@ -14,6 +14,8 @@
 	export let onCreateSchedule = () => {};
 	export let onCreateEvent = () => {};
 	export let onCreateWatch = () => {};
+	export let exchangeStatus = { level: 'red', label: 'EXCHANGE inactive', title: 'EXCHANGE is not connected' };
+	export let p2pStatus = { level: 'red', label: 'P2P inactive', title: 'P2P is not connected' };
 
 	function handleWindowClick(event) {
 		const picker = event.target && event.target.closest ? event.target.closest('.template-picker') : null;
@@ -40,6 +42,16 @@
 			<p>Automate your nodes</p>
 		</div>
 	</div>
+	<div class="connection-status" aria-label="Connection status">
+		<div class="status-chip" title={exchangeStatus?.title || exchangeStatus?.label || 'EXCHANGE status'}>
+			<span class={`status-dot status-${exchangeStatus?.level || 'red'}`}></span>
+			<span class="status-text">{exchangeStatus?.label || 'EXCHANGE inactive'}</span>
+		</div>
+		<div class="status-chip" title={p2pStatus?.title || p2pStatus?.label || 'P2P status'}>
+			<span class={`status-dot status-${p2pStatus?.level || 'red'}`}></span>
+			<span class="status-text">{p2pStatus?.label || 'P2P inactive'}</span>
+		</div>
+	</div>
 	<div class="actions">
 		<div class="template-picker" class:open={templateOpen}>
 			<button type="button" class="btn-primary" on:click={() => (templateOpen = !templateOpen)} title="create new script">+</button>
@@ -64,3 +76,84 @@
 		</div>
 	</div>
 </header>
+
+<style>
+	.header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+		flex-wrap: wrap;
+	}
+
+	.title {
+		display: flex;
+		align-items: center;
+		gap: 0.9rem;
+		min-width: 0;
+	}
+
+	.connection-status {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+		margin-left: auto;
+	}
+
+	.status-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
+		padding: 0.42rem 0.7rem;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.06);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		color: inherit;
+		font-size: 0.78rem;
+		font-weight: 600;
+		letter-spacing: 0.01em;
+		white-space: nowrap;
+	}
+
+	.status-dot {
+		width: 0.7rem;
+		height: 0.7rem;
+		border-radius: 999px;
+		flex: 0 0 auto;
+		box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.18) inset;
+	}
+
+	.status-red {
+		background: #ef4444;
+	}
+
+	.status-yellow {
+		background: #f59e0b;
+	}
+
+	.status-green {
+		background: #22c55e;
+	}
+
+	.actions {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	@media (max-width: 900px) {
+		.connection-status {
+			order: 3;
+			margin-left: 0;
+		}
+	}
+
+	@media (max-width: 720px) {
+		.status-chip {
+			font-size: 0.72rem;
+			padding: 0.35rem 0.62rem;
+		}
+	}
+</style>

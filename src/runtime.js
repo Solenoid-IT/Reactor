@@ -764,6 +764,7 @@ class ReactorRuntime {
 		this.streamListenerMap = new Map();
 		this.streamEndListenerMap = new Map();
 		this.activeIncomingStreams = new Map();
+		this.uiStatusSink = null;
 		this.reactorRootDir = options.reactorRootDir || path.dirname(this.scriptsDir);
 		this.streamStorageDir = path.join(this.reactorRootDir, 'temp_files', 'streams');
 		this.streamMaxActive = this.readQueueDuration('REACTOR_STREAM_MAX_ACTIVE', DEFAULT_STREAM_MAX_ACTIVE, 1);
@@ -816,6 +817,25 @@ class ReactorRuntime {
 		this.messageQueueRetryMs = this.readQueueDuration('REACTOR_MESSAGE_QUEUE_RETRY_MS', DEFAULT_MESSAGE_QUEUE_RETRY_MS, 5 * 1000);
 		this.messageQueueFlushTimer = null;
 		this.isFlushingMessageQueue = false;
+	}
+
+	setUiStatusSink(handler) {
+		this.uiStatusSink = typeof handler === 'function' ? handler : null;
+	}
+
+	publishUiStatusSnapshot(reason = '') {
+		if (!this.uiStatusSink) {
+			return;
+		}
+
+		try {
+			this.uiStatusSink({
+				reason: String(reason || ''),
+				exchangeConfig: this.getExchangeConfig(),
+			});
+		} catch (error) {
+			this.log(`[UI] status publish failed: ${error.message}`);
+		}
 	}
 
 	readQueueDuration(envName, fallback, minMs) {
@@ -1101,6 +1121,9 @@ class ReactorRuntime {
 		const config = this.exchangeManager.getConfig();
 		return {
 			...config,
+			connection: this.exchangeManager && typeof this.exchangeManager.getConnectionStatus === 'function'
+				? this.exchangeManager.getConnectionStatus()
+				: null,
 			mode: this.exchangeMode,
 			host: this.exchangeHost,
 			port: this.exchangePort,
@@ -1176,6 +1199,11 @@ class ReactorRuntime {
 		return {
 			enabled: this.exchangeMode === 'node',
 			signalingViaExchange: true,
+			connectedToExchange: Boolean(
+				this.exchangeManager
+				&& typeof this.exchangeManager.getConnectionStatus === 'function'
+				&& this.exchangeManager.getConnectionStatus().connected,
+			),
 			dataChannelSupported: Boolean(transportSummary.supported),
 			dataChannelSessions: Number(transportSummary.activeSessions || 0),
 			iceServersConfigured: this.getIceServersForP2P().length > 0,
@@ -1275,6 +1303,7 @@ class ReactorRuntime {
 		};
 
 		this.p2pSessions.set(safeTarget, merged);
+		this.publishUiStatusSnapshot(`p2p-session:${safeTarget}`);
 		return merged;
 	}
 

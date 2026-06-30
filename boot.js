@@ -208,6 +208,11 @@ if (!gotSingleInstanceLock) {
 
 		runtime = new ReactorRuntime(EXTERNAL_SCRIPTS_DIR, EVENT_LOG_PATH);
 		setupIpcHandlers(runtime, { forceQuitApp });
+		runtime.setUiStatusSink((payload) => {
+			if (mainWindow && !mainWindow.isDestroyed()) {
+				mainWindow.webContents.send('reactor-runtime-status', payload);
+			}
+		});
 
 		if (SHOW_WINDOW) {
 			mainWindow = createMainWindow();
