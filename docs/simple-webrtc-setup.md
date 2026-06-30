@@ -59,7 +59,7 @@ Notes:
 Run this command from project root:
 
 ```bash
-docker compose --profile turn run --rm --entrypoint sh coturn -lc 'mkdir -p /var/lib/coturn/certs && openssl req -x509 -newkey rsa:2048 -keyout /var/lib/coturn/certs/key.pem -out /var/lib/coturn/certs/cert.pem -days 3650 -nodes -subj "/CN=turn.local"'
+docker compose --profile turn run --rm --entrypoint sh coturn -lc 'mkdir -p /var/lib/coturn/certs && openssl req -x509 -newkey rsa:4096 -keyout /var/lib/coturn/certs/key.pem -out /var/lib/coturn/certs/cert.pem -days 3650 -nodes -subj "/CN=turn.local"'
 ```
 
 Then start (or restart) coturn:
