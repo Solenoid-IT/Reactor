@@ -1956,6 +1956,22 @@ public class ReactorMobilePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void requestRemoteScriptsP2P(PluginCall call) {
+        String target = call.getString("target", "");
+        long timeoutMs = call.getLong("timeoutMs", 8000L);
+        JSObject workingMode = readWorkingModeConfig();
+
+        if (nativeP2PManager == null) {
+            nativeP2PManager = AndroidP2PWebRtcManager.getInstance(getContext());
+            nativeP2PManager.initialize();
+        }
+
+        AndroidP2PWebRtcManager.RelayConfig relayConfig = AndroidP2PWebRtcManager.fromWorkingMode(workingMode);
+        JSObject result = nativeP2PManager.requestRemoteScripts(target, relayConfig, timeoutMs);
+        call.resolve(result);
+    }
+
+    @PluginMethod
     public void closeP2PSession(PluginCall call) {
         String target = call.getString("target", "");
         String sessionId = call.getString("sessionId", "");

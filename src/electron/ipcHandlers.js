@@ -1083,6 +1083,18 @@ function setupIpcHandlers(runtime, options = {}) {
 		}
 	});
 
+	ipcMain.handle('request-remote-scripts-p2p', async (_, { target, timeoutMs }) => {
+		if (!runtime || !runtime.requestRemoteScriptsP2P) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		try {
+			return await runtime.requestRemoteScriptsP2P(target, timeoutMs);
+		} catch (error) {
+			return { ok: false, error: error.message || 'unable to request remote scripts via p2p' };
+		}
+	});
+
 	ipcMain.handle('get-exchange-token', async () => {
 		if (!runtime || !runtime.getExchangeToken) {
 			return { ok: false, error: 'runtime not ready' };

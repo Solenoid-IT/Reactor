@@ -82,6 +82,7 @@ class ExchangeManager {
 		this._clientLastCloseReason = '';
 		this._clientLastCloseCode = 0;
 		this._clientConnectedAt = 0;
+		this._knownRemotePeers = new Set();
 		this._heartbeatIntervalMs = this._readHeartbeatValue('REACTOR_EXCHANGE_HEARTBEAT_INTERVAL_MS', DEFAULT_WS_HEARTBEAT_INTERVAL_MS, 3000);
 		this._heartbeatTimeoutMs = this._readHeartbeatValue('REACTOR_EXCHANGE_HEARTBEAT_TIMEOUT_MS', DEFAULT_WS_HEARTBEAT_TIMEOUT_MS, this._heartbeatIntervalMs + 1000);
 		this._connectionLogPath = path.join(this.runtime.reactorRootDir || process.cwd(), 'exchange-connections.log');
@@ -417,7 +418,67 @@ class ExchangeManager {
 
 		this.connectedClients.clear();
 		this._connectedClientDetails.clear();
+		this._knownRemotePeers.clear();
 		await this._writeActiveConnectionsSnapshot();
+	}
+
+	_broadcastClientPeerList() {
+		if (this.mode !== 'exchange') {
+			return;
+		}
+
+		const peers = Array.from(this.connectedClients.keys())
+			.map((name) => String(name || '').trim().toLowerCase())
+			.filter(Boolean)
+			.sort((a, b) => a.localeCompare(b));
+
+		const payload = JSON.stringify({
+			type: 'peer-list',
+			peers,
+			timestamp: new Date().toISOString(),
+		});
+
+		for (const ws of this.connectedClients.values()) {
+			if (!ws || ws.readyState !== WebSocket.OPEN) {
+				continue;
+			}
+
+			try {
+				ws.send(payload);
+			} catch {
+				// Ignore peer list notification failures for disconnected sockets.
+			}
+		}
+	}
+
+	_extractRemotePeerNamesFromPacket(packet = {}) {
+		const peers = Array.isArray(packet.peers) ? packet.peers : [];
+		const selfName = String(this.runtime?.cachedReactorName || '').trim().toLowerCase();
+		const next = new Set();
+
+		for (const peer of peers) {
+			const safePeer = String(peer || '').trim().toLowerCase();
+			if (!safePeer) {
+				continue;
+			}
+			if (selfName && safePeer === selfName) {
+				continue;
+			}
+			next.add(safePeer);
+		}
+
+		return next;
+	}
+
+	_handleIncomingPeerList(packet = {}) {
+		this._knownRemotePeers = this._extractRemotePeerNamesFromPacket(packet);
+		if (this.runtime && typeof this.runtime.handleDiscoveredRemotePeers === 'function') {
+			this.runtime.handleDiscoveredRemotePeers(this.getKnownRemotePeers()).catch(() => {});
+		}
+	}
+
+	getKnownRemotePeers() {
+		return Array.from(this._knownRemotePeers.values()).sort((a, b) => a.localeCompare(b));
 	}
 
 	// ---------------------------------------------------------------------------
@@ -548,6 +609,7 @@ class ExchangeManager {
 					});
 					this.runtime.log(`[Exchange] Client registered: ${clientName}`);
 					ws.send(JSON.stringify({ type: 'registered', name: clientName }));
+					this._broadcastClientPeerList();
 					this._flushUndeliveredQueue(clientName).catch(() => {});
 				}
 			} else if (packet.type === 'profile' && clientName && this._connectedClientDetails.has(clientName)) {
@@ -599,6 +661,7 @@ class ExchangeManager {
 			if (clientName) {
 				this.connectedClients.delete(clientName);
 				this._connectedClientDetails.delete(clientName);
+				this._broadcastClientPeerList();
 				void this._writeActiveConnectionsSnapshot();
 				this._appendConnectionLog('CLIENT_DISCONNECTED', {
 					name: clientName,
@@ -786,6 +849,7 @@ class ExchangeManager {
 		}
 
 		this.wsClient = ws;
+		this._knownRemotePeers.clear();
 
 		ws.on('open', async () => {
 			this._clientLastError = '';
@@ -844,6 +908,7 @@ class ExchangeManager {
 			try { packet = JSON.parse(String(data)); } catch { return; }
 			if (packet && packet.type === 'message') this._handleIncomingMessage(packet);
 			if (packet && packet.type === 'signal') this._handleIncomingSignal(packet);
+			if (packet && packet.type === 'peer-list') this._handleIncomingPeerList(packet);
 			if (packet && packet.type === 'stream-chunk-bin') {
 				this._clientPendingBinaryChunkMeta.push(packet);
 			}
@@ -859,6 +924,7 @@ class ExchangeManager {
 		ws.on('close', (code, reason) => {
 			this._stopClientHeartbeat();
 			if (this.wsClient === ws) this.wsClient = null;
+			this._knownRemotePeers.clear();
 			this._clientConnectedAt = 0;
 			this._clientLastCloseCode = Number(code) || 0;
 			this._clientLastCloseReason = String(reason || '').trim();
@@ -868,6 +934,7 @@ class ExchangeManager {
 
 		ws.on('error', (err) => {
 			this._stopClientHeartbeat();
+			this._knownRemotePeers.clear();
 			this._clientLastError = String(err?.message || 'unknown error');
 			this.runtime.log(`[Exchange] Error: ${err.message}`);
 			this._scheduleReconnect();
@@ -927,6 +994,7 @@ class ExchangeManager {
 						if (socket === ws) {
 							this.connectedClients.delete(name);
 							this._connectedClientDetails.delete(name);
+							this._broadcastClientPeerList();
 							this._appendConnectionLog('CLIENT_TERMINATED_HEARTBEAT', { name });
 							void this._writeActiveConnectionsSnapshot();
 							break;

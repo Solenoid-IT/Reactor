@@ -6,6 +6,7 @@ import android.util.Log;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 import org.webrtc.DataChannel;
 import org.webrtc.IceCandidate;
@@ -18,14 +19,17 @@ import org.webrtc.SessionDescription;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public final class AndroidP2PWebRtcManager {
     private static final String TAG = "AndroidP2PWebRtc";
@@ -35,6 +39,7 @@ public final class AndroidP2PWebRtcManager {
     private final Context appContext;
     private final ExecutorService executor;
     private final Map<String, SessionState> sessions;
+    private final Map<String, PendingScriptsRequest> pendingScriptRequests;
     private volatile PeerConnectionFactory peerConnectionFactory;
     private volatile boolean initialized;
 
@@ -42,6 +47,7 @@ public final class AndroidP2PWebRtcManager {
         this.appContext = context.getApplicationContext();
         this.executor = Executors.newSingleThreadExecutor();
         this.sessions = new ConcurrentHashMap<>();
+        this.pendingScriptRequests = new ConcurrentHashMap<>();
         this.initialized = false;
     }
 
@@ -152,6 +158,79 @@ public final class AndroidP2PWebRtcManager {
         return new JSObject().put("ok", sent).put("target", safeTarget).put("bytes", payload.length);
     }
 
+    public JSObject requestRemoteScripts(String target, RelayConfig relayConfig, long timeoutMs) {
+        String safeTarget = normalizeTarget(target);
+        if (safeTarget.isEmpty()) {
+            return new JSObject().put("ok", false).put("error", "invalid target");
+        }
+
+        ensureInitialized();
+
+        try {
+            SessionState session = ensureSession(safeTarget, true, relayConfig != null ? relayConfig : new RelayConfig());
+            if (session == null || session.peerConnection == null) {
+                return new JSObject().put("ok", false).put("error", "unable to create peer connection");
+            }
+
+            if (!session.offerStarted) {
+                session.offerStarted = true;
+                createOffer(session);
+            }
+
+            long safeTimeoutMs = timeoutMs > 0 ? timeoutMs : 8000L;
+            long openDeadline = System.currentTimeMillis() + safeTimeoutMs;
+            while (System.currentTimeMillis() < openDeadline) {
+                if (session.dataChannel != null && session.dataChannel.state() == DataChannel.State.OPEN) {
+                    break;
+                }
+                try {
+                    Thread.sleep(120L);
+                } catch (InterruptedException interruptedException) {
+                    Thread.currentThread().interrupt();
+                    return new JSObject().put("ok", false).put("error", "interrupted while waiting p2p channel");
+                }
+            }
+
+            if (session.dataChannel == null || session.dataChannel.state() != DataChannel.State.OPEN) {
+                return new JSObject().put("ok", false).put("error", "p2p data channel not open");
+            }
+
+            String requestId = UUID.randomUUID().toString().toLowerCase(Locale.ROOT);
+            PendingScriptsRequest pending = new PendingScriptsRequest(requestId, safeTarget);
+            pendingScriptRequests.put(requestId, pending);
+
+            JSONObject payload = new JSONObject();
+            payload.put("__reactorP2PControl", true);
+            payload.put("action", "scripts-request");
+            payload.put("requestId", requestId);
+            payload.put("timestamp", Instant.now().toString());
+
+            JSONObject envelope = buildControlEnvelope(payload);
+            byte[] encoded = envelope.toString().getBytes(StandardCharsets.UTF_8);
+            boolean sent = session.dataChannel.send(new DataChannel.Buffer(ByteBuffer.wrap(encoded), false));
+            if (!sent) {
+                pendingScriptRequests.remove(requestId);
+                return new JSObject().put("ok", false).put("error", "unable to send p2p scripts request");
+            }
+
+            boolean completed = pending.latch.await(safeTimeoutMs, TimeUnit.MILLISECONDS);
+            pendingScriptRequests.remove(requestId);
+            if (!completed) {
+                return new JSObject().put("ok", false).put("error", "p2p scripts request timeout");
+            }
+
+            return new JSObject()
+                    .put("ok", true)
+                    .put("target", safeTarget)
+                    .put("requestId", requestId)
+                    .put("node", pending.node)
+                    .put("scripts", pending.scripts != null ? pending.scripts : new JSArray())
+                    .put("generatedAt", pending.generatedAt != null ? pending.generatedAt : JSONObject.NULL);
+        } catch (Exception error) {
+            return new JSObject().put("ok", false).put("error", error.getMessage() != null ? error.getMessage() : "unable to request remote scripts");
+        }
+    }
+
     public JSObject closeSession(String target) {
         String safeTarget = normalizeTarget(target);
         if (safeTarget.isEmpty()) {
@@ -196,6 +275,8 @@ public final class AndroidP2PWebRtcManager {
         config.turnHost = turn != null ? String.valueOf(turn.optString("host", "")).trim() : "";
         config.turnPort = turn != null ? sanitizePort(turn.optInt("port", 3478), 3478) : 3478;
         config.turnTls = turn != null && turn.optBoolean("tls", false);
+        config.turnUsername = turn != null ? String.valueOf(turn.optString("username", turn.optString("user", ""))).trim() : "";
+        config.turnPassword = turn != null ? String.valueOf(turn.optString("password", "")).trim() : "";
         config.token = String.valueOf(workingMode.optString("token", "")).trim();
 
         return config;
@@ -258,9 +339,13 @@ public final class AndroidP2PWebRtcManager {
             PeerConnection.IceServer.Builder builder = PeerConnection.IceServer.builder(
                     scheme + config.turnHost + ":" + config.turnPort + "?transport=tcp"
             );
-            if (config.token != null && !config.token.isEmpty()) {
-                builder.setUsername(config.token);
-                builder.setPassword(config.token);
+            String username = config.turnUsername != null && !config.turnUsername.isEmpty() ? config.turnUsername : config.token;
+            String password = config.turnPassword != null && !config.turnPassword.isEmpty() ? config.turnPassword : config.token;
+            if (username != null && !username.isEmpty()) {
+                builder.setUsername(username);
+            }
+            if (password != null && !password.isEmpty()) {
+                builder.setPassword(password);
             }
             servers.add(builder.createIceServer());
         }
@@ -276,7 +361,7 @@ public final class AndroidP2PWebRtcManager {
                 return;
             }
 
-            RelayConfig relayConfig = new RelayConfig();
+            RelayConfig relayConfig = fromWorkingMode(ReactorHttpService.getWorkingModeConfigForP2P());
             SessionState session = sessions.get(safeTarget);
             if (session == null && ("offer".equals(safeSignalType) || "candidate".equals(safeSignalType))) {
                 session = ensureSession(safeTarget, false, relayConfig);
@@ -320,7 +405,33 @@ public final class AndroidP2PWebRtcManager {
 
         session.peerConnection.createOffer(new SimpleSdpObserver(
                 sdp -> {
-                    session.peerConnection.setLocalDescription(new SimpleSdpObserver(null, null), sdp);
+                        CountDownLatch localDescriptionLatch = new CountDownLatch(1);
+                        session.peerConnection.setLocalDescription(new SdpObserver() {
+                        @Override
+                        public void onCreateSuccess(SessionDescription sessionDescription) {
+                            // no-op
+                        }
+
+                        @Override
+                        public void onSetSuccess() {
+                            localDescriptionLatch.countDown();
+                        }
+
+                        @Override
+                        public void onCreateFailure(String s) {
+                            localDescriptionLatch.countDown();
+                        }
+
+                        @Override
+                        public void onSetFailure(String s) {
+                            localDescriptionLatch.countDown();
+                        }
+                    }, sdp);
+                        try {
+                        localDescriptionLatch.await(3L, TimeUnit.SECONDS);
+                        } catch (InterruptedException interruptedException) {
+                            Thread.currentThread().interrupt();
+                        }
                     JSObject payload = new JSObject();
                     payload.put("type", sdp.type.canonicalForm());
                     payload.put("sdp", sdp.description);
@@ -331,7 +442,9 @@ public final class AndroidP2PWebRtcManager {
     }
 
     private void applyRemoteSdpAndAnswer(SessionState session, JSONObject payload) {
-        applyRemoteSdp(session, payload, SessionDescription.Type.OFFER);
+        if (!applyRemoteSdp(session, payload, SessionDescription.Type.OFFER)) {
+            return;
+        }
 
         MediaConstraints constraints = new MediaConstraints();
         constraints.mandatory.add(new MediaConstraints.KeyValuePair("OfferToReceiveAudio", "false"));
@@ -339,7 +452,33 @@ public final class AndroidP2PWebRtcManager {
 
         session.peerConnection.createAnswer(new SimpleSdpObserver(
                 sdp -> {
-                    session.peerConnection.setLocalDescription(new SimpleSdpObserver(null, null), sdp);
+                        CountDownLatch localDescriptionLatch = new CountDownLatch(1);
+                        session.peerConnection.setLocalDescription(new SdpObserver() {
+                        @Override
+                        public void onCreateSuccess(SessionDescription sessionDescription) {
+                            // no-op
+                        }
+
+                        @Override
+                        public void onSetSuccess() {
+                            localDescriptionLatch.countDown();
+                        }
+
+                        @Override
+                        public void onCreateFailure(String s) {
+                            localDescriptionLatch.countDown();
+                        }
+
+                        @Override
+                        public void onSetFailure(String s) {
+                            localDescriptionLatch.countDown();
+                        }
+                    }, sdp);
+                        try {
+                        localDescriptionLatch.await(3L, TimeUnit.SECONDS);
+                        } catch (InterruptedException interruptedException) {
+                            Thread.currentThread().interrupt();
+                        }
                     JSObject answerPayload = new JSObject();
                     answerPayload.put("type", sdp.type.canonicalForm());
                     answerPayload.put("sdp", sdp.description);
@@ -349,20 +488,59 @@ public final class AndroidP2PWebRtcManager {
         ), constraints);
     }
 
-    private void applyRemoteSdp(SessionState session, JSONObject payload, SessionDescription.Type defaultType) {
+    private boolean applyRemoteSdp(SessionState session, JSONObject payload, SessionDescription.Type defaultType) {
         if (payload == null) {
-            return;
+            return false;
         }
 
         String sdp = String.valueOf(payload.optString("sdp", "")).trim();
         if (sdp.isEmpty()) {
-            return;
+            return false;
         }
 
         String typeRaw = String.valueOf(payload.optString("type", defaultType.canonicalForm())).trim().toLowerCase(Locale.ROOT);
         SessionDescription.Type sdpType = "answer".equals(typeRaw) ? SessionDescription.Type.ANSWER : SessionDescription.Type.OFFER;
         SessionDescription description = new SessionDescription(sdpType, sdp);
-        session.peerConnection.setRemoteDescription(new SimpleSdpObserver(null, null), description);
+        CountDownLatch remoteDescriptionLatch = new CountDownLatch(1);
+        session.remoteDescriptionSet = false;
+        session.peerConnection.setRemoteDescription(new SdpObserver() {
+            @Override
+            public void onCreateSuccess(SessionDescription sessionDescription) {
+                // no-op
+            }
+
+            @Override
+            public void onSetSuccess() {
+                session.remoteDescriptionSet = true;
+                remoteDescriptionLatch.countDown();
+            }
+
+            @Override
+            public void onCreateFailure(String s) {
+                remoteDescriptionLatch.countDown();
+            }
+
+            @Override
+            public void onSetFailure(String s) {
+                remoteDescriptionLatch.countDown();
+            }
+        }, description);
+
+        try {
+            if (!remoteDescriptionLatch.await(3L, TimeUnit.SECONDS)) {
+                return false;
+            }
+        } catch (InterruptedException interruptedException) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+
+        if (sdpType == SessionDescription.Type.ANSWER) {
+            session.state = "connected-p2p";
+        }
+
+        flushQueuedCandidates(session);
+        return true;
     }
 
     private void applyRemoteCandidate(SessionState session, JSONObject payload) {
@@ -378,7 +556,28 @@ public final class AndroidP2PWebRtcManager {
         String sdpMid = String.valueOf(payload.optString("sdpMid", "0"));
         int sdpMLineIndex = payload.optInt("sdpMLineIndex", 0);
         IceCandidate candidate = new IceCandidate(sdpMid, sdpMLineIndex, candidateValue);
+        if (!session.remoteDescriptionSet) {
+            session.queuedCandidates.add(candidate);
+            return;
+        }
+
         session.peerConnection.addIceCandidate(candidate);
+    }
+
+    private void flushQueuedCandidates(SessionState session) {
+        if (session == null || session.queuedCandidates == null || session.queuedCandidates.isEmpty()) {
+            return;
+        }
+
+        List<IceCandidate> queued = new ArrayList<>(session.queuedCandidates);
+        session.queuedCandidates.clear();
+        for (IceCandidate candidate : queued) {
+            try {
+                session.peerConnection.addIceCandidate(candidate);
+            } catch (Exception ignored) {
+                // ignore add candidate failures and continue
+            }
+        }
     }
 
     private void attachDataChannelObserver(SessionState session) {
@@ -399,14 +598,145 @@ public final class AndroidP2PWebRtcManager {
                 if (state == DataChannel.State.OPEN) {
                     session.state = "connected-p2p";
                     ReactorHttpService.sendP2PSignal(session.target, "connected", null, session.sessionId);
+                } else if (state == DataChannel.State.CONNECTING) {
+                    session.state = "connecting";
+                } else if (state == DataChannel.State.CLOSED || state == DataChannel.State.CLOSING) {
+                    session.state = "fallback-exchange";
                 }
             }
 
             @Override
             public void onMessage(DataChannel.Buffer buffer) {
-                // Native message bridge can be mapped to script events in a second phase.
+                if (buffer == null || buffer.binary || buffer.data == null) {
+                    return;
+                }
+
+                try {
+                    ByteBuffer data = buffer.data.duplicate();
+                    byte[] bytes = new byte[data.remaining()];
+                    data.get(bytes);
+                    String text = new String(bytes, StandardCharsets.UTF_8);
+                    JSONObject payload = extractControlPayloadFromEnvelope(text);
+                    if (payload != null && payload.optBoolean("__reactorP2PControl", false)) {
+                        handleControlPayload(session, payload);
+                    }
+                } catch (Exception ignored) {
+                    // Ignore malformed or unsupported P2P control payloads.
+                }
             }
         });
+    }
+
+    private JSONObject buildControlEnvelope(JSONObject payload) throws Exception {
+        JSONObject envelope = new JSONObject();
+        envelope.put("kind", "message");
+        envelope.put("payloadType", "json");
+        envelope.put("payload", payload != null ? payload.toString() : "{}");
+        envelope.put("contentType", "application/json; charset=utf-8");
+
+        JSONObject headers = new JSONObject();
+        headers.put("content-type", "application/json; charset=utf-8");
+        headers.put("x-reactor-p2p-control", "true");
+        envelope.put("messageHeaders", headers);
+        return envelope;
+    }
+
+    private JSONObject extractControlPayloadFromEnvelope(String rawText) {
+        if (rawText == null || rawText.trim().isEmpty()) {
+            return null;
+        }
+
+        try {
+            JSONObject root = new JSONObject(rawText);
+            String payloadType = String.valueOf(root.optString("payloadType", "")).trim().toLowerCase(Locale.ROOT);
+            String contentType = String.valueOf(root.optString("contentType", "")).trim().toLowerCase(Locale.ROOT);
+            JSONObject headers = root.optJSONObject("messageHeaders");
+            String headerContentType = headers != null
+                    ? String.valueOf(headers.optString("content-type", "")).trim().toLowerCase(Locale.ROOT)
+                    : "";
+
+            boolean jsonPayload = "json".equals(payloadType)
+                    || contentType.contains("application/json")
+                    || headerContentType.contains("application/json")
+                    || (headers != null && headers.optString("x-reactor-p2p-control", "").trim().length() > 0);
+
+            if (!jsonPayload) {
+                return root.optBoolean("__reactorP2PControl", false) ? root : null;
+            }
+
+            if ("json".equals(payloadType)) {
+                String payload = String.valueOf(root.optString("payload", "")).trim();
+                return payload.isEmpty() ? null : new JSONObject(payload);
+            }
+
+            if ("string".equals(payloadType) || payloadType.isEmpty()) {
+                String payload = String.valueOf(root.optString("payload", "")).trim();
+                if (payload.isEmpty()) {
+                    return root.optBoolean("__reactorP2PControl", false) ? root : null;
+                }
+                return new JSONObject(payload);
+            }
+
+            return root.optBoolean("__reactorP2PControl", false) ? root : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private void handleControlPayload(SessionState session, JSONObject payload) {
+        if (session == null || payload == null) {
+            return;
+        }
+
+        String action = String.valueOf(payload.optString("action", "")).trim().toLowerCase(Locale.ROOT);
+        String requestId = String.valueOf(payload.optString("requestId", "")).trim();
+        if (action.isEmpty() || requestId.isEmpty()) {
+            return;
+        }
+
+        if ("scripts-request".equals(action)) {
+            try {
+                JSONObject response = new JSONObject();
+                response.put("__reactorP2PControl", true);
+                response.put("action", "scripts-response");
+                response.put("requestId", requestId);
+                response.put("node", ReactorHttpService.getCurrentReactorNameForP2P());
+                response.put("scripts", ReactorHttpService.getDiscoveryScriptsPayloadForP2P());
+                response.put("generatedAt", Instant.now().toString());
+                if (session.dataChannel != null && session.dataChannel.state() == DataChannel.State.OPEN) {
+                    JSONObject envelope = buildControlEnvelope(response);
+                    byte[] encoded = envelope.toString().getBytes(StandardCharsets.UTF_8);
+                    session.dataChannel.send(new DataChannel.Buffer(ByteBuffer.wrap(encoded), false));
+                }
+            } catch (Exception ignored) {
+                // Ignore response errors; caller will timeout and fallback.
+            }
+            return;
+        }
+
+        if ("scripts-response".equals(action)) {
+            PendingScriptsRequest pending = pendingScriptRequests.get(requestId);
+            if (pending == null) {
+                return;
+            }
+
+            JSONArray scriptsRaw = payload.optJSONArray("scripts");
+            JSArray scripts = new JSArray();
+            if (scriptsRaw != null) {
+                for (int i = 0; i < scriptsRaw.length(); i += 1) {
+                    Object item = scriptsRaw.opt(i);
+                    if (item == null) {
+                        continue;
+                    }
+                    scripts.put(item);
+                }
+            }
+
+            pending.node = String.valueOf(payload.optString("node", session.target)).trim();
+            pending.scripts = scripts;
+            pending.generatedAt = String.valueOf(payload.optString("generatedAt", "")).trim();
+            pending.latch.countDown();
+        }
     }
 
     private void closeSessionInternal(SessionState session, boolean closePeer) {
@@ -459,6 +789,8 @@ public final class AndroidP2PWebRtcManager {
         public String turnHost = "";
         public int turnPort = 3478;
         public boolean turnTls = false;
+        public String turnUsername = "";
+        public String turnPassword = "";
         public String token = "";
     }
 
@@ -469,8 +801,28 @@ public final class AndroidP2PWebRtcManager {
         String dataChannelState;
         boolean initiator;
         boolean offerStarted;
+        boolean remoteDescriptionSet;
         PeerConnection peerConnection;
         DataChannel dataChannel;
+        List<IceCandidate> queuedCandidates = new ArrayList<>();
+    }
+
+    private static final class PendingScriptsRequest {
+        final String requestId;
+        final String target;
+        final CountDownLatch latch;
+        volatile String node;
+        volatile JSArray scripts;
+        volatile String generatedAt;
+
+        PendingScriptsRequest(String requestId, String target) {
+            this.requestId = requestId;
+            this.target = target;
+            this.latch = new CountDownLatch(1);
+            this.node = target;
+            this.scripts = new JSArray();
+            this.generatedAt = null;
+        }
     }
 
     private static final class SimpleSdpObserver implements SdpObserver {

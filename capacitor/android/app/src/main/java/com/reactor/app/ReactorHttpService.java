@@ -110,6 +110,7 @@ public class ReactorHttpService extends Service {
     private static final long DEFAULT_MESSAGE_QUEUE_TTL_MS = 7L * 24L * 60L * 60L * 1000L;
     private static final long DEFAULT_MESSAGE_QUEUE_RETRY_MS = 30000L;
     private static final long DEFAULT_P2P_SESSION_TIMEOUT_MS = 2L * 60L * 1000L;
+    private static final long DEFAULT_P2P_AUTODIAL_COOLDOWN_MS = 30L * 1000L;
     private static final long NET_CHANGE_DEBOUNCE_MS = 2500L;
     private static final long NET_CHANGE_FALLBACK_POLL_INTERVAL_MS = 60000L;
 
@@ -124,6 +125,8 @@ public class ReactorHttpService extends Service {
     private static volatile String currentExchangeToken = "";
     private static volatile WebSocket wsExchangeClientSocket = null;
     private static final ConcurrentHashMap<String, JSONObject> p2pSessions = new ConcurrentHashMap<>();
+    private static final Set<String> exchangeRemotePeers = ConcurrentHashMap.newKeySet();
+    private static final ConcurrentHashMap<String, Long> p2pAutodialAttempts = new ConcurrentHashMap<>();
     private static volatile P2PSignalListener p2pSignalListener = null;
     private static ReactorHttpService instance = null;
     private static volatile boolean stopRequestedByUser = false;
@@ -338,10 +341,39 @@ public class ReactorHttpService extends Service {
             sessions.put(item);
         }
 
+        String selfName = "";
+        if (instance != null) {
+            try {
+                selfName = String.valueOf(instance.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .getString(PREF_REACTOR_NAME, "mobile-reactor")).trim().toLowerCase(Locale.ROOT);
+            } catch (Exception ignored) {
+                selfName = "";
+            }
+        }
+
+        List<String> peers = new ArrayList<>();
+        for (String peer : exchangeRemotePeers) {
+            String safePeer = String.valueOf(peer == null ? "" : peer).trim().toLowerCase(Locale.ROOT);
+            if (safePeer.isEmpty()) {
+                continue;
+            }
+            if (!selfName.isEmpty() && selfName.equals(safePeer)) {
+                continue;
+            }
+            peers.add(safePeer);
+        }
+        peers.sort(String::compareTo);
+
+        JSArray remotePeers = new JSArray();
+        for (String peer : peers) {
+            remotePeers.put(peer);
+        }
+
         JSObject p2p = new JSObject();
         p2p.put("enabled", "node".equals(currentExchangeMode));
         p2p.put("signalingViaExchange", true);
         p2p.put("connectedToExchange", isExchangeClientConnected());
+        p2p.put("remotePeers", remotePeers);
         p2p.put("sessions", sessions);
         return p2p;
     }
@@ -540,6 +572,62 @@ public class ReactorHttpService extends Service {
             return new ArrayList<>(instance.wsExchangeClients.keySet());
         }
         return new ArrayList<>();
+    }
+
+    public static JSONArray getDiscoveryScriptsPayloadForP2P() {
+        if (instance == null) {
+            return new JSONArray();
+        }
+        return instance.buildDiscoveryScriptsPayload();
+    }
+
+    public static String getCurrentReactorNameForP2P() {
+        if (instance == null) {
+            return "mobile-reactor";
+        }
+
+        try {
+            return String.valueOf(instance.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .getString(PREF_REACTOR_NAME, "mobile-reactor")).trim();
+        } catch (Exception ignored) {
+            return "mobile-reactor";
+        }
+    }
+
+    public static JSObject getWorkingModeConfigForP2P() {
+        JSObject fallback = new JSObject();
+        fallback.put("stun", new JSObject());
+        fallback.put("turn", new JSObject());
+        fallback.put("token", "");
+
+        if (instance == null) {
+            return fallback;
+        }
+
+        try {
+            File workingModeFile = new File(instance.getFilesDir(), WORKING_MODE_FILE);
+            if (!workingModeFile.exists()) {
+                return fallback;
+            }
+
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            try (FileInputStream input = new FileInputStream(workingModeFile)) {
+                byte[] buffer = new byte[1024];
+                int read;
+                while ((read = input.read(buffer)) >= 0) {
+                    output.write(buffer, 0, read);
+                }
+            }
+
+            String raw = output.toString(StandardCharsets.UTF_8.name()).trim();
+            if (raw.isEmpty()) {
+                return fallback;
+            }
+
+            return new JSObject(raw);
+        } catch (Exception ignored) {
+            return fallback;
+        }
     }
 
     @Override
@@ -3221,6 +3309,7 @@ public class ReactorHttpService extends Service {
             @Override
             public void onOpen(WebSocket webSocket, Response response) {
                 wsExchangeClientSocket = webSocket;
+                exchangeRemotePeers.clear();
                 String reactorName = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                         .getString(PREF_REACTOR_NAME, "mobile-reactor");
                 String registerToken = readExchangeToken();
@@ -3304,6 +3393,7 @@ public class ReactorHttpService extends Service {
             @Override
             public void onClosed(WebSocket webSocket, int code, String reason) {
                 wsExchangeClientSocket = null;
+                exchangeRemotePeers.clear();
                 synchronized (wsClientPendingBinaryChunks) {
                     wsClientPendingBinaryChunks.clear();
                 }
@@ -3314,6 +3404,7 @@ public class ReactorHttpService extends Service {
             @Override
             public void onFailure(WebSocket webSocket, Throwable t, Response response) {
                 wsExchangeClientSocket = null;
+                exchangeRemotePeers.clear();
                 synchronized (wsClientPendingBinaryChunks) {
                     wsClientPendingBinaryChunks.clear();
                 }
@@ -3623,6 +3714,10 @@ public class ReactorHttpService extends Service {
         try {
             JSONObject packet = new JSONObject(text);
             String type = packet.optString("type", "").trim().toLowerCase(Locale.ROOT);
+            if ("peer-list".equals(type)) {
+                handleIncomingExchangePeerList(packet);
+                return;
+            }
             if ("signal".equals(type)) {
                 handleIncomingExchangeSignal(packet);
                 return;
@@ -3677,6 +3772,113 @@ public class ReactorHttpService extends Service {
                 }
             }
         } catch (Exception ignored) {}
+    }
+
+    private void handleIncomingExchangePeerList(JSONObject packet) {
+        exchangeRemotePeers.clear();
+        if (packet == null) {
+            return;
+        }
+
+        JSONArray peers = packet.optJSONArray("peers");
+        if (peers == null) {
+            return;
+        }
+
+        String selfName = String.valueOf(getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(PREF_REACTOR_NAME, "mobile-reactor")).trim().toLowerCase(Locale.ROOT);
+
+        for (int i = 0; i < peers.length(); i++) {
+            String safePeer = String.valueOf(peers.optString(i, "")).trim().toLowerCase(Locale.ROOT);
+            if (safePeer.isEmpty()) {
+                continue;
+            }
+            if (!selfName.isEmpty() && selfName.equals(safePeer)) {
+                continue;
+            }
+            exchangeRemotePeers.add(safePeer);
+            maybeAutoStartNativeP2PSession(safePeer);
+        }
+    }
+
+    private JSObject readWorkingModeConfigFromFile() {
+        JSObject fallback = new JSObject();
+        fallback.put("stun", new JSObject());
+        fallback.put("turn", new JSObject());
+        fallback.put("token", "");
+
+        try {
+            File workingModeFile = getWorkingModeFile();
+            if (!workingModeFile.exists()) {
+                return fallback;
+            }
+
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            try (FileInputStream input = new FileInputStream(workingModeFile)) {
+                byte[] buffer = new byte[1024];
+                int read;
+                while ((read = input.read(buffer)) >= 0) {
+                    output.write(buffer, 0, read);
+                }
+            }
+
+            String raw = output.toString(StandardCharsets.UTF_8.name()).trim();
+            if (raw.isEmpty()) {
+                return fallback;
+            }
+            return new JSObject(raw);
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    private void maybeAutoStartNativeP2PSession(String target) {
+        String safeTarget = normalizeP2PTarget(target);
+        if (safeTarget.isEmpty()) {
+            return;
+        }
+        if (!"node".equals(currentExchangeMode)) {
+            return;
+        }
+        if (!isExchangeClientConnected()) {
+            return;
+        }
+
+        JSONObject existing = p2pSessions.get(safeTarget);
+        if (existing != null) {
+            String state = String.valueOf(existing.optString("state", "")).trim().toLowerCase(Locale.ROOT);
+            if ("connecting".equals(state) || "connected-p2p".equals(state) || "connected-turn".equals(state)) {
+                return;
+            }
+        }
+
+        long now = System.currentTimeMillis();
+        long lastAttempt = p2pAutodialAttempts.getOrDefault(safeTarget, 0L);
+        if (lastAttempt > 0L && (now - lastAttempt) < DEFAULT_P2P_AUTODIAL_COOLDOWN_MS) {
+            return;
+        }
+        p2pAutodialAttempts.put(safeTarget, now);
+
+        try {
+            AndroidP2PWebRtcManager manager = AndroidP2PWebRtcManager.getInstance(getApplicationContext());
+            manager.initialize();
+
+            JSObject workingMode = readWorkingModeConfigFromFile();
+            AndroidP2PWebRtcManager.RelayConfig relayConfig = AndroidP2PWebRtcManager.fromWorkingMode(workingMode);
+            JSObject result = manager.startSession(safeTarget, true, relayConfig);
+
+            boolean started = false;
+            if (result != null) {
+                Boolean ok = result.getBool("ok");
+                started = Boolean.TRUE.equals(ok);
+            }
+
+            if (started) {
+                upsertP2PSession(safeTarget, result.getString("sessionId", ""), "connecting", "offer", false, "");
+            }
+        } catch (Exception ignored) {
+            // Keep Exchange relay as fallback when native P2P auto-start fails.
+        }
     }
 
     private void handleIncomingExchangeSignal(JSONObject packet) {

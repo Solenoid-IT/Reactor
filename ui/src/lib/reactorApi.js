@@ -537,7 +537,7 @@ export async function getP2PStatus() {
 		return nativeResult;
 	}
 
-	return { ok: false, error: 'bridge unavailable', p2p: { enabled: false, sessions: [] } };
+	return { ok: false, error: 'bridge unavailable', p2p: { enabled: false, sessions: [], remotePeers: [] } };
 }
 
 export async function sendP2PSignal(target, signalType, payload = null, sessionId = null) {
@@ -609,6 +609,25 @@ export async function sendP2PData(target, text = '') {
 	}
 
 	const nativeResult = await invokeNative('ReactorMobile', 'sendP2PData', { target, text });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function requestRemoteScriptsP2P(target, timeoutMs = 8000) {
+	const bridge = getBridge();
+	if (bridge && bridge.requestRemoteScriptsP2P) {
+		return bridge.requestRemoteScriptsP2P(target, timeoutMs);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.requestRemoteScriptsP2P) {
+		return mobile.requestRemoteScriptsP2P({ target, timeoutMs });
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'requestRemoteScriptsP2P', { target, timeoutMs });
 	if (nativeResult) {
 		return nativeResult;
 	}

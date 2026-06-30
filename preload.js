@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('reactor', {
 	saveRelayConfig: (kind, config) => ipcRenderer.invoke('save-relay-config', { kind, config }),
 	getP2PStatus: () => ipcRenderer.invoke('get-p2p-status'),
 	sendP2PSignal: (target, signalType, payload, sessionId) => ipcRenderer.invoke('send-p2p-signal', { target, signalType, payload, sessionId }),
+	requestRemoteScriptsP2P: (target, timeoutMs) => ipcRenderer.invoke('request-remote-scripts-p2p', { target, timeoutMs }),
 	closeP2PSession: (target, sessionId, payload) => ipcRenderer.invoke('close-p2p-session', { target, sessionId, payload }),
 	getExchangeLinkedNodes: () => ipcRenderer.invoke('get-exchange-linked-nodes'),
 	getExchangeToken: () => ipcRenderer.invoke('get-exchange-token'),

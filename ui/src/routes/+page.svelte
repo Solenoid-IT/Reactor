@@ -42,6 +42,7 @@
 		setMessageQueueTtlDays,
 		flushMessageQueue,
 		clearMessageQueue,
+		requestRemoteScriptsP2P,
 	} from '$lib/reactorApi';
 
 	let scripts = [];
@@ -73,7 +74,12 @@
 	let exchangeLinkedNodesTotal = 0;
 	let exchangeLinkedNodesLoading = false;
 	let exchangeConfigSaving = false;
-	let p2pStatus = { enabled: false, signalingViaExchange: true, sessions: [], iceServersConfigured: false, iceServers: [] };
+	let p2pStatus = { enabled: false, signalingViaExchange: true, sessions: [], remotePeers: [], iceServersConfigured: false, iceServers: [] };
+	let networkViewOpen = false;
+	let networkSelectedNode = '';
+	let networkNodeScripts = {};
+	let networkRequestInFlight = '';
+	let networkRequestError = '';
 	let tlsEnabled = false;
 	let tlsSubject = '';
 	let tlsNotAfter = '';
@@ -122,6 +128,228 @@
 	}
 
 	$: selectedScript = selectedIndex >= 0 ? scripts[selectedIndex] : null;
+
+	$: networkPeerNames = (() => {
+		const localName = String(reactorName || '').trim().toLowerCase();
+		const peers = new Set();
+
+		for (const node of Array.isArray(exchangeLinkedNodes) ? exchangeLinkedNodes : []) {
+			const name = String(node?.name || '').trim().toLowerCase();
+			if (!name || (localName && name === localName)) {
+				continue;
+			}
+			peers.add(name);
+		}
+
+		for (const peer of Array.isArray(p2pStatus?.remotePeers) ? p2pStatus.remotePeers : []) {
+			const name = String(peer || '').trim().toLowerCase();
+			if (!name || (localName && name === localName)) {
+				continue;
+			}
+			peers.add(name);
+		}
+
+		for (const session of Array.isArray(p2pStatus?.sessions) ? p2pStatus.sessions : []) {
+			const name = String(session?.target || '').trim().toLowerCase();
+			if (!name || (localName && name === localName)) {
+				continue;
+			}
+			peers.add(name);
+		}
+
+		return Array.from(peers.values()).sort((a, b) => a.localeCompare(b));
+	})();
+
+	$: networkNodes = networkPeerNames.map((peerName) => {
+		const linkedNode = Array.isArray(exchangeLinkedNodes)
+			? exchangeLinkedNodes.find((node) => String(node?.name || '').trim().toLowerCase() === peerName)
+			: null;
+		const session = Array.isArray(p2pStatus?.sessions)
+			? p2pStatus.sessions.find((item) => String(item?.target || '').trim().toLowerCase() === peerName)
+			: null;
+		const scriptsEntry = networkNodeScripts[peerName] || null;
+		const stateInfo = buildNetworkStateInfo(session);
+
+		return {
+			name: peerName,
+			linkedNode,
+			session,
+			scriptsEntry,
+			stateInfo,
+		};
+	});
+
+	$: selectedNetworkNodeData = networkSelectedNode
+		? networkNodes.find((node) => node.name === networkSelectedNode) || null
+		: null;
+
+	$: selectedNetworkScripts = selectedNetworkNodeData?.scriptsEntry?.scripts && Array.isArray(selectedNetworkNodeData.scriptsEntry.scripts)
+		? selectedNetworkNodeData.scriptsEntry.scripts
+		: networkNodeScriptsFallback(networkSelectedNode);
+
+	$: selectedNetworkScriptsSource = selectedNetworkNodeData?.scriptsEntry?.source || (selectedNetworkScripts.length > 0 ? 'discovery' : 'none');
+
+	function applyP2PStatusResult(result) {
+		if (result?.ok && result?.p2p) {
+			const nextP2P = result.p2p;
+			p2pStatus = {
+				enabled: Boolean(nextP2P.enabled),
+				signalingViaExchange: Boolean(nextP2P.signalingViaExchange ?? true),
+				sessions: Array.isArray(nextP2P.sessions) ? nextP2P.sessions : [],
+				remotePeers: Array.isArray(nextP2P.remotePeers) ? nextP2P.remotePeers : [],
+				iceServersConfigured: Boolean(nextP2P.iceServersConfigured),
+				iceServers: Array.isArray(nextP2P.iceServers) ? nextP2P.iceServers : [],
+			};
+			return;
+		}
+
+		p2pStatus = { enabled: false, signalingViaExchange: true, sessions: [], remotePeers: [], iceServersConfigured: false, iceServers: [] };
+	}
+
+	async function refreshP2PStatusOnly() {
+		const result = await getP2PStatus();
+		applyP2PStatusResult(result);
+	}
+
+	function normalizeNodeName(value) {
+		return String(value || '').trim().toLowerCase();
+	}
+
+	function networkNodeScriptsFallback(nodeName) {
+		const safeName = normalizeNodeName(nodeName);
+		if (!safeName) {
+			return [];
+		}
+
+		const linkedNode = Array.isArray(exchangeLinkedNodes)
+			? exchangeLinkedNodes.find((node) => normalizeNodeName(node?.name) === safeName)
+			: null;
+		return Array.isArray(linkedNode?.scripts) ? linkedNode.scripts : [];
+	}
+
+	function networkStateKeyFromSessionState(rawState) {
+		const state = String(rawState || '').trim().toLowerCase();
+		if (state === 'connected-p2p') {
+			return 'connected';
+		}
+		if (state === 'connected-turn') {
+			return 'relay';
+		}
+		if (state === 'connecting' || state === 'signaling') {
+			return 'dialing';
+		}
+		if (state === 'fallback-exchange' || state === 'failed') {
+			return 'fallback';
+		}
+		return 'discovered';
+	}
+
+	function networkStateLabelFromKey(key) {
+		if (key === 'connected') {
+			return 'Connected P2P';
+		}
+		if (key === 'relay') {
+			return 'Connected TURN';
+		}
+		if (key === 'dialing') {
+			return 'Dialing';
+		}
+		if (key === 'fallback') {
+			return 'Fallback Exchange';
+		}
+		return 'Discovered';
+	}
+
+	function buildNetworkStateInfo(session) {
+		const key = networkStateKeyFromSessionState(session?.state || '');
+		return {
+			key,
+			label: networkStateLabelFromKey(key),
+			reason: String(session?.reason || '').trim(),
+		};
+	}
+
+	function networkNodeAngleStyle(index, total) {
+		const safeTotal = Math.max(1, Number(total || 1));
+		const radius = safeTotal <= 1 ? 0 : safeTotal <= 4 ? 130 : 170;
+		const angle = ((2 * Math.PI) / safeTotal) * index - Math.PI / 2;
+		const x = Math.cos(angle) * radius;
+		const y = Math.sin(angle) * radius;
+		return `transform: translate(${x}px, ${y}px);`;
+	}
+
+	function openNetworkView() {
+		networkRequestError = '';
+		networkViewOpen = true;
+		if (!networkSelectedNode && networkPeerNames.length > 0) {
+			networkSelectedNode = networkPeerNames[0];
+		}
+
+		refreshExchangeLinkedNodes(true).catch(() => {});
+		refreshP2PStatusOnly().catch(() => {});
+	}
+
+	function closeNetworkView() {
+		networkViewOpen = false;
+		networkRequestInFlight = '';
+		networkRequestError = '';
+	}
+
+	async function requestNetworkNodeScripts(nodeName, silent = false) {
+		const safeName = normalizeNodeName(nodeName);
+		if (!safeName) {
+			return;
+		}
+
+		networkRequestError = '';
+		networkRequestInFlight = safeName;
+		try {
+			const result = await requestRemoteScriptsP2P(safeName, 10000);
+			if (!result?.ok) {
+				throw new Error(result?.error || 'p2p scripts request failed');
+			}
+
+			networkNodeScripts = {
+				...networkNodeScripts,
+				[safeName]: {
+					scripts: Array.isArray(result.scripts) ? result.scripts : [],
+					updatedAt: new Date().toISOString(),
+					error: '',
+					source: 'p2p',
+				},
+			};
+
+			await refreshP2PStatusOnly();
+			if (!silent) {
+				status = `P2P scripts loaded from ${safeName}`;
+			}
+		} catch (error) {
+			networkNodeScripts = {
+				...networkNodeScripts,
+				[safeName]: {
+					scripts: [],
+					updatedAt: new Date().toISOString(),
+					error: String(error?.message || 'unable to load scripts via p2p'),
+					source: 'p2p',
+				},
+			};
+			networkRequestError = String(error?.message || 'unable to load scripts via p2p');
+			if (!silent) {
+				status = `Error: ${networkRequestError}`;
+			}
+		} finally {
+			networkRequestInFlight = '';
+		}
+	}
+
+	function selectNetworkNode(nodeName) {
+		const safeName = normalizeNodeName(nodeName);
+		if (!safeName) {
+			return;
+		}
+		networkSelectedNode = safeName;
+		requestNetworkNodeScripts(safeName, true).catch(() => {});
+	}
 
 	async function refreshAll() {
 		const [info, settings, serverConfig, currentReactorName, exchangeConfigResult, p2pStatusResult, exchangeTokenResult, tlsConfigResult, queueStatusResult] = await Promise.all([
@@ -178,18 +406,7 @@
 			exchangeEnabled = Boolean((ec.host || '').trim());
 		}
 
-		if (p2pStatusResult?.ok && p2pStatusResult?.p2p) {
-			const nextP2P = p2pStatusResult.p2p;
-			p2pStatus = {
-				enabled: Boolean(nextP2P.enabled),
-				signalingViaExchange: Boolean(nextP2P.signalingViaExchange ?? true),
-				sessions: Array.isArray(nextP2P.sessions) ? nextP2P.sessions : [],
-				iceServersConfigured: Boolean(nextP2P.iceServersConfigured),
-				iceServers: Array.isArray(nextP2P.iceServers) ? nextP2P.iceServers : [],
-			};
-		} else {
-			p2pStatus = { enabled: false, signalingViaExchange: true, sessions: [], iceServersConfigured: false, iceServers: [] };
-		}
+		applyP2PStatusResult(p2pStatusResult);
 
 		if (exchangeTokenResult?.ok && exchangeTokenResult?.exchangeToken?.token) {
 			exchangeToken = exchangeTokenResult.exchangeToken.token;
@@ -777,6 +994,7 @@
 		onRefresh={refreshAll}
 		onOpenFolder={openScriptsFolder}
 		onOpenSettings={openSettings}
+		onOpenNetworkView={openNetworkView}
 		onOpenGlobalLog={openGlobalLog}
 		onClearGlobalLog={clearGlobalLog}
 		onCreateBlank={() => createScript('blank')}
@@ -873,6 +1091,95 @@
 		/>
 	</Modal>
 
+	<Modal
+		open={networkViewOpen}
+		title="Network View"
+		subtitle="Click a node to request remote scripts over P2P DataChannel"
+		ariaLabel="Network topology and node scripts"
+		cardClass="modal-card network-view-modal-card"
+		onClose={closeNetworkView}
+		showActions={false}
+	>
+		<div class="network-view-shell">
+			<div class="network-graph-pane">
+				<div class="network-state-legend">
+					<span class="legend-item"><i class="legend-dot is-connected"></i>Connected P2P</span>
+					<span class="legend-item"><i class="legend-dot is-relay"></i>Connected TURN</span>
+					<span class="legend-item"><i class="legend-dot is-dialing"></i>Dialing</span>
+					<span class="legend-item"><i class="legend-dot is-fallback"></i>Fallback</span>
+					<span class="legend-item"><i class="legend-dot is-discovered"></i>Discovered</span>
+				</div>
+				<div class="network-graph-canvas">
+					{#if networkNodes.length === 0}
+						<div class="network-empty">No remote nodes available</div>
+					{:else}
+						<div class="network-hub">
+							<div class="network-hub-icon"><i class="fa-solid fa-server"></i></div>
+							<div class="network-hub-label">Exchange</div>
+						</div>
+						{#each networkNodes as node, index}
+							<div class="network-edge is-{node.stateInfo.key}" style={networkNodeAngleStyle(index, networkNodes.length)}></div>
+							<button
+								type="button"
+								class="network-node is-{node.stateInfo.key} {networkSelectedNode === node.name ? 'is-selected' : ''}"
+								style={networkNodeAngleStyle(index, networkNodes.length)}
+								on:click={() => selectNetworkNode(node.name)}
+							>
+								<div class="network-node-title">{node.name}</div>
+								<div class="network-node-state">{node.stateInfo.label}</div>
+								{#if node.stateInfo.reason}
+									<div class="network-node-reason">{node.stateInfo.reason}</div>
+								{/if}
+							</button>
+						{/each}
+					{/if}
+				</div>
+			</div>
+
+			<div class="network-detail-pane">
+				{#if !networkSelectedNode}
+					<div class="network-empty">Select a node to inspect scripts</div>
+				{:else}
+					<div class="network-detail-header">
+						<div>
+							<div class="network-detail-title">{networkSelectedNode}</div>
+							<div class="network-detail-meta">
+								Source: {selectedNetworkScriptsSource === 'p2p' ? 'P2P realtime' : selectedNetworkScriptsSource === 'discovery' ? 'Exchange discovery' : '-'}
+							</div>
+						</div>
+						<button
+							type="button"
+							class="btn-secondary"
+							disabled={networkRequestInFlight === networkSelectedNode}
+							on:click={() => requestNetworkNodeScripts(networkSelectedNode)}
+						>
+							<i class="fa-solid fa-wifi me-1"></i>{networkRequestInFlight === networkSelectedNode ? 'Requesting...' : 'Request via P2P'}
+						</button>
+					</div>
+
+					{#if networkRequestError}
+						<div class="network-error">{networkRequestError}</div>
+					{/if}
+
+					{#if selectedNetworkScripts.length === 0}
+						<div class="network-empty">No scripts returned for this node</div>
+					{:else}
+						<div class="network-script-list">
+							{#each selectedNetworkScripts as script}
+								<div class="network-script-item">
+									<div class="network-script-name">{script.name || 'unnamed'}</div>
+									<div class="network-script-meta">UUID: {script.uuid || '-'}</div>
+									<div class="network-script-meta">Triggers: {Array.isArray(script.triggers) && script.triggers.length > 0 ? script.triggers.join(', ') : '-'}</div>
+									<div class="network-script-meta">Enabled: {script.enabled ? 'yes' : 'no'} · Mutex: {script.mutex ? 'yes' : 'no'}</div>
+								</div>
+							{/each}
+						</div>
+					{/if}
+				{/if}
+			</div>
+		</div>
+	</Modal>
+
 	{#if editorOpen && CodeEditorComponent}
 		<svelte:component
 			this={CodeEditorComponent}
@@ -918,5 +1225,257 @@
 		min-height: 100vh;
 		display: flex;
 		flex-direction: column;
+	}
+
+	:global(.network-view-modal-card) {
+		width: min(1080px, 95vw);
+		max-height: 90vh;
+		overflow: auto;
+	}
+
+	.network-view-shell {
+		display: grid;
+		grid-template-columns: 1.1fr 1fr;
+		gap: 14px;
+	}
+
+	.network-state-legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
+		margin-bottom: 8px;
+		font-size: 0.72rem;
+		opacity: 0.9;
+	}
+
+	.legend-item {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+	}
+
+	.legend-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		display: inline-block;
+	}
+
+	.network-graph-pane,
+	.network-detail-pane {
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		border-radius: 12px;
+		padding: 12px;
+		background: rgba(17, 24, 33, 0.52);
+	}
+
+	.network-graph-canvas {
+		position: relative;
+		height: 420px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		overflow: hidden;
+	}
+
+	.network-hub {
+		position: absolute;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		width: 120px;
+		height: 120px;
+		border-radius: 50%;
+		border: 1px solid rgba(102, 176, 255, 0.4);
+		background: radial-gradient(circle at 30% 30%, rgba(57, 102, 160, 0.9), rgba(24, 45, 80, 0.9));
+		z-index: 3;
+	}
+
+	.network-hub-icon {
+		font-size: 1.2rem;
+	}
+
+	.network-hub-label {
+		font-size: 0.84rem;
+		opacity: 0.86;
+	}
+
+	.network-edge {
+		position: absolute;
+		width: 2px;
+		height: 120px;
+		background: linear-gradient(180deg, rgba(137, 186, 255, 0.72), rgba(137, 186, 255, 0.08));
+		transform-origin: center -60px;
+		z-index: 1;
+	}
+
+	.network-edge.is-connected {
+		background: linear-gradient(180deg, rgba(96, 230, 154, 0.9), rgba(96, 230, 154, 0.12));
+	}
+
+	.network-edge.is-relay {
+		background: linear-gradient(180deg, rgba(247, 196, 99, 0.9), rgba(247, 196, 99, 0.12));
+	}
+
+	.network-edge.is-dialing {
+		background: linear-gradient(180deg, rgba(111, 183, 255, 0.95), rgba(111, 183, 255, 0.1));
+	}
+
+	.network-edge.is-fallback {
+		background: linear-gradient(180deg, rgba(238, 110, 110, 0.95), rgba(238, 110, 110, 0.12));
+	}
+
+	.network-edge.is-discovered {
+		background: linear-gradient(180deg, rgba(178, 190, 204, 0.8), rgba(178, 190, 204, 0.1));
+	}
+
+	.network-node {
+		position: absolute;
+		width: 138px;
+		min-height: 70px;
+		padding: 8px;
+		border-radius: 12px;
+		border: 1px solid rgba(123, 149, 177, 0.46);
+		background: rgba(22, 30, 43, 0.95);
+		color: #eef4ff;
+		text-align: left;
+		cursor: pointer;
+		z-index: 4;
+	}
+
+	.network-node.is-selected {
+		border-color: rgba(111, 231, 170, 0.9);
+		box-shadow: 0 0 0 2px rgba(111, 231, 170, 0.25);
+	}
+
+	.network-node.is-connected {
+		border-color: rgba(96, 230, 154, 0.75);
+	}
+
+	.network-node.is-relay {
+		border-color: rgba(247, 196, 99, 0.75);
+	}
+
+	.network-node.is-dialing {
+		border-color: rgba(111, 183, 255, 0.75);
+	}
+
+	.network-node.is-fallback {
+		border-color: rgba(238, 110, 110, 0.78);
+	}
+
+	.network-node.is-discovered {
+		border-color: rgba(178, 190, 204, 0.6);
+	}
+
+	.network-node-title {
+		font-weight: 700;
+		font-size: 0.82rem;
+		word-break: break-word;
+	}
+
+	.network-node-state {
+		margin-top: 5px;
+		font-size: 0.74rem;
+		opacity: 0.8;
+	}
+
+	.network-node-reason {
+		margin-top: 4px;
+		font-size: 0.68rem;
+		opacity: 0.66;
+		line-height: 1.2;
+		max-height: 2.4em;
+		overflow: hidden;
+	}
+
+	.legend-dot.is-connected {
+		background: rgba(96, 230, 154, 1);
+	}
+
+	.legend-dot.is-relay {
+		background: rgba(247, 196, 99, 1);
+	}
+
+	.legend-dot.is-dialing {
+		background: rgba(111, 183, 255, 1);
+	}
+
+	.legend-dot.is-fallback {
+		background: rgba(238, 110, 110, 1);
+	}
+
+	.legend-dot.is-discovered {
+		background: rgba(178, 190, 204, 1);
+	}
+
+	.network-detail-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
+		padding-bottom: 8px;
+		border-bottom: 1px dashed rgba(255, 255, 255, 0.14);
+	}
+
+	.network-detail-title {
+		font-size: 1rem;
+		font-weight: 700;
+	}
+
+	.network-detail-meta {
+		font-size: 0.76rem;
+		opacity: 0.78;
+	}
+
+	.network-script-list {
+		margin-top: 10px;
+		max-height: 340px;
+		overflow: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.network-script-item {
+		padding: 9px;
+		border-radius: 10px;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: rgba(255, 255, 255, 0.02);
+	}
+
+	.network-script-name {
+		font-weight: 600;
+		font-size: 0.83rem;
+	}
+
+	.network-script-meta {
+		font-size: 0.74rem;
+		opacity: 0.75;
+	}
+
+	.network-empty {
+		opacity: 0.68;
+		font-size: 0.85rem;
+	}
+
+	.network-error {
+		margin-top: 10px;
+		padding: 8px;
+		border-radius: 8px;
+		background: rgba(160, 45, 45, 0.35);
+		border: 1px solid rgba(239, 93, 93, 0.48);
+		font-size: 0.78rem;
+	}
+
+	@media (max-width: 980px) {
+		.network-view-shell {
+			grid-template-columns: 1fr;
+		}
+
+		.network-graph-canvas {
+			height: 360px;
+		}
 	}
 </style>

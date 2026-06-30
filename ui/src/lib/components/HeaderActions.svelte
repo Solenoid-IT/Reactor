@@ -7,6 +7,7 @@
 	export let onRefresh = () => {};
 	export let onOpenFolder = () => {};
 	export let onOpenSettings = () => {};
+	export let onOpenNetworkView = () => {};
 	export let onOpenGlobalLog = () => {};
 	export let onClearGlobalLog = () => {};
 	export let onCreateBlank = () => {};
@@ -51,6 +52,7 @@
 		</div>
 		<button type="button" class="btn-secondary icon-button" on:click={onRefresh} title="refresh scripts" aria-label="Refresh scripts"><i class="fa-solid fa-rotate-right"></i></button>
 		<button type="button" class="btn-secondary icon-button" on:click={onOpenFolder} title="open project folder" aria-label="Open project folder"><i class="fa-regular fa-folder-open"></i></button>
+		<button type="button" class="btn-secondary" on:click={onOpenNetworkView} title="view network topology"><i class="fa-solid fa-diagram-project"></i><span class="ms-2">NETWORK</span></button>
 		<!-- svelte-ignore a11y_consider_explicit_label -->
 		<button type="button" class="btn-secondary" on:click={onOpenSettings} title="settings"><i class="fa-solid fa-cog"></i></button>
 		<div class="log-picker" class:open={logOpen}>

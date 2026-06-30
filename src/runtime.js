@@ -804,6 +804,9 @@ class ReactorRuntime {
 		this.p2pSessions = new Map();
 		this.p2pSessionTimeoutMs = this.readQueueDuration('REACTOR_P2P_SESSION_TIMEOUT_MS', 2 * 60 * 1000, 10 * 1000);
 		this.p2pTransportManager = new P2PDataChannelManager(this);
+		this.p2pAutodialAttempts = new Map();
+		this.p2pAutodialCooldownMs = this.readQueueDuration('REACTOR_P2P_AUTODIAL_COOLDOWN_MS', 30 * 1000, 5 * 1000);
+		this.p2pRemoteScriptRequests = new Map();
 		this.workingModeConfigPath = path.join(this.reactorRootDir, 'working-mode.json');
 		this.tlsManager = new TlsManager(path.join(this.reactorRootDir, 'tls'));
 		this.tlsEnabled = false; // impostato da startHttpServer
@@ -1147,6 +1150,9 @@ class ReactorRuntime {
 
 	getP2PStatus() {
 		this.cleanupExpiredP2PSessions();
+		const knownRemotePeers = this.exchangeManager && typeof this.exchangeManager.getKnownRemotePeers === 'function'
+			? this.exchangeManager.getKnownRemotePeers()
+			: [];
 		const transportSummary = this.p2pTransportManager && this.p2pTransportManager.getStatusSummary
 			? this.p2pTransportManager.getStatusSummary()
 			: { supported: false, activeSessions: 0 };
@@ -1162,6 +1168,11 @@ class ReactorRuntime {
 			}))
 			.sort((a, b) => String(a.target).localeCompare(String(b.target)));
 
+		const remotePeers = Array.from(new Set([
+			...knownRemotePeers,
+			...sessions.map((session) => String(session.target || '').trim().toLowerCase()).filter(Boolean),
+		])).sort((a, b) => a.localeCompare(b));
+
 		return {
 			enabled: this.exchangeMode === 'node',
 			signalingViaExchange: true,
@@ -1169,8 +1180,59 @@ class ReactorRuntime {
 			dataChannelSessions: Number(transportSummary.activeSessions || 0),
 			iceServersConfigured: this.getIceServersForP2P().length > 0,
 			iceServers: this.getIceServersForP2P(),
+			remotePeers,
 			sessions,
 		};
+	}
+
+	async handleDiscoveredRemotePeers(peers = []) {
+		if (!Array.isArray(peers) || peers.length === 0) {
+			return;
+		}
+
+		if (!this.shouldPreferP2PForNodeRouting()) {
+			return;
+		}
+
+		const now = Date.now();
+		for (const rawPeer of peers) {
+			const target = String(rawPeer || '').trim().toLowerCase();
+			if (!target) {
+				continue;
+			}
+
+			const currentSession = this.p2pSessions.get(target);
+			if (currentSession) {
+				const state = String(currentSession.state || '').toLowerCase();
+				if (state === 'connecting' || state === 'connected-p2p' || state === 'connected-turn') {
+					continue;
+				}
+			}
+
+			const lastAttemptMs = Number(this.p2pAutodialAttempts.get(target) || 0);
+			if (lastAttemptMs > 0 && now - lastAttemptMs < this.p2pAutodialCooldownMs) {
+				continue;
+			}
+
+			this.p2pAutodialAttempts.set(target, now);
+			this.upsertP2PSession(target, {
+				state: 'connecting',
+				lastSignalType: 'offer',
+				reason: '',
+				usingRelay: false,
+			});
+
+			if (this.p2pTransportManager && this.p2pTransportManager.ensureConnected) {
+				this.p2pTransportManager.ensureConnected(target).catch((error) => {
+					this.upsertP2PSession(target, {
+						state: 'fallback-exchange',
+						lastSignalType: 'failed',
+						usingRelay: true,
+						reason: String(error?.message || 'p2p auto-connect failed'),
+					});
+				});
+			}
+		}
 	}
 
 	shouldPreferP2PForNodeRouting() {
@@ -2389,7 +2451,95 @@ class ReactorRuntime {
 			candidates: [safeFromNode],
 		};
 
+		const control = parsedBody && parsedBody.json && typeof parsedBody.json === 'object'
+			? parsedBody.json
+			: null;
+		if (control && control.__reactorP2PControl === true) {
+			const action = String(control.action || '').trim().toLowerCase();
+			const requestId = String(control.requestId || '').trim();
+
+			if (action === 'scripts-request' && requestId) {
+				const responsePayload = {
+					__reactorP2PControl: true,
+					action: 'scripts-response',
+					requestId,
+					node: String(await this.getReactorName() || '').trim(),
+					scripts: this.getDiscoveryScriptEntries(),
+					generatedAt: new Date().toISOString(),
+				};
+
+				await this.sendP2PMessage(safeFromNode, responsePayload, {
+					'content-type': 'application/json; charset=utf-8',
+					'x-reactor-p2p-control': 'scripts-response',
+				});
+
+				return { ok: true, control: true, action, requestId, from: safeFromNode };
+			}
+
+			if (action === 'scripts-response' && requestId) {
+				const pending = this.p2pRemoteScriptRequests.get(requestId);
+				if (pending) {
+					this.p2pRemoteScriptRequests.delete(requestId);
+					clearTimeout(pending.timeout);
+					pending.resolve({
+						ok: true,
+						target: safeFromNode,
+						requestId,
+						node: String(control.node || safeFromNode).trim().toLowerCase(),
+						scripts: Array.isArray(control.scripts) ? control.scripts : [],
+						generatedAt: String(control.generatedAt || '').trim() || null,
+					});
+				}
+
+				return { ok: true, control: true, action, requestId, from: safeFromNode };
+			}
+		}
+
 		return this.dispatchIncomingMessageEnvelope(parsedBody, senderMeta, headers);
+	}
+
+	async requestRemoteScriptsP2P(targetNodeName, timeoutMs = 8000) {
+		if (!this.p2pTransportManager || !this.p2pTransportManager.isAvailable || !this.p2pTransportManager.isAvailable()) {
+			throw new Error('p2p datachannel transport unavailable');
+		}
+
+		const safeTarget = String(targetNodeName || '').trim().toLowerCase();
+		if (!safeTarget) {
+			throw new Error('invalid p2p target');
+		}
+
+		const requestId = crypto.randomUUID();
+		const safeTimeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 8000;
+
+		const promise = new Promise((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				this.p2pRemoteScriptRequests.delete(requestId);
+				reject(new Error('p2p scripts request timeout'));
+			}, safeTimeoutMs);
+
+			this.p2pRemoteScriptRequests.set(requestId, { resolve, reject, timeout });
+		});
+
+		try {
+			await this.sendP2PMessage(safeTarget, {
+				__reactorP2PControl: true,
+				action: 'scripts-request',
+				requestId,
+				timestamp: new Date().toISOString(),
+			}, {
+				'content-type': 'application/json; charset=utf-8',
+				'x-reactor-p2p-control': 'scripts-request',
+			});
+		} catch (error) {
+			const pending = this.p2pRemoteScriptRequests.get(requestId);
+			if (pending) {
+				this.p2pRemoteScriptRequests.delete(requestId);
+				clearTimeout(pending.timeout);
+			}
+			throw error;
+		}
+
+		return promise;
 	}
 
 	async sendP2PMessage(targetNodeName, content, messageHeaders = {}) {

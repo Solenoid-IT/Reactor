@@ -30,7 +30,7 @@
 	export let discovery = false;
 	export let exchangeActive = false;
 	export let exchangeClients = [];
-	export let p2pStatus = { enabled: false, signalingViaExchange: true, sessions: [], iceServersConfigured: false, iceServers: [] };
+	export let p2pStatus = { enabled: false, signalingViaExchange: true, sessions: [], remotePeers: [], iceServersConfigured: false, iceServers: [] };
 	export let linkedNodes = [];
 	export let linkedNodesTotal = 0;
 	export let linkedNodesLoading = false;
@@ -58,6 +58,18 @@
 
 	let copiedScriptUuid = '';
 	let copiedScriptTimer = null;
+
+	$: p2pRemotePeers = (() => {
+		const fromStatus = Array.isArray(p2pStatus?.remotePeers)
+			? p2pStatus.remotePeers.map((peer) => String(peer || '').trim().toLowerCase()).filter(Boolean)
+			: [];
+		const fromLinkedNodes = Array.isArray(linkedNodes)
+			? linkedNodes
+				.map((node) => String(node?.name || '').trim().toLowerCase())
+				.filter(Boolean)
+			: [];
+		return Array.from(new Set([...fromStatus, ...fromLinkedNodes])).sort((a, b) => a.localeCompare(b));
+	})();
 
 	function showCopiedFeedback(scriptUuid) {
 		copiedScriptUuid = String(scriptUuid || '').trim();
@@ -336,9 +348,11 @@
 					<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
 						<div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
 							<span class="detail-label">Linked Nodes ({linkedNodesTotal})</span>
-							<button type="button" class="btn-secondary" on:click={onRefreshLinkedNodes} disabled={linkedNodesLoading}>
-								<i class="fa-solid fa-rotate-right me-1"></i>{linkedNodesLoading ? 'Refreshing...' : 'Refresh'}
-							</button>
+							<div style="display:flex; align-items:center; gap:8px;">
+								<button type="button" class="btn-secondary" on:click={onRefreshLinkedNodes} disabled={linkedNodesLoading}>
+									<i class="fa-solid fa-rotate-right me-1"></i>{linkedNodesLoading ? 'Refreshing...' : 'Refresh'}
+								</button>
+							</div>
 						</div>
 						{#if linkedNodes.length === 0}
 							<div class="detail-value mt-2" style="opacity:0.65;">No linked nodes</div>
@@ -586,10 +600,18 @@
 						<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
 							<div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
 								<span class="detail-label">P2P Transport ({Array.isArray(p2pStatus?.sessions) ? p2pStatus.sessions.length : 0})</span>
-								<span class="detail-value" style="font-size:0.78em; opacity:0.78;">
-									{p2pStatus?.iceServersConfigured ? 'ICE configured' : 'ICE not configured'}
-								</span>
+								<div style="display:flex; align-items:center; gap:8px;">
+									<span class="detail-value" style="font-size:0.78em; opacity:0.78;">
+										{p2pStatus?.iceServersConfigured ? 'ICE configured' : 'ICE not configured'}
+									</span>
+								</div>
 							</div>
+
+							{#if Array.isArray(p2pRemotePeers) && p2pRemotePeers.length > 0}
+								<div class="detail-value mt-2" style="font-size:0.78em; opacity:0.78;">Remote peers: {p2pRemotePeers.join(', ')}</div>
+							{:else if exchangeActive}
+								<div class="detail-value mt-2" style="font-size:0.78em; opacity:0.65;">No remote peers announced by Exchange yet</div>
+							{/if}
 
 							{#if !exchangeActive}
 								<div class="detail-value mt-2" style="opacity:0.65;">Connect to Exchange to start P2P signaling</div>

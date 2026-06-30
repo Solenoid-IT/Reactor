@@ -21,7 +21,7 @@ class P2PDataChannelManager {
 		this.supported = Boolean(webrtc && webrtc.RTCPeerConnection && webrtc.RTCSessionDescription && webrtc.RTCIceCandidate);
 		this.sessions = new Map();
 		this.connecting = new Map();
-		this.connectTimeoutMs = Number(process.env.REACTOR_P2P_CONNECT_TIMEOUT_MS) > 0 ? Number(process.env.REACTOR_P2P_CONNECT_TIMEOUT_MS) : 12000;
+		this.connectTimeoutMs = Number(process.env.REACTOR_P2P_CONNECT_TIMEOUT_MS) > 0 ? Number(process.env.REACTOR_P2P_CONNECT_TIMEOUT_MS) : 25000;
 	}
 
 	isAvailable() {
@@ -76,6 +76,7 @@ class P2PDataChannelManager {
 			openResolve,
 			openReject,
 			remoteDescriptionSet: false,
+			remoteDescriptionPending: false,
 			queuedCandidates: [],
 		};
 
@@ -229,12 +230,21 @@ class P2PDataChannelManager {
 				type: 'offer',
 				sdp: String(signal?.payload?.sdp || ''),
 			});
-			await session.connection.setRemoteDescription(remoteDesc);
+			session.remoteDescriptionPending = true;
+			await new Promise((resolve, reject) => {
+				session.connection.setRemoteDescription(remoteDesc, resolve, reject);
+			}).catch((error) => {
+				session.remoteDescriptionPending = false;
+				throw error;
+			});
+			session.remoteDescriptionPending = false;
 			session.remoteDescriptionSet = true;
 			await this.flushQueuedCandidates(session);
 
 			const answer = await session.connection.createAnswer();
-			await session.connection.setLocalDescription(answer);
+			await new Promise((resolve, reject) => {
+				session.connection.setLocalDescription(answer, resolve, reject);
+			});
 			await this.runtime.sendP2PSignal(from, 'answer', {
 				type: answer.type,
 				sdp: answer.sdp,
@@ -247,7 +257,14 @@ class P2PDataChannelManager {
 				type: 'answer',
 				sdp: String(signal?.payload?.sdp || ''),
 			});
-			await session.connection.setRemoteDescription(remoteDesc);
+			session.remoteDescriptionPending = true;
+			await new Promise((resolve, reject) => {
+				session.connection.setRemoteDescription(remoteDesc, resolve, reject);
+			}).catch((error) => {
+				session.remoteDescriptionPending = false;
+				throw error;
+			});
+			session.remoteDescriptionPending = false;
 			session.remoteDescriptionSet = true;
 			await this.flushQueuedCandidates(session);
 			return;
@@ -261,7 +278,7 @@ class P2PDataChannelManager {
 				sdpMLineIndex: Number.isFinite(Number(candidatePayload.sdpMLineIndex)) ? Number(candidatePayload.sdpMLineIndex) : 0,
 			});
 
-			if (!session.remoteDescriptionSet) {
+			if (!session.remoteDescriptionSet || session.remoteDescriptionPending) {
 				session.queuedCandidates.push(candidate);
 				return;
 			}
