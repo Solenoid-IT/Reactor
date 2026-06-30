@@ -289,7 +289,7 @@
 			<span>Working Mode</span>
 			<Helper ariaLabel="Working Mode Help">
 				<div><strong>Node</strong>: run local scripts and can use <code>Node.sendMessage</code> to communicate with other nodes.</div>
-				<div class="mt-1"><strong>Use Exchange</strong>: connect this node to a remote Exchange for message routing.</div>
+				<div class="mt-1"><strong>Use EXCHANGE</strong>: connect this node to a remote EXCHANGE for message routing.</div>
 				<div class="mt-1"><strong>Exchange</strong>: run this Reactor as a central hub (like a router).</div>
 				<div class="mt-1">Exchange is used when nodes are on different networks, not on the same LAN.</div>
 			</Helper>
@@ -398,13 +398,13 @@
 
 			{#if exchangeMode === 'node'}
 				<fieldset class="mt-3 settings-exchange-fieldset" style="border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 10px;">
-					<legend>Exchange</legend>
+					<legend>EXCHANGE</legend>
 
 					<div class="row mt-1">
 						<div class="col">
 							<label class="d-flex align-items-center m-0">
 								<input type="checkbox" class="input me-2" name="exchange.enabled" data-type="bool" bind:checked={exchangeEnabled} />
-								Use Exchange
+								Use EXCHANGE
 							</label>
 						</div>
 					</div>
@@ -444,7 +444,13 @@
 
 					{#if exchangeEnabled}
 						<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
-							<div class="detail-label" style="margin-bottom:8px;">STUN (optional)</div>
+							<div class="detail-label" style="margin-bottom:8px;">
+								STUN (optional)
+
+								<Helper ariaLabel="STUN Help">
+									STUN is used to discover the public IP address of this node when behind a NAT. It is required for P2P connections to work across different networks.
+								</Helper>
+							</div>
 							{#if stunTestConnected === true}
 								<div class="detail-value" style="color: var(--color-success, #4caf50);"><i class="fa-solid fa-circle-check me-1"></i>Connected</div>
 							{:else if stunTestConnected === false}
@@ -483,7 +489,13 @@
 						</div>
 
 						<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
-							<div class="detail-label" style="margin-bottom:8px;">TURN (optional)</div>
+							<div class="detail-label" style="margin-bottom:8px;">
+								TURN (optional)
+
+								<Helper ariaLabel="TURN Help">
+									TURN is used to relay data when direct peer-to-peer connections are not possible. It is optional but recommended for better connectivity across different networks.
+								</Helper>
+							</div>
 							{#if turnTestConnected === true}
 								<div class="detail-value" style="color: var(--color-success, #4caf50);"><i class="fa-solid fa-circle-check me-1"></i>Connected</div>
 							{:else if turnTestConnected === false}
@@ -651,7 +663,7 @@
 
 	<section class="detail-card http-server-card settings-server-card">
 		<h3>
-			<i class="fa-solid fa-network-wired me-2"></i>Server
+			<i class="fa-solid fa-network-wired me-2"></i>Local Server
 		</h3>
 
 		<button class="btn-secondary mt-2" on:click={onOpenServerStatus}><i class="fa-solid fa-heart-pulse me-2"></i>View Status</button>
@@ -735,7 +747,7 @@
 			<i class="fa-solid fa-list-check me-2"></i>
 			<span>Message Queue</span>
 			<Helper ariaLabel="Message Queue Help">
-				<div>If <code>Node.sendMessage()</code> cannot reach a target node, the message is not lost.</div>
+				<div>If a message cannot reach a target node by calling <code>Node.sendMessage()</code>, the message is not lost.</div>
 				<div class="mt-1">Payloads are stored in a temporary local queue and sent automatically when connectivity is restored.</div>
 			</Helper>
 		</h3>
