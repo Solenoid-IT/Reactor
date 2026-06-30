@@ -27,6 +27,7 @@
 		getReactorName,
 		setReactorName,
 		getExchangeConfig,
+		getP2PStatus,
 		getExchangeLinkedNodes,
 		setExchangeConfig,
 		saveRelayConfig,
@@ -69,6 +70,8 @@
 	let exchangeLinkedNodes = [];
 	let exchangeLinkedNodesTotal = 0;
 	let exchangeLinkedNodesLoading = false;
+	let exchangeConfigSaving = false;
+	let p2pStatus = { enabled: false, signalingViaExchange: true, sessions: [], iceServersConfigured: false, iceServers: [] };
 	let tlsEnabled = false;
 	let tlsSubject = '';
 	let tlsNotAfter = '';
@@ -119,12 +122,13 @@
 	$: selectedScript = selectedIndex >= 0 ? scripts[selectedIndex] : null;
 
 	async function refreshAll() {
-		const [info, settings, serverConfig, currentReactorName, exchangeConfigResult, exchangeTokenResult, tlsConfigResult, queueStatusResult] = await Promise.all([
+		const [info, settings, serverConfig, currentReactorName, exchangeConfigResult, p2pStatusResult, exchangeTokenResult, tlsConfigResult, queueStatusResult] = await Promise.all([
 			getScriptsInfo(),
 			getUiSettings(),
 			getHttpServerConfig(),
 			getReactorName(),
 			getExchangeConfig(),
+			getP2PStatus(),
 			getExchangeToken(),
 			getTlsConfig(),
 			getMessageQueueStatus(),
@@ -170,6 +174,19 @@
 			exchangeEnabled = Boolean((ec.host || '').trim());
 		}
 
+		if (p2pStatusResult?.ok && p2pStatusResult?.p2p) {
+			const nextP2P = p2pStatusResult.p2p;
+			p2pStatus = {
+				enabled: Boolean(nextP2P.enabled),
+				signalingViaExchange: Boolean(nextP2P.signalingViaExchange ?? true),
+				sessions: Array.isArray(nextP2P.sessions) ? nextP2P.sessions : [],
+				iceServersConfigured: Boolean(nextP2P.iceServersConfigured),
+				iceServers: Array.isArray(nextP2P.iceServers) ? nextP2P.iceServers : [],
+			};
+		} else {
+			p2pStatus = { enabled: false, signalingViaExchange: true, sessions: [], iceServersConfigured: false, iceServers: [] };
+		}
+
 		if (exchangeTokenResult?.ok && exchangeTokenResult?.exchangeToken?.token) {
 			exchangeToken = exchangeTokenResult.exchangeToken.token;
 		}
@@ -186,7 +203,7 @@
 			selectedIndex = -1;
 		}
 
-		const canLoadLinkedNodes = (exchangeMode === 'exchange' && exchangeDiscovery) || (exchangeMode === 'node' && exchangeEnabled);
+		const canLoadLinkedNodes = (exchangeMode === 'exchange' && exchangeDiscovery) || (exchangeMode === 'node' && exchangeEnabled && exchangeActive);
 		if (canLoadLinkedNodes) {
 			await refreshExchangeLinkedNodes(true);
 		} else {
@@ -406,6 +423,12 @@
 	}
 
 	async function saveExchangeConfigValue(mode, host, port, tls, token, enabled = true, discovery = false, stun = {}, turn = {}) {
+		if (exchangeConfigSaving) {
+			return;
+		}
+
+		exchangeConfigSaving = true;
+		try {
 		const numericPort = Number(port);
 		if (!Number.isFinite(numericPort) || numericPort < 1 || numericPort > 65535) {
 			status = 'Error: invalid Exchange port';
@@ -447,13 +470,15 @@
 
 		await refreshAll();
 
-		if (mode === 'node' && !exchangeActive) {
-			await new Promise((resolve) => setTimeout(resolve, 800));
-			await refreshAll();
+		if (mode === 'node' && safeEnabled && connectionTest?.connected) {
+			await refreshExchangeLinkedNodes(true);
 		}
 
 		if (mode === 'exchange' && safeDiscovery) {
 			await refreshExchangeLinkedNodes(true);
+		}
+		} finally {
+			exchangeConfigSaving = false;
 		}
 	}
 
@@ -812,6 +837,7 @@
 			discovery={exchangeDiscovery}
 			{exchangeActive}
 			{exchangeClients}
+			{p2pStatus}
 			linkedNodes={exchangeLinkedNodes}
 			linkedNodesTotal={exchangeLinkedNodesTotal}
 			linkedNodesLoading={exchangeLinkedNodesLoading}

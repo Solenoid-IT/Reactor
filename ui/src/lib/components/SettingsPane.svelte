@@ -27,6 +27,7 @@
 	export let discovery = false;
 	export let exchangeActive = false;
 	export let exchangeClients = [];
+	export let p2pStatus = { enabled: false, signalingViaExchange: true, sessions: [], iceServersConfigured: false, iceServers: [] };
 	export let linkedNodes = [];
 	export let linkedNodesTotal = 0;
 	export let linkedNodesLoading = false;
@@ -204,6 +205,37 @@
 			port: turnPort,
 			tls: turnTls,
 		});
+	}
+
+	function p2pStateLabel(state) {
+		const safeState = String(state || '').trim().toLowerCase();
+		if (safeState === 'connected-p2p') {
+			return 'Direct P2P';
+		}
+		if (safeState === 'connected-turn') {
+			return 'TURN Relay';
+		}
+		if (safeState === 'fallback-exchange') {
+			return 'Fallback Exchange';
+		}
+		if (safeState === 'connecting' || safeState === 'signaling') {
+			return 'Signaling';
+		}
+		return 'Idle';
+	}
+
+	function p2pStateColor(state) {
+		const safeState = String(state || '').trim().toLowerCase();
+		if (safeState === 'connected-p2p') {
+			return 'var(--color-success, #4caf50)';
+		}
+		if (safeState === 'connected-turn') {
+			return '#f6c453';
+		}
+		if (safeState === 'fallback-exchange') {
+			return '#ff8f8f';
+		}
+		return 'rgba(255,255,255,0.65)';
 	}
 </script>
 
@@ -524,6 +556,36 @@
 													<div style="margin-top:6px; opacity:0.65;">No scripts exposed by this node</div>
 												{/if}
 											</details>
+										</div>
+									{/each}
+								</div>
+							{/if}
+						</div>
+
+						<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
+							<div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+								<span class="detail-label">P2P Transport ({Array.isArray(p2pStatus?.sessions) ? p2pStatus.sessions.length : 0})</span>
+								<span class="detail-value" style="font-size:0.78em; opacity:0.78;">
+									{p2pStatus?.iceServersConfigured ? 'ICE configured' : 'ICE not configured'}
+								</span>
+							</div>
+
+							{#if !exchangeActive}
+								<div class="detail-value mt-2" style="opacity:0.65;">Connect to Exchange to start P2P signaling</div>
+							{:else if !Array.isArray(p2pStatus?.sessions) || p2pStatus.sessions.length === 0}
+								<div class="detail-value mt-2" style="opacity:0.65;">No active P2P sessions</div>
+							{:else}
+								<div class="detail-value mt-2" style="max-height:180px; overflow:auto; font-size:0.78em;">
+									{#each p2pStatus.sessions as session}
+										<div style="padding:6px 0; border-bottom:1px dashed rgba(255,255,255,0.08);">
+											<div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+												<strong>{session.target || 'unknown'}</strong>
+												<span style="color:{p2pStateColor(session.state)}; font-weight:600;">{p2pStateLabel(session.state)}</span>
+											</div>
+											<div style="opacity:0.68;">Signal: {session.lastSignalType || '-'}</div>
+											{#if session.reason}
+												<div style="opacity:0.68;">Reason: {session.reason}</div>
+											{/if}
 										</div>
 									{/each}
 								</div>

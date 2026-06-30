@@ -521,6 +521,101 @@ export async function saveRelayConfig(kind, config = {}) {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
+export async function getP2PStatus() {
+	const bridge = getBridge();
+	if (bridge && bridge.getP2PStatus) {
+		return bridge.getP2PStatus();
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.getP2PStatus) {
+		return mobile.getP2PStatus();
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'getP2PStatus');
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable', p2p: { enabled: false, sessions: [] } };
+}
+
+export async function sendP2PSignal(target, signalType, payload = null, sessionId = null) {
+	const bridge = getBridge();
+	if (bridge && bridge.sendP2PSignal) {
+		return bridge.sendP2PSignal(target, signalType, payload, sessionId);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.sendP2PSignal) {
+		return mobile.sendP2PSignal({ target, signalType, payload, sessionId });
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'sendP2PSignal', { target, signalType, payload, sessionId });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function closeP2PSession(target, sessionId = null, payload = null) {
+	const bridge = getBridge();
+	if (bridge && bridge.closeP2PSession) {
+		return bridge.closeP2PSession(target, sessionId, payload);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.closeP2PSession) {
+		return mobile.closeP2PSession({ target, sessionId, payload });
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'closeP2PSession', { target, sessionId, payload });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function startP2PSession(target, initiator = true) {
+	const bridge = getBridge();
+	if (bridge && bridge.startP2PSession) {
+		return bridge.startP2PSession(target, initiator);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.startP2PSession) {
+		return mobile.startP2PSession({ target, initiator });
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'startP2PSession', { target, initiator });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function sendP2PData(target, text = '') {
+	const bridge = getBridge();
+	if (bridge && bridge.sendP2PData) {
+		return bridge.sendP2PData(target, text);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.sendP2PData) {
+		return mobile.sendP2PData({ target, text });
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'sendP2PData', { target, text });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
 export async function getExchangeLinkedNodes() {
 	const bridge = getBridge();
 	if (bridge && bridge.getExchangeLinkedNodes) {

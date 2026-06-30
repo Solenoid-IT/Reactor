@@ -46,6 +46,11 @@ import java.util.Arrays;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.URL;
 import java.net.HttpURLConnection;
 import javax.net.ssl.HttpsURLConnection;
@@ -63,10 +68,13 @@ public class ReactorMobilePlugin extends Plugin {
     private static final String WORKING_MODE_FILE = "working-mode.json";
     private static final String REACTOR_NAME_FILE = "name";
     private File pendingBackupExportFile = null;
+    private AndroidP2PWebRtcManager nativeP2PManager;
 
     @Override
     public void load() {
         super.load();
+        nativeP2PManager = AndroidP2PWebRtcManager.getInstance(getContext());
+        nativeP2PManager.initialize();
         ensureHttpServerRunning();
     }
 
@@ -159,7 +167,44 @@ public class ReactorMobilePlugin extends Plugin {
         config.put("tls", false);
         config.put("token", "");
         config.put("discovery", false);
+        config.put("stun", new JSObject().put("host", "").put("port", 3478).put("tls", false));
+        config.put("turn", new JSObject().put("host", "").put("port", 3478).put("tls", false));
         return config;
+    }
+
+    private JSObject normalizeRelayConfig(JSObject source, int defaultPort, boolean allowTls) {
+        JSObject input = source != null ? source : new JSObject();
+        String host = String.valueOf(input.optString("host", "")).trim();
+
+        int port = defaultPort;
+        try {
+            int raw = input.optInt("port", defaultPort);
+            if (raw >= 1 && raw <= 65535) {
+                port = raw;
+            }
+        } catch (Exception ignored) {
+            port = defaultPort;
+        }
+
+        boolean tls = allowTls && input.optBoolean("tls", false);
+        return new JSObject().put("host", host).put("port", port).put("tls", tls);
+    }
+
+    private JSObject normalizeRelayConfigFromJson(JSONObject source, String key, int defaultPort, boolean allowTls) {
+        if (source == null) {
+            return normalizeRelayConfig(null, defaultPort, allowTls);
+        }
+
+        JSONObject relay = source.optJSONObject(key);
+        if (relay == null) {
+            return normalizeRelayConfig(null, defaultPort, allowTls);
+        }
+
+        JSObject input = new JSObject();
+        input.put("host", relay.optString("host", ""));
+        input.put("port", relay.optInt("port", defaultPort));
+        input.put("tls", relay.optBoolean("tls", false));
+        return normalizeRelayConfig(input, defaultPort, allowTls);
     }
 
     private String sanitizeWorkingMode(String rawMode) {
@@ -190,13 +235,15 @@ public class ReactorMobilePlugin extends Plugin {
             config.put("tls", parsed.optBoolean("tls", false));
             config.put("token", String.valueOf(parsed.optString("token", "")));
             config.put("discovery", parsed.optBoolean("discovery", false));
+            config.put("stun", normalizeRelayConfigFromJson(parsed, "stun", 3478, false));
+            config.put("turn", normalizeRelayConfigFromJson(parsed, "turn", 3478, true));
             return config;
         } catch (Exception ignored) {
             return getDefaultWorkingModeConfig();
         }
     }
 
-    private JSObject writeWorkingModeConfig(String mode, String host, int port, boolean tls, String token, boolean discovery) throws IOException {
+    private JSObject writeWorkingModeConfig(String mode, String host, int port, boolean tls, String token, boolean discovery, JSObject stun, JSObject turn) throws IOException {
         JSObject config = new JSObject();
         config.put("mode", mode);
         config.put("host", host != null ? host : "");
@@ -204,8 +251,112 @@ public class ReactorMobilePlugin extends Plugin {
         config.put("tls", tls);
         config.put("token", token != null ? token : "");
         config.put("discovery", discovery);
+        config.put("stun", normalizeRelayConfig(stun, 3478, false));
+        config.put("turn", normalizeRelayConfig(turn, 3478, true));
         writeTextFile(getWorkingModeFile(), config.toString() + "\n");
         return config;
+    }
+
+    private JSObject writeWorkingModeConfig(String mode, String host, int port, boolean tls, String token, boolean discovery) throws IOException {
+        JSObject current = readWorkingModeConfig();
+        JSONObject stunRaw = current.optJSONObject("stun");
+        JSONObject turnRaw = current.optJSONObject("turn");
+        JSObject stun = normalizeRelayConfigFromJson(new JSONObject().put("stun", stunRaw != null ? stunRaw : new JSONObject()), "stun", 3478, false);
+        JSObject turn = normalizeRelayConfigFromJson(new JSONObject().put("turn", turnRaw != null ? turnRaw : new JSONObject()), "turn", 3478, true);
+        return writeWorkingModeConfig(mode, host, port, tls, token, discovery, stun, turn);
+    }
+
+    private JSObject testUdpRelay(String host, int port, String label) {
+        if (host == null || host.trim().isEmpty()) {
+            return new JSObject().put("ok", false).put("error", label + " host is empty");
+        }
+
+        long startedAt = System.currentTimeMillis();
+        DatagramSocket socket = null;
+        try {
+            byte[] txId = new byte[12];
+            new SecureRandom().nextBytes(txId);
+
+            byte[] request = new byte[20];
+            request[0] = 0x00;
+            request[1] = 0x01;
+            request[2] = 0x00;
+            request[3] = 0x00;
+            request[4] = 0x21;
+            request[5] = 0x12;
+            request[6] = (byte) 0xA4;
+            request[7] = 0x42;
+            System.arraycopy(txId, 0, request, 8, txId.length);
+
+            InetAddress address = InetAddress.getByName(host.trim());
+            socket = new DatagramSocket();
+            socket.setSoTimeout(2500);
+            socket.connect(address, port);
+
+            DatagramPacket out = new DatagramPacket(request, request.length, address, port);
+            socket.send(out);
+
+            byte[] response = new byte[1024];
+            DatagramPacket in = new DatagramPacket(response, response.length);
+            socket.receive(in);
+
+            if (in.getLength() < 20) {
+                return new JSObject().put("ok", false).put("error", label + " response too short");
+            }
+
+            return new JSObject()
+                    .put("ok", true)
+                    .put("protocol", "udp")
+                    .put("elapsedMs", Math.max(0L, System.currentTimeMillis() - startedAt));
+        } catch (Exception error) {
+            return new JSObject().put("ok", false).put("error", error.getMessage() != null ? error.getMessage() : (label + " udp test failed"));
+        } finally {
+            if (socket != null) {
+                socket.close();
+            }
+        }
+    }
+
+    private JSObject testTcpRelay(String host, int port, String label) {
+        if (host == null || host.trim().isEmpty()) {
+            return new JSObject().put("ok", false).put("error", label + " host is empty");
+        }
+
+        long startedAt = System.currentTimeMillis();
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host.trim(), port), 2500);
+            return new JSObject()
+                    .put("ok", true)
+                    .put("protocol", "tcp")
+                    .put("elapsedMs", Math.max(0L, System.currentTimeMillis() - startedAt));
+        } catch (Exception error) {
+            return new JSObject().put("ok", false).put("error", error.getMessage() != null ? error.getMessage() : (label + " tcp test failed"));
+        }
+    }
+
+    private JSObject testRelayEndpoint(String kind, JSObject relayConfig) {
+        String safeKind = String.valueOf(kind == null ? "" : kind).trim().toLowerCase();
+        JSObject safeConfig = normalizeRelayConfig(relayConfig, 3478, "turn".equals(safeKind));
+        String host = safeConfig.optString("host", "").trim();
+        int port = safeConfig.optInt("port", 3478);
+        boolean tls = safeConfig.optBoolean("tls", false);
+
+        if (host.isEmpty()) {
+            return new JSObject().put("ok", false).put("error", safeKind + " host is empty");
+        }
+
+        if ("stun".equals(safeKind)) {
+            return testUdpRelay(host, port, "stun");
+        }
+
+        if ("turn".equals(safeKind)) {
+            if (tls) {
+                return testTcpRelay(host, port, "turn");
+            }
+            return testUdpRelay(host, port, "turn");
+        }
+
+        return new JSObject().put("ok", false).put("error", "unsupported relay kind");
     }
 
     private String readHttpResponseBody(HttpURLConnection connection, int status) throws IOException {
@@ -1301,6 +1452,9 @@ public class ReactorMobilePlugin extends Plugin {
         config.put("tls", tls);
         config.put("token", token);
         config.put("discovery", discovery);
+        config.put("stun", normalizeRelayConfigFromJson(workingMode, "stun", 3478, false));
+        config.put("turn", normalizeRelayConfigFromJson(workingMode, "turn", 3478, true));
+        config.put("p2p", ReactorHttpService.getP2PStatus());
         config.put("active", active);
         config.put("connectedClients", connectedClients);
 
@@ -1419,6 +1573,8 @@ public class ReactorMobilePlugin extends Plugin {
         boolean tls = call.getBoolean("tls", false);
         String token = call.getString("token", "");
         boolean discovery = call.getBoolean("discovery", false);
+        JSObject stun = normalizeRelayConfig(call.getObject("stun"), 3478, false);
+        JSObject turn = normalizeRelayConfig(call.getObject("turn"), 3478, true);
 
         if ("client".equals(mode)) {
             mode = "node";
@@ -1445,7 +1601,7 @@ public class ReactorMobilePlugin extends Plugin {
         editor.apply();
 
         try {
-            writeWorkingModeConfig(mode, host, port, tls, token, discovery);
+            writeWorkingModeConfig(mode, host, port, tls, token, discovery, stun, turn);
         } catch (Exception ignored) {
             // Keep prefs as fallback cache even if file write fails.
         }
@@ -1463,8 +1619,115 @@ public class ReactorMobilePlugin extends Plugin {
                 .put("tls", tls)
                 .put("token", token)
                 .put("discovery", discovery)
+                .put("stun", stun)
+                .put("turn", turn)
         .put("active", ReactorHttpService.isExchangeClientConnected()));
 		result.put("connectionTest", connectionTest);
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void saveRelayConfig(PluginCall call) {
+        String kind = String.valueOf(call.getString("kind", "")).trim().toLowerCase();
+        JSObject input = call.getObject("config");
+        if (!"stun".equals(kind) && !"turn".equals(kind)) {
+            call.resolve(new JSObject().put("ok", false).put("error", "invalid relay kind"));
+            return;
+        }
+
+        JSObject nextRelay = normalizeRelayConfig(input, 3478, "turn".equals(kind));
+        if ("stun".equals(kind)) {
+            nextRelay.put("tls", false);
+        }
+
+        try {
+            JSObject current = readWorkingModeConfig();
+            JSObject stun = "stun".equals(kind)
+                    ? nextRelay
+                    : normalizeRelayConfigFromJson(current, "stun", 3478, false);
+            JSObject turn = "turn".equals(kind)
+                    ? nextRelay
+                    : normalizeRelayConfigFromJson(current, "turn", 3478, true);
+
+            writeWorkingModeConfig(
+                    current.getString("mode", "node"),
+                    current.getString("host", ""),
+                    current.getInteger("port", ReactorHttpService.DEFAULT_PORT),
+                    current.optBoolean("tls", false),
+                    current.getString("token", ""),
+                    current.optBoolean("discovery", false),
+                    stun,
+                    turn
+            );
+
+            JSObject test = testRelayEndpoint(kind, nextRelay);
+            JSObject result = new JSObject();
+            result.put("ok", true);
+            result.put("kind", kind);
+            result.put("config", nextRelay);
+            result.put("test", test);
+            call.resolve(result);
+        } catch (Exception error) {
+            call.resolve(new JSObject().put("ok", false).put("error", error.getMessage() != null ? error.getMessage() : "unable to save relay config"));
+        }
+    }
+
+    @PluginMethod
+    public void getP2PStatus(PluginCall call) {
+        call.resolve(new JSObject().put("ok", true).put("p2p", ReactorHttpService.getP2PStatus()));
+    }
+
+    @PluginMethod
+    public void sendP2PSignal(PluginCall call) {
+        String target = call.getString("target", "");
+        String signalType = call.getString("signalType", "");
+        String sessionId = call.getString("sessionId", "");
+        JSObject payload = call.getObject("payload");
+        JSObject result = ReactorHttpService.sendP2PSignal(target, signalType, payload, sessionId);
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void startP2PSession(PluginCall call) {
+        String target = call.getString("target", "");
+        boolean initiator = call.getBoolean("initiator", true);
+        JSObject workingMode = readWorkingModeConfig();
+
+        if (nativeP2PManager == null) {
+            nativeP2PManager = AndroidP2PWebRtcManager.getInstance(getContext());
+            nativeP2PManager.initialize();
+        }
+
+        AndroidP2PWebRtcManager.RelayConfig relayConfig = AndroidP2PWebRtcManager.fromWorkingMode(workingMode);
+        JSObject result = nativeP2PManager.startSession(target, initiator, relayConfig);
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void sendP2PData(PluginCall call) {
+        String target = call.getString("target", "");
+        String text = call.getString("text", "");
+
+        if (nativeP2PManager == null) {
+            nativeP2PManager = AndroidP2PWebRtcManager.getInstance(getContext());
+            nativeP2PManager.initialize();
+        }
+
+        JSObject result = nativeP2PManager.sendData(target, text);
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void closeP2PSession(PluginCall call) {
+        String target = call.getString("target", "");
+        String sessionId = call.getString("sessionId", "");
+        JSObject payload = call.getObject("payload");
+        JSObject nativeResult = null;
+        if (nativeP2PManager != null) {
+            nativeResult = nativeP2PManager.closeSession(target);
+        }
+        JSObject result = ReactorHttpService.closeP2PSession(target, sessionId, payload);
+        result.put("native", nativeResult != null ? nativeResult : JSONObject.NULL);
         call.resolve(result);
     }
 

@@ -579,6 +579,15 @@ class ExchangeManager {
 					});
 				}
 				this._routeMessage(packet, clientName);
+			} else if (packet.type === 'signal') {
+				if (clientName && this._connectedClientDetails.has(clientName)) {
+					const current = this._connectedClientDetails.get(clientName);
+					this._connectedClientDetails.set(clientName, {
+						...current,
+						lastSeenAt: new Date().toISOString(),
+					});
+				}
+				this._routeSignal(packet, clientName);
 			} else if (packet.type === 'stream-chunk-bin') {
 				this._routeBinaryChunkAnnouncement(packet, clientName || 'unknown', ws);
 			}
@@ -641,6 +650,38 @@ class ExchangeManager {
 				String(packet.contentType || 'text/plain'),
 				packet.targetScriptId || null,
 			).catch(() => {});
+		}
+	}
+
+	_routeSignal(packet, fromName) {
+		const to = String(packet.to || '').trim().toLowerCase();
+		if (!to) {
+			return;
+		}
+
+		const targetWs = this.connectedClients.get(to);
+		if (!targetWs || targetWs.readyState !== WebSocket.OPEN) {
+			this.runtime.log(`[Exchange] Signaling target not found or disconnected: ${to}`);
+			return;
+		}
+
+		const signalType = String(packet.signalType || '').trim().toLowerCase();
+		if (!signalType) {
+			return;
+		}
+
+		try {
+			targetWs.send(JSON.stringify({
+				type: 'signal',
+				from: fromName || 'unknown',
+				sessionId: String(packet.sessionId || '').trim() || null,
+				signalType,
+				payload: packet.payload !== undefined ? packet.payload : null,
+				targetScriptId: packet.targetScriptId || null,
+				timestamp: new Date().toISOString(),
+			}));
+		} catch (error) {
+			this.runtime.log(`[Exchange] Signaling routing error to ${to}: ${error.message}`);
 		}
 	}
 
@@ -802,6 +843,7 @@ class ExchangeManager {
 			let packet;
 			try { packet = JSON.parse(String(data)); } catch { return; }
 			if (packet && packet.type === 'message') this._handleIncomingMessage(packet);
+			if (packet && packet.type === 'signal') this._handleIncomingSignal(packet);
 			if (packet && packet.type === 'stream-chunk-bin') {
 				this._clientPendingBinaryChunkMeta.push(packet);
 			}
@@ -994,6 +1036,25 @@ class ExchangeManager {
 		).catch(() => {});
 	}
 
+	_handleIncomingSignal(packet) {
+		const from = String(packet.from || 'unknown').trim().toLowerCase();
+		const signalType = String(packet.signalType || '').trim().toLowerCase();
+		if (!from || !signalType) {
+			return;
+		}
+
+		if (this.runtime && typeof this.runtime.handleExchangeSignal === 'function') {
+			this.runtime.handleExchangeSignal({
+				from,
+				sessionId: String(packet.sessionId || '').trim() || null,
+				signalType,
+				payload: packet.payload !== undefined ? packet.payload : null,
+				targetScriptId: String(packet.targetScriptId || '').trim().toLowerCase() || null,
+				timestamp: String(packet.timestamp || '').trim() || new Date().toISOString(),
+			});
+		}
+	}
+
 	_handleIncomingStreamEnvelope(from, streamEnvelope, rawContent = '', contentType = 'application/json', targetMeta = {}) {
 		const senderMeta = {
 			rawName: from,
@@ -1097,6 +1158,42 @@ class ExchangeManager {
 			target: parsedTarget.rawTarget,
 			via: 'exchange',
 			queued: false,
+		};
+	}
+
+	async sendSignalViaExchange(target, signalType, payload = null, options = {}) {
+		if (this.mode !== 'client') {
+			throw new Error('not in client mode');
+		}
+		if (!this.wsClient || this.wsClient.readyState !== WebSocket.OPEN) {
+			throw new Error('exchange client not connected');
+		}
+
+		const parsedTarget = parseLogicalExchangeTarget(target);
+		if (!parsedTarget || !parsedTarget.nodeName) {
+			throw new Error('invalid signaling target');
+		}
+
+		const safeSignalType = String(signalType || '').trim().toLowerCase();
+		if (!safeSignalType) {
+			throw new Error('invalid signal type');
+		}
+
+		this.wsClient.send(JSON.stringify({
+			type: 'signal',
+			to: parsedTarget.nodeName,
+			targetScriptId: parsedTarget.scriptId || null,
+			sessionId: String(options.sessionId || '').trim() || null,
+			signalType: safeSignalType,
+			payload,
+			timestamp: new Date().toISOString(),
+		}));
+
+		return {
+			target: parsedTarget.rawTarget,
+			sessionId: String(options.sessionId || '').trim() || null,
+			signalType: safeSignalType,
+			via: 'exchange-signaling',
 		};
 	}
 

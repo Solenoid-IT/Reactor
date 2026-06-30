@@ -40,6 +40,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.Inet4Address;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -102,6 +103,7 @@ public class ReactorHttpService extends Service {
     private static final long WS_HEARTBEAT_TIMEOUT_MS = 45000L;
     private static final long DEFAULT_MESSAGE_QUEUE_TTL_MS = 7L * 24L * 60L * 60L * 1000L;
     private static final long DEFAULT_MESSAGE_QUEUE_RETRY_MS = 30000L;
+    private static final long DEFAULT_P2P_SESSION_TIMEOUT_MS = 2L * 60L * 1000L;
     private static final long NET_CHANGE_DEBOUNCE_MS = 2500L;
     private static final long NET_CHANGE_FALLBACK_POLL_INTERVAL_MS = 60000L;
 
@@ -115,6 +117,8 @@ public class ReactorHttpService extends Service {
     private static volatile boolean currentExchangeTls = false;
     private static volatile String currentExchangeToken = "";
     private static volatile WebSocket wsExchangeClientSocket = null;
+    private static final ConcurrentHashMap<String, JSONObject> p2pSessions = new ConcurrentHashMap<>();
+    private static volatile P2PSignalListener p2pSignalListener = null;
     private static ReactorHttpService instance = null;
     private static volatile boolean stopRequestedByUser = false;
 
@@ -231,6 +235,167 @@ public class ReactorHttpService extends Service {
         return "exchange".equals(currentExchangeMode) && running;
     }
     public static boolean isExchangeClientConnected() { return wsExchangeClientSocket != null; }
+
+    public interface P2PSignalListener {
+        void onSignal(String from, String sessionId, String signalType, JSONObject payload);
+    }
+
+    public static void setP2PSignalListener(P2PSignalListener listener) {
+        p2pSignalListener = listener;
+    }
+
+    private static String normalizeP2PTarget(String rawTarget) {
+        return String.valueOf(rawTarget == null ? "" : rawTarget).trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static void cleanupExpiredP2PSessions() {
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, JSONObject> entry : p2pSessions.entrySet()) {
+            JSONObject session = entry.getValue();
+            long lastUpdateMs = session != null ? session.optLong("lastUpdateMs", 0L) : 0L;
+            if (lastUpdateMs <= 0L || (now - lastUpdateMs) > DEFAULT_P2P_SESSION_TIMEOUT_MS) {
+                p2pSessions.remove(entry.getKey());
+            }
+        }
+    }
+
+    private static JSONObject upsertP2PSession(String target, String sessionId, String state, String signalType, boolean usingRelay, String reason) {
+        String safeTarget = normalizeP2PTarget(target);
+        if (safeTarget.isEmpty()) {
+            return null;
+        }
+
+        JSONObject existing = p2pSessions.get(safeTarget);
+        JSONObject session = existing != null ? existing : new JSONObject();
+
+        try {
+            session.put("target", safeTarget);
+            if (sessionId != null && !sessionId.trim().isEmpty()) {
+                session.put("sessionId", sessionId.trim());
+            } else if (!session.has("sessionId") || session.optString("sessionId", "").trim().isEmpty()) {
+                session.put("sessionId", UUID.randomUUID().toString().toLowerCase(Locale.ROOT));
+            }
+
+            String nextState = String.valueOf(state == null ? "signaling" : state).trim();
+            session.put("state", nextState.isEmpty() ? "signaling" : nextState);
+            session.put("lastSignalType", String.valueOf(signalType == null ? "" : signalType).trim().toLowerCase(Locale.ROOT));
+            session.put("usingRelay", usingRelay);
+            session.put("reason", String.valueOf(reason == null ? "" : reason));
+            session.put("lastUpdateMs", System.currentTimeMillis());
+        } catch (Exception ignored) {
+            return null;
+        }
+
+        p2pSessions.put(safeTarget, session);
+        return session;
+    }
+
+    private static String stateForSignalType(String signalType) {
+        String safeSignal = String.valueOf(signalType == null ? "" : signalType).trim().toLowerCase(Locale.ROOT);
+        if ("offer".equals(safeSignal) || "answer".equals(safeSignal) || "candidate".equals(safeSignal)) {
+            return "connecting";
+        }
+        if ("connected".equals(safeSignal)) {
+            return "connected-p2p";
+        }
+        if ("relay".equals(safeSignal)) {
+            return "connected-turn";
+        }
+        if ("failed".equals(safeSignal)) {
+            return "fallback-exchange";
+        }
+        if ("close".equals(safeSignal)) {
+            return "idle";
+        }
+        return "signaling";
+    }
+
+    public static JSObject getP2PStatus() {
+        cleanupExpiredP2PSessions();
+
+        JSArray sessions = new JSArray();
+        for (JSONObject session : p2pSessions.values()) {
+            if (session == null) {
+                continue;
+            }
+
+            JSObject item = new JSObject();
+            item.put("target", session.optString("target", ""));
+            item.put("sessionId", session.optString("sessionId", ""));
+            item.put("state", session.optString("state", "idle"));
+            item.put("lastSignalType", session.optString("lastSignalType", ""));
+            item.put("usingRelay", session.optBoolean("usingRelay", false));
+            item.put("reason", session.optString("reason", ""));
+
+            long lastUpdateMs = session.optLong("lastUpdateMs", 0L);
+            item.put("lastUpdateAt", lastUpdateMs > 0L ? Instant.ofEpochMilli(lastUpdateMs).toString() : JSONObject.NULL);
+            sessions.put(item);
+        }
+
+        JSObject p2p = new JSObject();
+        p2p.put("enabled", "node".equals(currentExchangeMode));
+        p2p.put("signalingViaExchange", true);
+        p2p.put("connectedToExchange", isExchangeClientConnected());
+        p2p.put("sessions", sessions);
+        return p2p;
+    }
+
+    public static JSObject sendP2PSignal(String target, String signalType, JSObject payload, String sessionId) {
+        if (instance == null) {
+            return new JSObject().put("ok", false).put("error", "runtime not ready");
+        }
+
+        try {
+            String safeTarget = normalizeP2PTarget(target);
+            String safeSignalType = String.valueOf(signalType == null ? "" : signalType).trim().toLowerCase(Locale.ROOT);
+            if (safeTarget.isEmpty()) {
+                return new JSObject().put("ok", false).put("error", "invalid p2p signaling target");
+            }
+            if (safeSignalType.isEmpty()) {
+                return new JSObject().put("ok", false).put("error", "invalid p2p signal type");
+            }
+            if (!"node".equals(currentExchangeMode)) {
+                return new JSObject().put("ok", false).put("error", "p2p signaling available only in node mode");
+            }
+
+            JSONObject session = upsertP2PSession(
+                    safeTarget,
+                    sessionId,
+                    "close".equals(safeSignalType) ? "idle" : "signaling",
+                    safeSignalType,
+                    "relay".equals(safeSignalType) || "failed".equals(safeSignalType),
+                    "failed".equals(safeSignalType) ? "p2p failed" : ""
+            );
+
+            String resolvedSessionId = session != null ? session.optString("sessionId", "") : String.valueOf(sessionId == null ? "" : sessionId).trim();
+            instance.sendExchangeSignalNow(safeTarget, safeSignalType, payload, resolvedSessionId);
+
+            JSObject result = new JSObject();
+            result.put("ok", true);
+            result.put("to", safeTarget);
+            result.put("signalType", safeSignalType);
+            result.put("sessionId", resolvedSessionId);
+            result.put("session", session != null ? new JSObject(session.toString()) : JSONObject.NULL);
+            return result;
+        } catch (Exception error) {
+            return new JSObject().put("ok", false).put("error", error.getMessage() != null ? error.getMessage() : "unable to send p2p signal");
+        }
+    }
+
+    public static JSObject closeP2PSession(String target, String sessionId, JSObject payload) {
+        String safeTarget = normalizeP2PTarget(target);
+        if (safeTarget.isEmpty()) {
+            return new JSObject().put("ok", false).put("error", "invalid p2p session target");
+        }
+
+        JSObject signalResult = null;
+        if ("node".equals(currentExchangeMode)) {
+            signalResult = sendP2PSignal(safeTarget, "close", payload, sessionId);
+        }
+
+        p2pSessions.remove(safeTarget);
+        return new JSObject().put("ok", true).put("target", safeTarget).put("signal", signalResult != null ? signalResult : JSONObject.NULL);
+    }
 
     public static JSObject getOutgoingQueueStatus() {
         JSObject queue = new JSObject();
@@ -2655,6 +2820,40 @@ public class ReactorHttpService extends Service {
         }
     }
 
+    private void sendExchangeSignalNow(String target, String signalType, JSObject payload, String sessionId) {
+        if (!"node".equals(currentExchangeMode) || wsExchangeClientSocket == null) {
+            throw new RuntimeException("exchange client not connected");
+        }
+
+        ParsedTarget parsedTarget = parseTarget(target);
+        if (parsedTarget == null || parsedTarget.baseTarget == null || parsedTarget.baseTarget.trim().isEmpty()) {
+            throw new RuntimeException("invalid exchange target");
+        }
+
+        String safeSignalType = String.valueOf(signalType == null ? "" : signalType).trim().toLowerCase(Locale.ROOT);
+        if (safeSignalType.isEmpty()) {
+            throw new RuntimeException("invalid signal type");
+        }
+
+        JSONObject packet = new JSONObject();
+        try {
+            packet.put("type", "signal");
+            packet.put("to", String.valueOf(parsedTarget.baseTarget).toLowerCase(Locale.ROOT));
+            packet.put("signalType", safeSignalType);
+            packet.put("sessionId", String.valueOf(sessionId == null ? "" : sessionId).trim());
+            packet.put("payload", payload != null ? new JSONObject(payload.toString()) : JSONObject.NULL);
+            if (parsedTarget.scriptId != null && !parsedTarget.scriptId.isEmpty()) {
+                packet.put("targetScriptId", parsedTarget.scriptId);
+            }
+        } catch (JSONException exception) {
+            throw new RuntimeException(exception.getMessage() != null ? exception.getMessage() : "signal packet serialization failed");
+        }
+
+        if (!wsExchangeClientSocket.send(packet.toString())) {
+            throw new RuntimeException("exchange websocket send failed");
+        }
+    }
+
     // =========================================================================
     // EXCHANGE — configurazione e lifecycle
     // =========================================================================
@@ -2765,6 +2964,8 @@ public class ReactorHttpService extends Service {
                                 clientName != null ? clientName : "unknown",
                                 packet.optString("content", ""),
                                 packet.optString("contentType", "text/plain"));
+                    } else if ("signal".equals(type)) {
+                        routeExchangeSignal(packet, clientName != null ? clientName : "unknown");
                     } else if ("stream-chunk-bin".equals(type)) {
                         routeExchangeBinaryChunkAnnouncement(
                                 packet.optString("to", "").trim().toLowerCase(Locale.ROOT),
@@ -2839,6 +3040,42 @@ public class ReactorHttpService extends Service {
             appendGlobalLog(buildExchangeLog("ROUTED", from + " → " + to));
         } catch (Exception e) {
             appendGlobalLog(buildExchangeLog("ROUTE_ERROR", "error: " + e.getMessage()));
+        }
+    }
+
+    private void routeExchangeSignal(JSONObject packet, String from) {
+        if (packet == null) {
+            return;
+        }
+
+        String to = packet.optString("to", "").trim().toLowerCase(Locale.ROOT);
+        if (to.isEmpty()) {
+            return;
+        }
+
+        WsConnection target = wsExchangeClients.get(to);
+        if (target == null) {
+            appendGlobalLog(buildExchangeLog("ROUTE_MISS", "signal target not connected: " + to));
+            return;
+        }
+
+        String signalType = packet.optString("signalType", "").trim().toLowerCase(Locale.ROOT);
+        if (signalType.isEmpty()) {
+            return;
+        }
+
+        try {
+            JSONObject outbound = new JSONObject();
+            outbound.put("type", "signal");
+            outbound.put("from", from != null ? from : "unknown");
+            outbound.put("sessionId", packet.optString("sessionId", ""));
+            outbound.put("signalType", signalType);
+            outbound.put("payload", packet.has("payload") ? packet.opt("payload") : JSONObject.NULL);
+            outbound.put("targetScriptId", packet.optString("targetScriptId", ""));
+            outbound.put("timestamp", Instant.now().toString());
+            target.send(outbound.toString());
+        } catch (Exception error) {
+            appendGlobalLog(buildExchangeLog("ROUTE_ERROR", "signal route error: " + error.getMessage()));
         }
     }
 
@@ -3015,7 +3252,7 @@ public class ReactorHttpService extends Service {
                     return;
                 }
 
-                handleIncomingExchangeMessage(text);
+                handleIncomingExchangePacket(text);
             }
 
             @Override
@@ -3047,7 +3284,7 @@ public class ReactorHttpService extends Service {
                     envelope.put("from", meta.from != null ? meta.from : "unknown");
                     envelope.put("content", streamPayload.toString());
                     envelope.put("contentType", "application/json");
-                    handleIncomingExchangeMessage(envelope.toString());
+                    handleIncomingExchangePacket(envelope.toString());
                 } catch (Exception ignored) {
                     // Ignore malformed binary stream payloads.
                 }
@@ -3186,10 +3423,17 @@ public class ReactorHttpService extends Service {
         }
     }
 
-    private void handleIncomingExchangeMessage(String text) {
+    private void handleIncomingExchangePacket(String text) {
         try {
             JSONObject packet = new JSONObject(text);
-            if (!"message".equals(packet.optString("type", ""))) return;
+            String type = packet.optString("type", "").trim().toLowerCase(Locale.ROOT);
+            if ("signal".equals(type)) {
+                handleIncomingExchangeSignal(packet);
+                return;
+            }
+            if (!"message".equals(type)) {
+                return;
+            }
 
             String from = packet.optString("from", "unknown");
             String content = packet.optString("content", "");
@@ -3237,6 +3481,48 @@ public class ReactorHttpService extends Service {
                 }
             }
         } catch (Exception ignored) {}
+    }
+
+    private void handleIncomingExchangeSignal(JSONObject packet) {
+        if (packet == null) {
+            return;
+        }
+
+        String from = normalizeP2PTarget(packet.optString("from", ""));
+        String signalType = String.valueOf(packet.optString("signalType", "")).trim().toLowerCase(Locale.ROOT);
+        if (from.isEmpty() || signalType.isEmpty()) {
+            return;
+        }
+
+        JSONObject payload = packet.optJSONObject("payload");
+        String reason = "failed".equals(signalType)
+                ? (payload != null ? payload.optString("reason", "p2p failed") : "p2p failed")
+                : "";
+
+        upsertP2PSession(
+                from,
+                packet.optString("sessionId", ""),
+                stateForSignalType(signalType),
+                signalType,
+                "relay".equals(signalType) || "failed".equals(signalType),
+                reason
+        );
+
+        P2PSignalListener listener = p2pSignalListener;
+        if (listener != null) {
+            try {
+                listener.onSignal(
+                        from,
+                        packet.optString("sessionId", ""),
+                        signalType,
+                        payload
+                );
+            } catch (Exception ignored) {
+                // Listener failures should not break signaling updates.
+            }
+        }
+
+        appendGlobalLog(buildExchangeLog("SIGNAL_RECEIVED", signalType + " from " + from));
     }
 
     // =========================================================================

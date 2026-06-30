@@ -1045,6 +1045,42 @@ function setupIpcHandlers(runtime, options = {}) {
 		}
 	});
 
+	ipcMain.handle('get-p2p-status', async () => {
+		if (!runtime || !runtime.getP2PStatus) {
+			return { ok: false, error: 'runtime not ready', p2p: { enabled: false, sessions: [] } };
+		}
+
+		try {
+			return { ok: true, p2p: runtime.getP2PStatus() };
+		} catch (error) {
+			return { ok: false, error: error.message || 'unable to read p2p status', p2p: { enabled: false, sessions: [] } };
+		}
+	});
+
+	ipcMain.handle('send-p2p-signal', async (_, { target, signalType, payload, sessionId }) => {
+		if (!runtime || !runtime.sendP2PSignal) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		try {
+			return await runtime.sendP2PSignal(target, signalType, payload, { sessionId });
+		} catch (error) {
+			return { ok: false, error: error.message || 'unable to send p2p signal' };
+		}
+	});
+
+	ipcMain.handle('close-p2p-session', async (_, { target, sessionId, payload }) => {
+		if (!runtime || !runtime.closeP2PSession) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		try {
+			return await runtime.closeP2PSession(target, { sessionId, payload });
+		} catch (error) {
+			return { ok: false, error: error.message || 'unable to close p2p session' };
+		}
+	});
+
 	ipcMain.handle('get-exchange-token', async () => {
 		if (!runtime || !runtime.getExchangeToken) {
 			return { ok: false, error: 'runtime not ready' };

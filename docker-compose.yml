@@ -3,7 +3,7 @@ services:
     profiles: ["turn"]
     image: coturn/coturn:latest
     container_name: reactor-coturn
-    restart: unless-stopped
+    restart: always
     env_file:
       - .env
     command:
@@ -35,7 +35,7 @@ services:
       context: .
       dockerfile: Dockerfile.daemon
     container_name: reactor-exchange
-    restart: unless-stopped
+    restart: always
     env_file:
       - .env
     environment:

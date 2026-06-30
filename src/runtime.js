@@ -17,6 +17,7 @@ const { createNodePlatformServices } = require('./platform/nodePlatformServices'
 const { createNodeRuntimeApi } = require('./platform/nodeRuntimeApi');
 const { ExchangeManager } = require('./exchangeManager');
 const { TlsManager } = require('./tlsManager');
+const { P2PDataChannelManager } = require('./p2pDataChannelManager');
 
 const ALL_WATCH_LISTENERS = new Set([
 	'file:created',
@@ -796,6 +797,9 @@ class ReactorRuntime {
 			parseBooleanOption(process.env.REACTOR_EXCHANGE_DISCOVERY_ENDPOINT, false),
 		);
 		this.exchangeDiscoveryEndpointPath = '/nodes';
+		this.p2pSessions = new Map();
+		this.p2pSessionTimeoutMs = this.readQueueDuration('REACTOR_P2P_SESSION_TIMEOUT_MS', 2 * 60 * 1000, 10 * 1000);
+		this.p2pTransportManager = new P2PDataChannelManager(this);
 		this.workingModeConfigPath = path.join(this.reactorRootDir, 'working-mode.json');
 		this.tlsManager = new TlsManager(path.join(this.reactorRootDir, 'tls'));
 		this.tlsEnabled = false; // impostato da startHttpServer
@@ -1097,8 +1101,212 @@ class ReactorRuntime {
 			discovery: this.exchangeDiscoveryEndpointEnabled,
 			stun: normalizeRelayEndpointConfig(this.stun),
 			turn: normalizeRelayEndpointConfig(this.turn),
+			p2p: this.getP2PStatus(),
 			exposeDiscoveryEndpoint: this.exchangeDiscoveryEndpointEnabled,
 			discoveryEndpointPath: this.exchangeDiscoveryEndpointPath,
+		};
+	}
+
+	cleanupExpiredP2PSessions(nowMs = Date.now()) {
+		for (const [key, session] of this.p2pSessions.entries()) {
+			const lastUpdateMs = Number(session?.lastUpdateMs || 0);
+			if (!lastUpdateMs || nowMs - lastUpdateMs > this.p2pSessionTimeoutMs) {
+				this.p2pSessions.delete(key);
+			}
+		}
+	}
+
+	getIceServersForP2P() {
+		const servers = [];
+
+		const stunHost = String(this.stun?.host || '').trim();
+		const stunPort = Number(this.stun?.port) > 0 ? Number(this.stun.port) : 3478;
+		if (stunHost) {
+			servers.push({ urls: [`stun:${stunHost}:${stunPort}`] });
+		}
+
+		const turnHost = String(this.turn?.host || '').trim();
+		const turnPort = Number(this.turn?.port) > 0 ? Number(this.turn.port) : 3478;
+		if (turnHost) {
+			const turnScheme = Boolean(this.turn?.tls) ? 'turns' : 'turn';
+			servers.push({
+				urls: [`${turnScheme}:${turnHost}:${turnPort}?transport=tcp`, `turn:${turnHost}:${turnPort}?transport=udp`],
+				username: String(this.exchangeAuthToken || ''),
+				credential: String(this.exchangeAuthToken || ''),
+			});
+		}
+
+		return servers;
+	}
+
+	getP2PStatus() {
+		this.cleanupExpiredP2PSessions();
+		const transportSummary = this.p2pTransportManager && this.p2pTransportManager.getStatusSummary
+			? this.p2pTransportManager.getStatusSummary()
+			: { supported: false, activeSessions: 0 };
+		const sessions = Array.from(this.p2pSessions.values())
+			.map((session) => ({
+				target: String(session.target || ''),
+				sessionId: String(session.sessionId || ''),
+				state: String(session.state || 'idle'),
+				lastSignalType: String(session.lastSignalType || ''),
+				lastUpdateAt: session.lastUpdateMs ? new Date(session.lastUpdateMs).toISOString() : null,
+				usingRelay: Boolean(session.usingRelay),
+				reason: String(session.reason || ''),
+			}))
+			.sort((a, b) => String(a.target).localeCompare(String(b.target)));
+
+		return {
+			enabled: this.exchangeMode === 'node',
+			signalingViaExchange: true,
+			dataChannelSupported: Boolean(transportSummary.supported),
+			dataChannelSessions: Number(transportSummary.activeSessions || 0),
+			iceServersConfigured: this.getIceServersForP2P().length > 0,
+			iceServers: this.getIceServersForP2P(),
+			sessions,
+		};
+	}
+
+	shouldPreferP2PForNodeRouting() {
+		if (this.exchangeMode !== 'node') {
+			return false;
+		}
+
+		const stunHost = String(this.stun?.host || '').trim();
+		const turnHost = String(this.turn?.host || '').trim();
+		if (!stunHost || !turnHost) {
+			return false;
+		}
+
+		return Boolean(this.p2pTransportManager && this.p2pTransportManager.isAvailable && this.p2pTransportManager.isAvailable());
+	}
+
+	upsertP2PSession(target, updates = {}) {
+		const safeTarget = String(target || '').trim().toLowerCase();
+		if (!safeTarget) {
+			return null;
+		}
+
+		const existing = this.p2pSessions.get(safeTarget) || {
+			target: safeTarget,
+			sessionId: String(updates.sessionId || '').trim() || crypto.randomUUID(),
+			state: 'signaling',
+			lastSignalType: '',
+			lastUpdateMs: Date.now(),
+			usingRelay: false,
+			reason: '',
+		};
+
+		const merged = {
+			...existing,
+			...updates,
+			target: safeTarget,
+			sessionId: String(updates.sessionId || existing.sessionId || crypto.randomUUID()).trim(),
+			lastSignalType: String(updates.lastSignalType || existing.lastSignalType || '').trim().toLowerCase(),
+			lastUpdateMs: Date.now(),
+		};
+
+		this.p2pSessions.set(safeTarget, merged);
+		return merged;
+	}
+
+	handleExchangeSignal(signal = {}) {
+		const from = String(signal.from || '').trim().toLowerCase();
+		const signalType = String(signal.signalType || '').trim().toLowerCase();
+		if (!from || !signalType) {
+			return;
+		}
+
+		if (this.p2pTransportManager && this.p2pTransportManager.handleSignal) {
+			this.p2pTransportManager.handleSignal(signal).catch((error) => {
+				this.log(`[P2P] signal handling error from ${from}: ${error.message}`);
+			});
+		}
+
+		const nextState = signalType === 'offer' || signalType === 'answer' || signalType === 'candidate'
+			? 'connecting'
+			: signalType === 'connected'
+			? 'connected-p2p'
+			: signalType === 'relay'
+			? 'connected-turn'
+			: signalType === 'failed'
+			? 'fallback-exchange'
+			: signalType === 'close'
+			? 'idle'
+			: 'signaling';
+
+		this.upsertP2PSession(from, {
+			sessionId: String(signal.sessionId || '').trim() || undefined,
+			state: nextState,
+			lastSignalType: signalType,
+			usingRelay: signalType === 'relay' || signalType === 'failed',
+			reason: signalType === 'failed' ? String(signal?.payload?.reason || 'p2p failed') : '',
+		});
+	}
+
+	async sendP2PSignal(target, signalType, payload = null, options = {}) {
+		const safeTarget = String(target || '').trim().toLowerCase();
+		const safeSignalType = String(signalType || '').trim().toLowerCase();
+		if (!safeTarget) {
+			throw new Error('invalid p2p signaling target');
+		}
+		if (!safeSignalType) {
+			throw new Error('invalid p2p signal type');
+		}
+		if (this.exchangeMode !== 'node') {
+			throw new Error('p2p signaling available only in node mode');
+		}
+
+		const session = this.upsertP2PSession(safeTarget, {
+			sessionId: String(options.sessionId || '').trim() || undefined,
+			state: 'signaling',
+			lastSignalType: safeSignalType,
+			reason: '',
+		});
+
+		const result = await this.exchangeManager.sendSignalViaExchange(safeTarget, safeSignalType, payload, {
+			sessionId: session.sessionId,
+		});
+
+		this.upsertP2PSession(safeTarget, {
+			sessionId: session.sessionId,
+			state: safeSignalType === 'close' ? 'idle' : 'signaling',
+			lastSignalType: safeSignalType,
+		});
+
+		return {
+			ok: true,
+			...result,
+			session: this.p2pSessions.get(safeTarget),
+		};
+	}
+
+	async closeP2PSession(target, options = {}) {
+		const safeTarget = String(target || '').trim().toLowerCase();
+		if (!safeTarget) {
+			throw new Error('invalid p2p session target');
+		}
+
+		let signalResult = null;
+		if (this.exchangeMode === 'node') {
+			try {
+				signalResult = await this.sendP2PSignal(safeTarget, 'close', options.payload || null, {
+					sessionId: options.sessionId,
+				});
+			} catch {
+				// Session can still be cleared locally if remote close signal fails.
+			}
+		}
+
+		if (this.p2pTransportManager && this.p2pTransportManager.closeSession) {
+			this.p2pTransportManager.closeSession(safeTarget, false);
+		}
+
+		this.p2pSessions.delete(safeTarget);
+		return {
+			ok: true,
+			target: safeTarget,
+			signal: signalResult,
 		};
 	}
 
@@ -1983,6 +2191,220 @@ class ReactorRuntime {
 		return nextId;
 	}
 
+	buildP2PEnvelope(content, messageHeaders = {}) {
+		const normalizedHeaders = Object.fromEntries(
+			Object.entries(messageHeaders && typeof messageHeaders === 'object' ? messageHeaders : {})
+				.map(([key, value]) => [String(key || '').trim().toLowerCase(), value]),
+		);
+
+		if (Buffer.isBuffer(content) || content instanceof Uint8Array) {
+			return {
+				kind: 'message',
+				payloadType: 'base64',
+				payload: Buffer.from(content).toString('base64'),
+				contentType: 'application/octet-stream',
+				messageHeaders: normalizedHeaders,
+			};
+		}
+
+		if (typeof content === 'string') {
+			return {
+				kind: 'message',
+				payloadType: 'string',
+				payload: content,
+				contentType: 'text/plain; charset=utf-8',
+				messageHeaders: normalizedHeaders,
+			};
+		}
+
+		if (content === null || content === undefined) {
+			return {
+				kind: 'message',
+				payloadType: 'null',
+				payload: '',
+				contentType: 'text/plain; charset=utf-8',
+				messageHeaders: normalizedHeaders,
+			};
+		}
+
+		return {
+			kind: 'message',
+			payloadType: 'json',
+			payload: JSON.stringify(content),
+			contentType: 'application/json; charset=utf-8',
+			messageHeaders: normalizedHeaders,
+		};
+	}
+
+	parseIncomingP2PEnvelope(rawPayload) {
+		let parsed = null;
+		try {
+			parsed = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload;
+		} catch {
+			parsed = {
+				kind: 'message',
+				payloadType: 'string',
+				payload: String(rawPayload || ''),
+				contentType: 'text/plain; charset=utf-8',
+				messageHeaders: {},
+			};
+		}
+
+		const envelope = parsed && typeof parsed === 'object' ? parsed : {};
+		const payloadType = String(envelope.payloadType || 'string').trim().toLowerCase();
+		let decoded;
+		if (payloadType === 'base64') {
+			decoded = Buffer.from(String(envelope.payload || ''), 'base64');
+		} else if (payloadType === 'json') {
+			try {
+				decoded = JSON.parse(String(envelope.payload || 'null'));
+			} catch {
+				decoded = String(envelope.payload || '');
+			}
+		} else if (payloadType === 'null') {
+			decoded = '';
+		} else {
+			decoded = String(envelope.payload || '');
+		}
+
+		const contentType = String(envelope.contentType || 'text/plain; charset=utf-8');
+		const messageHeaders = envelope.messageHeaders && typeof envelope.messageHeaders === 'object'
+			? envelope.messageHeaders
+			: {};
+
+		let bodyText = '';
+		let bodyJson = null;
+		let bodyBase64 = '';
+		if (Buffer.isBuffer(decoded)) {
+			bodyText = decoded.toString('utf8');
+			bodyBase64 = decoded.toString('base64');
+		} else if (typeof decoded === 'string') {
+			bodyText = decoded;
+			bodyBase64 = Buffer.from(decoded, 'utf8').toString('base64');
+		} else {
+			bodyJson = decoded;
+			bodyText = JSON.stringify(decoded);
+			bodyBase64 = Buffer.from(bodyText, 'utf8').toString('base64');
+		}
+
+		if (!bodyJson && contentType.toLowerCase().includes('application/json')) {
+			try {
+				bodyJson = JSON.parse(bodyText);
+			} catch {
+				bodyJson = null;
+			}
+		}
+
+		return {
+			contentType: contentType.toLowerCase(),
+			text: bodyText,
+			json: bodyJson,
+			base64: bodyBase64,
+			messageHeaders,
+		};
+	}
+
+	async dispatchIncomingMessageEnvelope(body, senderMeta, messageHeaders = {}) {
+		const messageTarget = this.resolveMessageTarget(messageHeaders || {});
+		const isStreamEnvelope = Boolean(body.json && typeof body.json === 'object' && body.json.__reactorStream === true);
+		const listeners = isStreamEnvelope
+			? this.filterStreamListenersByTarget(this.findStreamListeners(senderMeta.candidates), messageTarget.scriptId)
+			: this.filterMessageListenersByTarget(this.findMessageListeners(senderMeta.candidates), messageTarget.scriptId);
+
+		const streamPacket = isStreamEnvelope ? this.createIncomingStreamPacket(body.json) : null;
+		const streamEndData = isStreamEnvelope ? await this.processIncomingStreamPacket(streamPacket, senderMeta) : null;
+		let streamEndScripts = [];
+
+		if (listeners.length === 0) {
+			streamEndScripts = streamEndData
+				? await this.emitStreamEnd(streamEndData, senderMeta, messageHeaders)
+				: [];
+			return {
+				ok: true,
+				trigger: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
+				delivered: false,
+				reason: 'no listeners',
+				streamEndScripts,
+				senderCandidates: senderMeta.candidates,
+			};
+		}
+
+		await Promise.allSettled(
+			listeners.map((script) =>
+				this.runScript(script, {
+					trigger: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
+					event: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
+					messageSender: senderMeta.rawSender || senderMeta.remoteHost || null,
+					messageSenderName: senderMeta.rawName || null,
+					messageTarget: messageTarget.nodeName || null,
+					messageTargetNode: messageTarget.nodeName || null,
+					messageTargetScriptId: messageTarget.scriptId || null,
+					messageContent: body.text,
+					messageContentType: body.contentType,
+					messageBodyBase64: body.base64,
+					messageJson: body.json,
+					stream: streamPacket,
+					streamEnd: null,
+					messageHeaders,
+				}),
+			),
+		);
+
+		streamEndScripts = streamEndData
+			? await this.emitStreamEnd(streamEndData, senderMeta, messageHeaders)
+			: [];
+
+		return {
+			ok: true,
+			trigger: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
+			delivered: true,
+			scripts: listeners.map((script) => script.name),
+			streamEndScripts,
+			senderCandidates: senderMeta.candidates,
+		};
+	}
+
+	async handleIncomingP2PEnvelope(fromNode, rawPayload) {
+		const safeFromNode = String(fromNode || '').trim().toLowerCase();
+		if (!safeFromNode) {
+			return { ok: false, error: 'invalid p2p sender' };
+		}
+
+		const parsedBody = this.parseIncomingP2PEnvelope(rawPayload);
+		const headers = {
+			...((parsedBody.messageHeaders && typeof parsedBody.messageHeaders === 'object') ? parsedBody.messageHeaders : {}),
+			'x-p2p-from': safeFromNode,
+		};
+
+		const senderMeta = {
+			rawName: safeFromNode,
+			rawSender: safeFromNode,
+			remoteHost: null,
+			candidates: [safeFromNode],
+		};
+
+		return this.dispatchIncomingMessageEnvelope(parsedBody, senderMeta, headers);
+	}
+
+	async sendP2PMessage(targetNodeName, content, messageHeaders = {}) {
+		if (!this.p2pTransportManager || !this.p2pTransportManager.isAvailable || !this.p2pTransportManager.isAvailable()) {
+			throw new Error('p2p datachannel transport unavailable');
+		}
+
+		const safeTarget = String(targetNodeName || '').trim().toLowerCase();
+		if (!safeTarget) {
+			throw new Error('invalid p2p target');
+		}
+
+		const envelope = this.buildP2PEnvelope(content, messageHeaders);
+		const result = await this.p2pTransportManager.sendEnvelope(safeTarget, envelope);
+		return {
+			...result,
+			target: safeTarget,
+			mode: 'p2p',
+		};
+	}
+
 	async sendNodeMessage(target, content, extraHeaders = {}, dispatchOptions = {}) {
 		const targetId = String(target || '').trim();
 		if (!targetId) {
@@ -1991,6 +2413,20 @@ class ReactorRuntime {
 
 		const scriptScopedTarget = parseScriptScopedTarget(targetId);
 		if (scriptScopedTarget && !scriptScopedTarget.isDirectAddress) {
+			const scopedHeaders = {
+				...(extraHeaders || {}),
+				'Reactor-Target-Node': String(scriptScopedTarget.baseTarget || '').trim().toLowerCase(),
+				'Reactor-Target-Script-Id': scriptScopedTarget.scriptId,
+			};
+
+			if (this.shouldPreferP2PForNodeRouting()) {
+				try {
+					return await this.sendP2PMessage(scriptScopedTarget.baseTarget, content, scopedHeaders);
+				} catch (p2pError) {
+					this.log(`[P2P] fallback to exchange for ${scriptScopedTarget.baseTarget}: ${p2pError.message}`);
+				}
+			}
+
 			return this.sendExchangeMessage(targetId, content, dispatchOptions);
 		}
 
@@ -2009,6 +2445,14 @@ class ReactorRuntime {
 
 		const logicalTarget = parseLogicalNodeTarget(targetId);
 		if (logicalTarget) {
+			if (this.shouldPreferP2PForNodeRouting()) {
+				try {
+					return await this.sendP2PMessage(logicalTarget.nodeName, content, extraHeaders || {});
+				} catch (p2pError) {
+					this.log(`[P2P] fallback to exchange for ${logicalTarget.nodeName}: ${p2pError.message}`);
+				}
+			}
+
 			return this.sendExchangeMessage(targetId, content, dispatchOptions);
 		}
 
@@ -2530,74 +2974,15 @@ class ReactorRuntime {
 			const rawBuffer = Buffer.concat(bodyChunks);
 			const body = this.parseMessageBody(req, rawBuffer);
 			const senderMeta = this.resolveSenderCandidates(req);
-			const messageTarget = this.resolveMessageTarget(req.headers || {});
-			const isStreamEnvelope = Boolean(body.json && typeof body.json === 'object' && body.json.__reactorStream === true);
-			const listeners = isStreamEnvelope
-				? this.filterStreamListenersByTarget(this.findStreamListeners(senderMeta.candidates), messageTarget.scriptId)
-				: this.filterMessageListenersByTarget(this.findMessageListeners(senderMeta.candidates), messageTarget.scriptId);
+			const dispatch = await this.dispatchIncomingMessageEnvelope(body, senderMeta, req.headers || {});
 
 			this.addHttpServerLog(
-				`POST /message sender=${senderMeta.rawSender || senderMeta.rawName || senderMeta.remoteHost || 'unknown'} -> ${listeners.length} script(s)`,
+				`POST /message sender=${senderMeta.rawSender || senderMeta.rawName || senderMeta.remoteHost || 'unknown'} -> ${Array.isArray(dispatch?.scripts) ? dispatch.scripts.length : 0} script(s)`,
 			);
 
-			const streamPacket = isStreamEnvelope ? this.createIncomingStreamPacket(body.json) : null;
-			const streamEndData = isStreamEnvelope ? await this.processIncomingStreamPacket(streamPacket, senderMeta) : null;
-			let streamEndScripts = [];
-
-			if (listeners.length === 0) {
-				streamEndScripts = streamEndData
-					? await this.emitStreamEnd(streamEndData, senderMeta, req.headers || {})
-					: [];
-				res.writeHead(202, { 'content-type': 'application/json' });
-				res.end(
-					JSON.stringify({
-						ok: true,
-						trigger: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
-						delivered: false,
-						reason: 'no listeners',
-						streamEndScripts,
-						senderCandidates: senderMeta.candidates,
-					}),
-				);
-				return;
-			}
-
-			await Promise.allSettled(
-				listeners.map((script) =>
-					this.runScript(script, {
-						trigger: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
-						event: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
-						messageSender: senderMeta.rawSender || senderMeta.remoteHost || null,
-						messageSenderName: senderMeta.rawName || null,
-						messageTarget: messageTarget.nodeName || null,
-						messageTargetNode: messageTarget.nodeName || null,
-						messageTargetScriptId: messageTarget.scriptId || null,
-						messageContent: body.text,
-						messageContentType: body.contentType,
-						messageBodyBase64: body.base64,
-						messageJson: body.json,
-						stream: streamPacket,
-						streamEnd: null,
-						messageHeaders: req.headers || {},
-					}),
-				),
-			);
-
-			streamEndScripts = streamEndData
-				? await this.emitStreamEnd(streamEndData, senderMeta, req.headers || {})
-				: [];
-
-			res.writeHead(200, { 'content-type': 'application/json' });
-			res.end(
-				JSON.stringify({
-					ok: true,
-					trigger: isStreamEnvelope ? 'STREAM' : 'MESSAGE',
-					delivered: true,
-					scripts: listeners.map((script) => script.name),
-					streamEndScripts,
-					senderCandidates: senderMeta.candidates,
-				}),
-			);
+			const statusCode = dispatch && dispatch.delivered ? 200 : 202;
+			res.writeHead(statusCode, { 'content-type': 'application/json' });
+			res.end(JSON.stringify(dispatch || { ok: false, error: 'dispatch failed' }));
 			return;
 		}
 
@@ -3172,6 +3557,12 @@ class ReactorRuntime {
 
 	cleanup() {
 		this.clearSchedules();
+
+		if (this.p2pTransportManager && this.p2pTransportManager.sessions) {
+			for (const target of this.p2pTransportManager.sessions.keys()) {
+				this.p2pTransportManager.closeSession(target, false);
+			}
+		}
 
 		if (this.streamCleanupTimer) {
 			clearInterval(this.streamCleanupTimer);
