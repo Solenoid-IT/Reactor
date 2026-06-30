@@ -11,11 +11,15 @@ const DEFAULT_WORKING_MODE_CONFIG = {
 		host: '',
 		port: 3478,
 		tls: false,
+		username: '',
+		password: '',
 	},
 	turn: {
 		host: '',
 		port: 3478,
 		tls: false,
+		username: '',
+		password: '',
 	},
 };
 
@@ -31,11 +35,25 @@ function normalizeRelayEndpoint(rawConfig = {}, key, fallbackPort = 3478) {
 	const rawPort = nested.port ?? rawConfig[`${key}Port`];
 	const port = Number(rawPort) > 0 ? Number(rawPort) : fallbackPort;
 	const tls = Boolean(nested.tls ?? rawConfig[`${key}Tls`]);
+	const username = String(
+		nested.username
+		?? nested.user
+		?? rawConfig[`${key}Username`]
+		?? rawConfig[`${key}User`]
+		?? '',
+	);
+	const password = String(
+		nested.password
+		?? rawConfig[`${key}Password`]
+		?? '',
+	);
 
 	return {
 		host,
 		port,
 		tls,
+		username,
+		password,
 	};
 }
 
@@ -45,6 +63,9 @@ function hasRelayEndpointUpdate(rawConfig = {}, key) {
 		|| Object.prototype.hasOwnProperty.call(rawConfig, `${key}Server`)
 		|| Object.prototype.hasOwnProperty.call(rawConfig, `${key}Port`)
 		|| Object.prototype.hasOwnProperty.call(rawConfig, `${key}Tls`)
+		|| Object.prototype.hasOwnProperty.call(rawConfig, `${key}Username`)
+		|| Object.prototype.hasOwnProperty.call(rawConfig, `${key}User`)
+		|| Object.prototype.hasOwnProperty.call(rawConfig, `${key}Password`)
 	) {
 		return true;
 	}
@@ -63,6 +84,9 @@ function hasRelayEndpointUpdate(rawConfig = {}, key) {
 		|| Object.prototype.hasOwnProperty.call(nested, 'server')
 		|| Object.prototype.hasOwnProperty.call(nested, 'port')
 		|| Object.prototype.hasOwnProperty.call(nested, 'tls')
+		|| Object.prototype.hasOwnProperty.call(nested, 'username')
+		|| Object.prototype.hasOwnProperty.call(nested, 'user')
+		|| Object.prototype.hasOwnProperty.call(nested, 'password')
 	);
 }
 

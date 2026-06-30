@@ -267,18 +267,22 @@ function parseBooleanOption(rawValue, fallback = false) {
 	return Boolean(fallback);
 }
 
-function normalizeRelayEndpointConfig(rawValue, fallback = { host: '', port: 3478, tls: false }) {
+function normalizeRelayEndpointConfig(rawValue, fallback = { host: '', port: 3478, tls: false, username: '', password: '' }) {
 	const value = rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue) ? rawValue : {};
-	const fallbackValue = fallback && typeof fallback === 'object' ? fallback : { host: '', port: 3478, tls: false };
+	const fallbackValue = fallback && typeof fallback === 'object' ? fallback : { host: '', port: 3478, tls: false, username: '', password: '' };
 	const host = normalizeRelayHost(value.host ?? value.server ?? fallbackValue.host ?? '');
 	const rawPort = value.port ?? fallbackValue.port;
 	const port = Number(rawPort) > 0 ? Number(rawPort) : 3478;
 	const tls = parseBooleanOption(value.tls, fallbackValue.tls);
+	const username = String(value.username ?? value.user ?? fallbackValue.username ?? '').trim();
+	const password = String(value.password ?? fallbackValue.password ?? '').trim();
 
 	return {
 		host,
 		port,
 		tls,
+		username,
+		password,
 	};
 }
 
@@ -1129,10 +1133,12 @@ class ReactorRuntime {
 		const turnPort = Number(this.turn?.port) > 0 ? Number(this.turn.port) : 3478;
 		if (turnHost) {
 			const turnScheme = Boolean(this.turn?.tls) ? 'turns' : 'turn';
+			const username = String(this.turn?.username || this.exchangeAuthToken || '').trim();
+			const credential = String(this.turn?.password || this.exchangeAuthToken || '').trim();
 			servers.push({
 				urls: [`${turnScheme}:${turnHost}:${turnPort}?transport=tcp`, `turn:${turnHost}:${turnPort}?transport=udp`],
-				username: String(this.exchangeAuthToken || ''),
-				credential: String(this.exchangeAuthToken || ''),
+				username,
+				credential,
 			});
 		}
 

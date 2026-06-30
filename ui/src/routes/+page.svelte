@@ -59,6 +59,8 @@
 	let turnHost = '';
 	let turnPort = 3478;
 	let turnTls = false;
+	let turnUsername = '';
+	let turnPassword = '';
 	let stunTestConnected = null;
 	let turnTestConnected = null;
 	let stunTestStatus = '';
@@ -167,6 +169,8 @@
 			turnHost = String(ec.turn?.host || '');
 			turnPort = Number(ec.turn?.port) || 3478;
 			turnTls = Boolean(ec.turn?.tls);
+			turnUsername = String(ec.turn?.username || '');
+			turnPassword = String(ec.turn?.password || '');
 			exchangeToken = ec.token || '';
 			exchangeDiscovery = Boolean(ec.discovery ?? ec.exposeDiscoveryEndpoint);
 			exchangeActive = Boolean(ec.active);
@@ -439,10 +443,14 @@
 			const hostValue = String(source.host || '').trim();
 			const numericValue = Number(source.port);
 			const safePort = Number.isFinite(numericValue) && numericValue > 0 && numericValue <= 65535 ? numericValue : 3478;
+			const username = String(source.username || source.user || '').trim();
+			const password = String(source.password || '').trim();
 			return {
 				host: hostValue,
 				port: safePort,
 				tls: Boolean(source.tls),
+				username,
+				password,
 			};
 		};
 		const safeEnabled = Boolean(enabled);
@@ -524,6 +532,8 @@
 			host: String(config?.host || '').trim(),
 			port: Number(config?.port) > 0 ? Number(config.port) : 3478,
 			tls: Boolean(config?.tls),
+			username: String(config?.username || config?.user || '').trim(),
+			password: String(config?.password || '').trim(),
 		};
 		turnTestStatus = 'Saving and testing TURN...';
 		turnTestConnected = null;
@@ -829,6 +839,8 @@
 			{turnHost}
 			{turnPort}
 			{turnTls}
+			{turnUsername}
+			{turnPassword}
 			{stunTestConnected}
 			{turnTestConnected}
 			{stunTestStatus}

@@ -1022,6 +1022,8 @@ function setupIpcHandlers(runtime, options = {}) {
 			host: String(source.host || '').trim(),
 			port: Number(source.port) > 0 ? Number(source.port) : 3478,
 			tls: Boolean(source.tls),
+			username: String(source.username || source.user || '').trim(),
+			password: String(source.password || '').trim(),
 		};
 
 		try {

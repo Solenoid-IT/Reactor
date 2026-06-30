@@ -30,11 +30,15 @@ async function readUiSettings() {
 				host: String(workingModeSettings.stun?.host || ''),
 				port: Number(workingModeSettings.stun?.port) > 0 ? Number(workingModeSettings.stun.port) : 3478,
 				tls: Boolean(workingModeSettings.stun?.tls),
+				username: String(workingModeSettings.stun?.username || ''),
+				password: String(workingModeSettings.stun?.password || ''),
 			},
 			turn: {
 				host: String(workingModeSettings.turn?.host || ''),
 				port: Number(workingModeSettings.turn?.port) > 0 ? Number(workingModeSettings.turn.port) : 3478,
 				tls: Boolean(workingModeSettings.turn?.tls),
+				username: String(workingModeSettings.turn?.username || ''),
+				password: String(workingModeSettings.turn?.password || ''),
 			},
 		};
 		return {
@@ -56,11 +60,15 @@ async function readUiSettings() {
 				host: String(DEFAULT_WORKING_MODE_CONFIG.stun?.host || ''),
 				port: Number(DEFAULT_WORKING_MODE_CONFIG.stun?.port) > 0 ? Number(DEFAULT_WORKING_MODE_CONFIG.stun.port) : 3478,
 				tls: Boolean(DEFAULT_WORKING_MODE_CONFIG.stun?.tls),
+				username: String(DEFAULT_WORKING_MODE_CONFIG.stun?.username || ''),
+				password: String(DEFAULT_WORKING_MODE_CONFIG.stun?.password || ''),
 			},
 			turn: {
 				host: String(DEFAULT_WORKING_MODE_CONFIG.turn?.host || ''),
 				port: Number(DEFAULT_WORKING_MODE_CONFIG.turn?.port) > 0 ? Number(DEFAULT_WORKING_MODE_CONFIG.turn.port) : 3478,
 				tls: Boolean(DEFAULT_WORKING_MODE_CONFIG.turn?.tls),
+				username: String(DEFAULT_WORKING_MODE_CONFIG.turn?.username || ''),
+				password: String(DEFAULT_WORKING_MODE_CONFIG.turn?.password || ''),
 			},
 		};
 	}

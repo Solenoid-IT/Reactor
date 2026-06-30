@@ -21,6 +21,7 @@ import android.util.Base64;
 
 import androidx.core.app.NotificationCompat;
 
+import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 
 import org.json.JSONArray;
@@ -44,7 +45,9 @@ import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.UnknownHostException;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -60,6 +63,7 @@ import java.util.Map;
 import java.util.Enumeration;
 import java.util.Set;
 import java.util.UUID;
+import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -68,6 +72,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
@@ -76,6 +81,7 @@ import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.WebSocket;
 import okhttp3.WebSocketListener;
+import okhttp3.Dns;
 import okio.ByteString;
 
 public class ReactorHttpService extends Service {
@@ -3327,10 +3333,192 @@ public class ReactorHttpService extends Service {
         }
     }
 
+    private List<InetAddress> resolveExchangeHostAddresses(String rawHost) {
+        List<InetAddress> resolved = new ArrayList<>();
+        String host = String.valueOf(rawHost == null ? "" : rawHost).trim();
+        if (host.isEmpty()) {
+            return resolved;
+        }
+
+        try {
+            InetAddress[] nativeResolved = InetAddress.getAllByName(host);
+            if (nativeResolved != null) {
+                resolved.addAll(Arrays.asList(nativeResolved));
+            }
+        } catch (Exception ignored) {
+            // DoH fallback below.
+        }
+
+        if (!resolved.isEmpty()) {
+            return resolved;
+        }
+
+        collectDohAddresses(host, resolved);
+        return resolved;
+    }
+
+    private void collectDohAddresses(String host, List<InetAddress> resolved) {
+        if (host == null || host.trim().isEmpty() || resolved == null) {
+            return;
+        }
+
+        Set<String> ipCandidates = new HashSet<>();
+        String encoded;
+        try {
+            encoded = URLEncoder.encode(host, StandardCharsets.UTF_8.name());
+        } catch (Exception ignored) {
+            return;
+        }
+
+        String[] providers = new String[] {
+                "https://dns.google/resolve?name=" + encoded + "&type=A",
+                "https://dns.google/resolve?name=" + encoded + "&type=AAAA",
+                "https://8.8.8.8/resolve?name=" + encoded + "&type=A",
+                "https://8.8.8.8/resolve?name=" + encoded + "&type=AAAA",
+                "https://1.1.1.1/dns-query?name=" + encoded + "&type=A",
+                "https://1.1.1.1/dns-query?name=" + encoded + "&type=AAAA"
+        };
+
+        for (String endpoint : providers) {
+            HttpURLConnection connection = null;
+            try {
+                URL url = new URL(endpoint);
+                connection = (HttpURLConnection) url.openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(2500);
+                connection.setReadTimeout(2500);
+                connection.setRequestProperty("Accept", "application/json, application/dns-json");
+
+                if (endpoint.startsWith("https://8.8.8.8/")) {
+                    connection.setRequestProperty("Host", "dns.google");
+                    if (connection instanceof HttpsURLConnection) {
+                        applyInsecureTls((HttpsURLConnection) connection);
+                    }
+                } else if (endpoint.startsWith("https://1.1.1.1/")) {
+                    connection.setRequestProperty("Host", "cloudflare-dns.com");
+                    if (connection instanceof HttpsURLConnection) {
+                        applyInsecureTls((HttpsURLConnection) connection);
+                    }
+                }
+
+                int status = connection.getResponseCode();
+                String body = readHttpResponseBody(connection, status);
+                if (status < 200 || status >= 300 || body == null || body.isEmpty()) {
+                    continue;
+                }
+
+                JSONObject parsed = new JSONObject(body);
+                JSONArray answers = parsed.optJSONArray("Answer");
+                if (answers == null) {
+                    continue;
+                }
+
+                for (int index = 0; index < answers.length(); index += 1) {
+                    JSONObject answer = answers.optJSONObject(index);
+                    if (answer == null) {
+                        continue;
+                    }
+
+                    String data = String.valueOf(answer.optString("data", "")).trim();
+                    if (!data.isEmpty() && looksLikeIpAddress(data)) {
+                        ipCandidates.add(data);
+                    }
+                }
+            } catch (Exception ignored) {
+                // Try next DoH endpoint.
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+
+            if (!ipCandidates.isEmpty()) {
+                break;
+            }
+        }
+
+        for (String ip : ipCandidates) {
+            try {
+                resolved.add(InetAddress.getByName(ip));
+            } catch (Exception ignored) {
+                // Ignore invalid fallback addresses.
+            }
+        }
+    }
+
+    private boolean looksLikeIpAddress(String value) {
+        if (value == null) {
+            return false;
+        }
+
+        String candidate = value.trim();
+        if (candidate.isEmpty()) {
+            return false;
+        }
+
+        try {
+            InetAddress.getByName(candidate);
+            return true;
+        } catch (UnknownHostException ignored) {
+            return false;
+        }
+    }
+
+    private void applyInsecureTls(HttpsURLConnection connection) throws Exception {
+        X509TrustManager trustAll = new X509TrustManager() {
+            @Override
+            public void checkClientTrusted(X509Certificate[] chain, String authType) {
+                // Intentionally permissive for DoH fallback over IP endpoints.
+            }
+
+            @Override
+            public void checkServerTrusted(X509Certificate[] chain, String authType) {
+                // Intentionally permissive for DoH fallback over IP endpoints.
+            }
+
+            @Override
+            public X509Certificate[] getAcceptedIssuers() {
+                return new X509Certificate[0];
+            }
+        };
+
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(null, new TrustManager[] { trustAll }, new SecureRandom());
+        connection.setSSLSocketFactory(sslContext.getSocketFactory());
+        connection.setHostnameVerifier((hostname, session) -> true);
+    }
+
+    private String readHttpResponseBody(HttpURLConnection connection, int status) throws IOException {
+        InputStream stream = status >= 200 && status < 400 ? connection.getInputStream() : connection.getErrorStream();
+        if (stream == null) {
+            return "";
+        }
+
+        StringBuilder content = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                content.append(line);
+            }
+        }
+        return content.toString();
+    }
+
     private OkHttpClient buildExchangeWsClient(boolean tls) {
         OkHttpClient.Builder builder = new OkHttpClient.Builder()
                 .retryOnConnectionFailure(false)
                 .pingInterval(WS_HEARTBEAT_INTERVAL_MS, TimeUnit.MILLISECONDS);
+
+        builder.dns(new Dns() {
+            @Override
+            public List<InetAddress> lookup(String hostname) throws java.net.UnknownHostException {
+                List<InetAddress> resolved = resolveExchangeHostAddresses(hostname);
+                if (resolved == null || resolved.isEmpty()) {
+                    throw new java.net.UnknownHostException(hostname);
+                }
+                return resolved;
+            }
+        });
 
         if (tls) {
             try {
@@ -3404,6 +3592,14 @@ public class ReactorHttpService extends Service {
             } catch (NumberFormatException ignored) {
                 // Keep default port.
             }
+        }
+
+        if (host.isEmpty()) {
+            return null;
+        }
+
+        while (host.endsWith(".")) {
+            host = host.substring(0, host.length() - 1).trim();
         }
 
         if (host.isEmpty()) {

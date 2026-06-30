@@ -2,6 +2,7 @@
 	import { onDestroy } from 'svelte';
 	import Form from './Form.svelte';
 	import Helper from './Helper.svelte';
+	import PasswordField from './PasswordField.svelte';
 
 	export let reactorName = '';
 	export let httpPort = 7070;
@@ -19,6 +20,8 @@
 	export let turnHost = '';
 	export let turnPort = 3478;
 	export let turnTls = false;
+	export let turnUsername = '';
+	export let turnPassword = '';
 	export let stunTestConnected = null;
 	export let turnTestConnected = null;
 	export let stunTestStatus = '';
@@ -144,6 +147,8 @@
 				host: turnHost,
 				port: turnPort,
 				tls: turnTls,
+				username: turnUsername,
+				password: turnPassword,
 			},
 		);
 	}
@@ -204,6 +209,8 @@
 			host: turnHost,
 			port: turnPort,
 			tls: turnTls,
+			username: turnUsername,
+			password: turnPassword,
 		});
 	}
 
@@ -479,6 +486,20 @@
 									<label class="d-block m-0">
 										<span class="detail-label">Port</span>
 										<input type="number" class="input" name="exchange.turn.port" data-type="int" min="1" max="65535" bind:value={turnPort} />
+									</label>
+								</div>
+							</div>
+							<div class="row settings-host-port-row settings-credentials-row mt-2">
+								<div class="col">
+									<label class="d-block m-0">
+										<span class="detail-label">User</span>
+										<input type="text" class="input" name="exchange.turn.username" data-type="string" bind:value={turnUsername} placeholder="turn-user" />
+									</label>
+								</div>
+								<div class="col">
+									<label class="d-block m-0">
+										<span class="detail-label">Password</span>
+										<PasswordField name="exchange.turn.password" dataType="string" bind:value={turnPassword} placeholder="turn-password" />
 									</label>
 								</div>
 							</div>
@@ -886,6 +907,16 @@
 		}
 
 		.settings-backup-actions :global(button) {
+			width: 100%;
+		}
+
+		.settings-credentials-row {
+			display: flex;
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.settings-credentials-row :global(.col) {
 			width: 100%;
 		}
 	}

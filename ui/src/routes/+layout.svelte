@@ -476,7 +476,7 @@
 		padding: 16px;
 	}
 	:global(.settings-modal-card) {
-		width: min(960px, calc(100vw - 40px));
+		width: min(1100px, calc(100vw - 40px));
 		max-height: calc(100vh - 40px);
 		overflow: auto;
 		padding: 18px;

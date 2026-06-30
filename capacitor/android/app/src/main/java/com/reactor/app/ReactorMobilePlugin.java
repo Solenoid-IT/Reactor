@@ -53,6 +53,10 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URL;
 import java.net.HttpURLConnection;
+import java.net.UnknownHostException;
+import java.net.URLEncoder;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
@@ -167,14 +171,14 @@ public class ReactorMobilePlugin extends Plugin {
         config.put("tls", false);
         config.put("token", "");
         config.put("discovery", false);
-        config.put("stun", new JSObject().put("host", "").put("port", 3478).put("tls", false));
-        config.put("turn", new JSObject().put("host", "").put("port", 3478).put("tls", false));
+        config.put("stun", new JSObject().put("host", "").put("port", 3478).put("tls", false).put("username", "").put("password", ""));
+        config.put("turn", new JSObject().put("host", "").put("port", 3478).put("tls", false).put("username", "").put("password", ""));
         return config;
     }
 
     private JSObject normalizeRelayConfig(JSObject source, int defaultPort, boolean allowTls) {
         JSObject input = source != null ? source : new JSObject();
-        String host = String.valueOf(input.optString("host", "")).trim();
+        String host = sanitizeNetworkHost(String.valueOf(input.optString("host", "")));
 
         int port = defaultPort;
         try {
@@ -187,7 +191,189 @@ public class ReactorMobilePlugin extends Plugin {
         }
 
         boolean tls = allowTls && input.optBoolean("tls", false);
-        return new JSObject().put("host", host).put("port", port).put("tls", tls);
+        String username = String.valueOf(input.optString("username", input.optString("user", ""))).trim();
+        String password = String.valueOf(input.optString("password", "")).trim();
+        return new JSObject().put("host", host).put("port", port).put("tls", tls).put("username", username).put("password", password);
+    }
+
+    private String sanitizeNetworkHost(String rawHost) {
+        String value = String.valueOf(rawHost == null ? "" : rawHost).trim();
+        if (value.isEmpty()) {
+            return "";
+        }
+
+        value = value.replaceFirst("^(stun|stuns|turn|turns|ws|wss|http|https):", "");
+        if (value.startsWith("//")) {
+            value = value.substring(2);
+        }
+
+        int slashIndex = value.indexOf('/');
+        if (slashIndex >= 0) {
+            value = value.substring(0, slashIndex).trim();
+        }
+
+        if (value.startsWith("[") && value.contains("]")) {
+            value = value.substring(1, value.indexOf(']')).trim();
+        }
+
+        int colonCount = 0;
+        for (int i = 0; i < value.length(); i += 1) {
+            if (value.charAt(i) == ':') {
+                colonCount += 1;
+            }
+        }
+
+        if (colonCount == 1) {
+            int colonIndex = value.lastIndexOf(':');
+            if (colonIndex > 0 && colonIndex < value.length() - 1) {
+                String maybeHost = value.substring(0, colonIndex).trim();
+                String maybePort = value.substring(colonIndex + 1).trim();
+                if (maybePort.matches("\\d+")) {
+                    value = maybeHost;
+                }
+            }
+        }
+
+        while (value.endsWith(".")) {
+            value = value.substring(0, value.length() - 1).trim();
+        }
+
+        return value;
+    }
+
+    private List<InetAddress> resolveHostAddresses(String rawHost) {
+        String host = sanitizeNetworkHost(rawHost);
+        List<InetAddress> resolved = new ArrayList<>();
+        if (host.isEmpty()) {
+            return resolved;
+        }
+
+        try {
+            InetAddress[] nativeResolved = InetAddress.getAllByName(host);
+            if (nativeResolved != null) {
+                for (InetAddress address : nativeResolved) {
+                    if (address != null) {
+                        resolved.add(address);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // DoH fallback below.
+        }
+
+        if (!resolved.isEmpty()) {
+            return resolved;
+        }
+
+        collectDohAddresses(host, resolved);
+        return resolved;
+    }
+
+    private void collectDohAddresses(String host, List<InetAddress> resolved) {
+        if (host == null || host.trim().isEmpty() || resolved == null) {
+            return;
+        }
+
+        Set<String> ipCandidates = new LinkedHashSet<>();
+        String encoded;
+        try {
+            encoded = URLEncoder.encode(host, StandardCharsets.UTF_8.name());
+        } catch (Exception ignored) {
+            return;
+        }
+
+        String[] providers = new String[] {
+                "https://dns.google/resolve?name=" + encoded + "&type=A",
+                "https://dns.google/resolve?name=" + encoded + "&type=AAAA",
+                "https://8.8.8.8/resolve?name=" + encoded + "&type=A",
+                "https://8.8.8.8/resolve?name=" + encoded + "&type=AAAA",
+                "https://1.1.1.1/dns-query?name=" + encoded + "&type=A",
+                "https://1.1.1.1/dns-query?name=" + encoded + "&type=AAAA"
+        };
+
+        for (String endpoint : providers) {
+            HttpURLConnection connection = null;
+            try {
+                URL url = new URL(endpoint);
+                connection = (HttpURLConnection) url.openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(2500);
+                connection.setReadTimeout(2500);
+                connection.setRequestProperty("Accept", "application/json, application/dns-json");
+
+                if (endpoint.startsWith("https://8.8.8.8/")) {
+                    connection.setRequestProperty("Host", "dns.google");
+                    if (connection instanceof HttpsURLConnection) {
+                        applyInsecureTls((HttpsURLConnection) connection);
+                    }
+                } else if (endpoint.startsWith("https://1.1.1.1/")) {
+                    connection.setRequestProperty("Host", "cloudflare-dns.com");
+                    if (connection instanceof HttpsURLConnection) {
+                        applyInsecureTls((HttpsURLConnection) connection);
+                    }
+                }
+
+                int status = connection.getResponseCode();
+                String body = readHttpResponseBody(connection, status);
+                if (status < 200 || status >= 300 || body == null || body.isEmpty()) {
+                    continue;
+                }
+
+                JSONObject parsed = new JSONObject(body);
+                JSONArray answers = parsed.optJSONArray("Answer");
+                if (answers == null) {
+                    continue;
+                }
+
+                for (int i = 0; i < answers.length(); i += 1) {
+                    JSONObject answer = answers.optJSONObject(i);
+                    if (answer == null) {
+                        continue;
+                    }
+
+                    String data = String.valueOf(answer.optString("data", "")).trim();
+                    if (!data.isEmpty() && looksLikeIpAddress(data)) {
+                        ipCandidates.add(data);
+                    }
+                }
+            } catch (Exception ignored) {
+                // Try next DoH endpoint.
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+
+            if (!ipCandidates.isEmpty()) {
+                break;
+            }
+        }
+
+        for (String ip : ipCandidates) {
+            try {
+                resolved.add(InetAddress.getByName(ip));
+            } catch (Exception ignored) {
+                // Skip invalid IP candidates.
+            }
+        }
+    }
+
+    private boolean looksLikeIpAddress(String value) {
+        if (value == null) {
+            return false;
+        }
+
+        String candidate = value.trim();
+        if (candidate.isEmpty()) {
+            return false;
+        }
+
+        try {
+            InetAddress.getByName(candidate);
+            return true;
+        } catch (UnknownHostException ignored) {
+            return false;
+        }
     }
 
     private JSObject normalizeRelayConfigFromJson(JSONObject source, String key, int defaultPort, boolean allowTls) {
@@ -204,6 +390,8 @@ public class ReactorMobilePlugin extends Plugin {
         input.put("host", relay.optString("host", ""));
         input.put("port", relay.optInt("port", defaultPort));
         input.put("tls", relay.optBoolean("tls", false));
+        input.put("username", relay.optString("username", relay.optString("user", "")));
+        input.put("password", relay.optString("password", ""));
         return normalizeRelayConfig(input, defaultPort, allowTls);
     }
 
@@ -261,13 +449,40 @@ public class ReactorMobilePlugin extends Plugin {
         JSObject current = readWorkingModeConfig();
         JSONObject stunRaw = current.optJSONObject("stun");
         JSONObject turnRaw = current.optJSONObject("turn");
-        JSObject stun = normalizeRelayConfigFromJson(new JSONObject().put("stun", stunRaw != null ? stunRaw : new JSONObject()), "stun", 3478, false);
-        JSObject turn = normalizeRelayConfigFromJson(new JSONObject().put("turn", turnRaw != null ? turnRaw : new JSONObject()), "turn", 3478, true);
+        JSObject stunSource = new JSObject();
+        if (stunRaw != null) {
+            stunSource.put("host", stunRaw.optString("host", ""));
+            stunSource.put("port", stunRaw.optInt("port", 3478));
+            stunSource.put("tls", stunRaw.optBoolean("tls", false));
+            stunSource.put("username", stunRaw.optString("username", stunRaw.optString("user", "")));
+            stunSource.put("password", stunRaw.optString("password", ""));
+        }
+
+        JSObject turnSource = new JSObject();
+        if (turnRaw != null) {
+            turnSource.put("host", turnRaw.optString("host", ""));
+            turnSource.put("port", turnRaw.optInt("port", 3478));
+            turnSource.put("tls", turnRaw.optBoolean("tls", false));
+            turnSource.put("username", turnRaw.optString("username", turnRaw.optString("user", "")));
+            turnSource.put("password", turnRaw.optString("password", ""));
+        }
+
+        JSObject stun = normalizeRelayConfig(
+            stunSource,
+            3478,
+            false
+        );
+        JSObject turn = normalizeRelayConfig(
+            turnSource,
+            3478,
+            true
+        );
         return writeWorkingModeConfig(mode, host, port, tls, token, discovery, stun, turn);
     }
 
     private JSObject testUdpRelay(String host, int port, String label) {
-        if (host == null || host.trim().isEmpty()) {
+        String safeHost = sanitizeNetworkHost(host);
+        if (safeHost.isEmpty()) {
             return new JSObject().put("ok", false).put("error", label + " host is empty");
         }
 
@@ -288,26 +503,44 @@ public class ReactorMobilePlugin extends Plugin {
             request[7] = 0x42;
             System.arraycopy(txId, 0, request, 8, txId.length);
 
-            InetAddress address = InetAddress.getByName(host.trim());
-            socket = new DatagramSocket();
-            socket.setSoTimeout(2500);
-            socket.connect(address, port);
-
-            DatagramPacket out = new DatagramPacket(request, request.length, address, port);
-            socket.send(out);
-
-            byte[] response = new byte[1024];
-            DatagramPacket in = new DatagramPacket(response, response.length);
-            socket.receive(in);
-
-            if (in.getLength() < 20) {
-                return new JSObject().put("ok", false).put("error", label + " response too short");
+            List<InetAddress> addresses = resolveHostAddresses(safeHost);
+            if (addresses.isEmpty()) {
+                return new JSObject().put("ok", false).put("error", "Unable to resolve host \"" + safeHost + "\"");
             }
 
-            return new JSObject()
-                    .put("ok", true)
-                    .put("protocol", "udp")
-                    .put("elapsedMs", Math.max(0L, System.currentTimeMillis() - startedAt));
+            String lastError = "";
+            for (InetAddress address : addresses) {
+                try {
+                    socket = new DatagramSocket();
+                    socket.setSoTimeout(2500);
+                    socket.connect(address, port);
+
+                    DatagramPacket out = new DatagramPacket(request, request.length, address, port);
+                    socket.send(out);
+
+                    byte[] response = new byte[1024];
+                    DatagramPacket in = new DatagramPacket(response, response.length);
+                    socket.receive(in);
+
+                    if (in.getLength() < 20) {
+                        lastError = label + " response too short";
+                    } else {
+                        return new JSObject()
+                                .put("ok", true)
+                                .put("protocol", "udp")
+                                .put("elapsedMs", Math.max(0L, System.currentTimeMillis() - startedAt));
+                    }
+                } catch (Exception probeError) {
+                    lastError = probeError.getMessage() != null ? probeError.getMessage() : (label + " udp test failed");
+                } finally {
+                    if (socket != null) {
+                        socket.close();
+                        socket = null;
+                    }
+                }
+            }
+
+            return new JSObject().put("ok", false).put("error", lastError.isEmpty() ? (label + " udp test failed") : lastError);
         } catch (Exception error) {
             return new JSObject().put("ok", false).put("error", error.getMessage() != null ? error.getMessage() : (label + " udp test failed"));
         } finally {
@@ -318,20 +551,31 @@ public class ReactorMobilePlugin extends Plugin {
     }
 
     private JSObject testTcpRelay(String host, int port, String label) {
-        if (host == null || host.trim().isEmpty()) {
+        String safeHost = sanitizeNetworkHost(host);
+        if (safeHost.isEmpty()) {
             return new JSObject().put("ok", false).put("error", label + " host is empty");
         }
 
         long startedAt = System.currentTimeMillis();
-        try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress(host.trim(), port), 2500);
-            return new JSObject()
-                    .put("ok", true)
-                    .put("protocol", "tcp")
-                    .put("elapsedMs", Math.max(0L, System.currentTimeMillis() - startedAt));
-        } catch (Exception error) {
-            return new JSObject().put("ok", false).put("error", error.getMessage() != null ? error.getMessage() : (label + " tcp test failed"));
+        List<InetAddress> addresses = resolveHostAddresses(safeHost);
+        if (addresses.isEmpty()) {
+            return new JSObject().put("ok", false).put("error", "Unable to resolve host \"" + safeHost + "\"");
         }
+
+        String lastError = "";
+        for (InetAddress address : addresses) {
+            try (Socket socket = new Socket()) {
+                socket.connect(new InetSocketAddress(address, port), 2500);
+                return new JSObject()
+                        .put("ok", true)
+                        .put("protocol", "tcp")
+                        .put("elapsedMs", Math.max(0L, System.currentTimeMillis() - startedAt));
+            } catch (Exception error) {
+                lastError = error.getMessage() != null ? error.getMessage() : (label + " tcp test failed");
+            }
+        }
+
+        return new JSObject().put("ok", false).put("error", lastError.isEmpty() ? (label + " tcp test failed") : lastError);
     }
 
     private JSObject testRelayEndpoint(String kind, JSObject relayConfig) {
@@ -402,17 +646,10 @@ public class ReactorMobilePlugin extends Plugin {
     private JSObject waitForExchangeClientConnection(long timeoutMs) {
         long safeTimeoutMs = timeoutMs > 0 ? timeoutMs : 5000L;
 
-        if (!"node".equals(ReactorHttpService.getCurrentExchangeMode())) {
-            return new JSObject()
-                    .put("connected", false)
-                    .put("skipped", true)
-                    .put("reason", "exchange mode is not node/client")
-                    .put("elapsedMs", 0);
-        }
-
         long startedAt = System.currentTimeMillis();
         while (System.currentTimeMillis() - startedAt <= safeTimeoutMs) {
-            if (ReactorHttpService.isExchangeClientConnected()) {
+            String currentMode = String.valueOf(ReactorHttpService.getCurrentExchangeMode());
+            if ("node".equals(currentMode) && ReactorHttpService.isExchangeClientConnected()) {
                 return new JSObject()
                         .put("connected", true)
                         .put("skipped", false)
@@ -428,10 +665,11 @@ public class ReactorMobilePlugin extends Plugin {
             }
         }
 
+    String finalMode = String.valueOf(ReactorHttpService.getCurrentExchangeMode());
         return new JSObject()
                 .put("connected", ReactorHttpService.isExchangeClientConnected())
-                .put("skipped", false)
-                .put("reason", "timeout waiting for connection")
+        .put("skipped", !"node".equals(finalMode))
+        .put("reason", "node".equals(finalMode) ? "timeout waiting for connection" : "exchange mode is " + finalMode)
                 .put("elapsedMs", System.currentTimeMillis() - startedAt);
     }
 
@@ -1608,7 +1846,7 @@ public class ReactorMobilePlugin extends Plugin {
 
 		startHttpService(getConfiguredHttpPort());
 
-		JSObject connectionTest = waitForExchangeClientConnection(5000L);
+        JSObject connectionTest = waitForExchangeClientConnection(12000L);
 
         JSObject result = new JSObject();
         result.put("ok", true);

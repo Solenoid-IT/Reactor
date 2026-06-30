@@ -624,11 +624,6 @@ public final class AndroidP2PWebRtcManager {
         }
 
         @Override
-        public void onSelectedCandidatePairChanged(PeerConnection.CandidatePairChangeEvent event) {
-            // no-op
-        }
-
-        @Override
         public void onStandardizedIceConnectionChange(PeerConnection.IceConnectionState newState) {
             // no-op
         }
