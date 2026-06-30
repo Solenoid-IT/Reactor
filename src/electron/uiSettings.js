@@ -26,6 +26,16 @@ async function readUiSettings() {
 			exchangeTls: workingModeSettings.tls,
 			exchangeToken: workingModeSettings.token,
 			exchangeDiscovery: Boolean(workingModeSettings.discovery),
+			stun: {
+				host: String(workingModeSettings.stun?.host || ''),
+				port: Number(workingModeSettings.stun?.port) > 0 ? Number(workingModeSettings.stun.port) : 3478,
+				tls: Boolean(workingModeSettings.stun?.tls),
+			},
+			turn: {
+				host: String(workingModeSettings.turn?.host || ''),
+				port: Number(workingModeSettings.turn?.port) > 0 ? Number(workingModeSettings.turn.port) : 3478,
+				tls: Boolean(workingModeSettings.turn?.tls),
+			},
 		};
 		return {
 			defaultProgramPath: parsed.defaultProgramPath || '',
@@ -42,6 +52,16 @@ async function readUiSettings() {
 			exchangeTls: DEFAULT_WORKING_MODE_CONFIG.tls,
 			exchangeToken: DEFAULT_WORKING_MODE_CONFIG.token,
 			exchangeDiscovery: Boolean(DEFAULT_WORKING_MODE_CONFIG.discovery),
+			stun: {
+				host: String(DEFAULT_WORKING_MODE_CONFIG.stun?.host || ''),
+				port: Number(DEFAULT_WORKING_MODE_CONFIG.stun?.port) > 0 ? Number(DEFAULT_WORKING_MODE_CONFIG.stun.port) : 3478,
+				tls: Boolean(DEFAULT_WORKING_MODE_CONFIG.stun?.tls),
+			},
+			turn: {
+				host: String(DEFAULT_WORKING_MODE_CONFIG.turn?.host || ''),
+				port: Number(DEFAULT_WORKING_MODE_CONFIG.turn?.port) > 0 ? Number(DEFAULT_WORKING_MODE_CONFIG.turn.port) : 3478,
+				tls: Boolean(DEFAULT_WORKING_MODE_CONFIG.turn?.tls),
+			},
 		};
 	}
 }
@@ -49,7 +69,7 @@ async function readUiSettings() {
 async function writeUiSettings(nextSettings) {
 	const current = await readUiSettings();
 	const workingModeUpdates = {};
-	for (const key of ['exchangeMode', 'exchangeHost', 'exchangePort', 'exchangeTls', 'exchangeToken', 'exchangeDiscovery']) {
+	for (const key of ['exchangeMode', 'exchangeHost', 'exchangePort', 'exchangeTls', 'exchangeToken', 'exchangeDiscovery', 'stun', 'turn']) {
 		if (Object.prototype.hasOwnProperty.call(nextSettings, key)) {
 			workingModeUpdates[key] = nextSettings[key];
 		}

@@ -29,6 +29,7 @@
 		getExchangeConfig,
 		getExchangeLinkedNodes,
 		setExchangeConfig,
+		saveRelayConfig,
 		getExchangeToken,
 		generateExchangeToken,
 		getTlsConfig,
@@ -52,6 +53,15 @@
 	let exchangeHost = '';
 	let exchangePort = 7070;
 	let exchangeTls = false;
+	let stunHost = '';
+	let stunPort = 3478;
+	let turnHost = '';
+	let turnPort = 3478;
+	let turnTls = false;
+	let stunTestConnected = null;
+	let turnTestConnected = null;
+	let stunTestStatus = '';
+	let turnTestStatus = '';
 	let exchangeToken = '';
 	let exchangeDiscovery = false;
 	let exchangeActive = false;
@@ -148,6 +158,11 @@
 			exchangeHost = ec.host || '';
 			exchangePort = Number(ec.port) || 7070;
 			exchangeTls = Boolean(ec.tls);
+			stunHost = String(ec.stun?.host || '');
+			stunPort = Number(ec.stun?.port) || 3478;
+			turnHost = String(ec.turn?.host || '');
+			turnPort = Number(ec.turn?.port) || 3478;
+			turnTls = Boolean(ec.turn?.tls);
 			exchangeToken = ec.token || '';
 			exchangeDiscovery = Boolean(ec.discovery ?? ec.exposeDiscoveryEndpoint);
 			exchangeActive = Boolean(ec.active);
@@ -390,16 +405,29 @@
 		status = result?.ok ? `Server status opened: ${result.url}` : `Error: ${result?.error || 'unknown'}`;
 	}
 
-	async function saveExchangeConfigValue(mode, host, port, tls, token, enabled = true, discovery = false) {
+	async function saveExchangeConfigValue(mode, host, port, tls, token, enabled = true, discovery = false, stun = {}, turn = {}) {
 		const numericPort = Number(port);
 		if (!Number.isFinite(numericPort) || numericPort < 1 || numericPort > 65535) {
 			status = 'Error: invalid Exchange port';
 			return;
 		}
+		const sanitizeRelay = (value) => {
+			const source = value && typeof value === 'object' ? value : {};
+			const hostValue = String(source.host || '').trim();
+			const numericValue = Number(source.port);
+			const safePort = Number.isFinite(numericValue) && numericValue > 0 && numericValue <= 65535 ? numericValue : 3478;
+			return {
+				host: hostValue,
+				port: safePort,
+				tls: Boolean(source.tls),
+			};
+		};
 		const safeEnabled = Boolean(enabled);
 		const safeDiscovery = Boolean(discovery);
 		const effectiveHost = mode === 'node' && !safeEnabled ? '' : host || '';
-		const result = await setExchangeConfig(mode, effectiveHost, numericPort, Boolean(tls), token || '', safeDiscovery);
+		const safeStun = sanitizeRelay(stun);
+		const safeTurn = sanitizeRelay(turn);
+		const result = await setExchangeConfig(mode, effectiveHost, numericPort, Boolean(tls), token || '', safeDiscovery, safeStun, safeTurn);
 		if (!result?.ok) {
 			status = `Error: ${result?.error || 'unknown'}`;
 			await refreshAll();
@@ -433,6 +461,66 @@
 		status = 'Generating Exchange token...';
 		const result = await generateExchangeToken();
 		status = result?.ok ? 'Exchange token generated' : `Error: ${result?.error || 'unknown'}`;
+		await refreshAll();
+	}
+
+	async function saveStunConfigHandler(config) {
+		const safeConfig = {
+			host: String(config?.host || '').trim(),
+			port: Number(config?.port) > 0 ? Number(config.port) : 3478,
+			tls: false,
+		};
+		stunTestStatus = 'Saving and testing STUN...';
+		stunTestConnected = null;
+		const result = await saveRelayConfig('stun', safeConfig);
+		if (!result?.ok) {
+			stunTestStatus = `STUN save failed: ${result?.error || 'unknown error'}`;
+			stunTestConnected = false;
+			status = stunTestStatus;
+			return;
+		}
+
+		const test = result.test || {};
+		if (test.ok) {
+			stunTestStatus = `STUN OK (${test.protocol || 'udp'})`;
+			stunTestConnected = true;
+			status = 'STUN saved and reachable';
+		} else {
+			stunTestStatus = `STUN test failed: ${test.error || 'unreachable'}`;
+			stunTestConnected = false;
+			status = stunTestStatus;
+		}
+
+		await refreshAll();
+	}
+
+	async function saveTurnConfigHandler(config) {
+		const safeConfig = {
+			host: String(config?.host || '').trim(),
+			port: Number(config?.port) > 0 ? Number(config.port) : 3478,
+			tls: Boolean(config?.tls),
+		};
+		turnTestStatus = 'Saving and testing TURN...';
+		turnTestConnected = null;
+		const result = await saveRelayConfig('turn', safeConfig);
+		if (!result?.ok) {
+			turnTestStatus = `TURN save failed: ${result?.error || 'unknown error'}`;
+			turnTestConnected = false;
+			status = turnTestStatus;
+			return;
+		}
+
+		const test = result.test || {};
+		if (test.ok) {
+			turnTestStatus = `TURN OK (${test.protocol || (safeConfig.tls ? 'tls' : 'udp')})`;
+			turnTestConnected = true;
+			status = 'TURN saved and reachable';
+		} else {
+			turnTestStatus = `TURN test failed: ${test.error || 'unreachable'}`;
+			turnTestConnected = false;
+			status = turnTestStatus;
+		}
+
 		await refreshAll();
 	}
 
@@ -711,6 +799,15 @@
 			{exchangeHost}
 			{exchangePort}
 			{exchangeTls}
+			{stunHost}
+			{stunPort}
+			{turnHost}
+			{turnPort}
+			{turnTls}
+			{stunTestConnected}
+			{turnTestConnected}
+			{stunTestStatus}
+			{turnTestStatus}
 			{exchangeToken}
 			discovery={exchangeDiscovery}
 			{exchangeActive}
@@ -725,6 +822,8 @@
 			onDeleteTlsCert={deleteTlsCertHandler}
 			onGenerateExchangeToken={generateExchangeTokenHandler}
 			onSaveExchangeConfig={saveExchangeConfigValue}
+			onSaveStunConfig={saveStunConfigHandler}
+			onSaveTurnConfig={saveTurnConfigHandler}
 			onRefreshLinkedNodes={() => refreshExchangeLinkedNodes(false)}
 			onExportBackup={exportBackupHandler}
 			onImportBackup={importBackupHandler}

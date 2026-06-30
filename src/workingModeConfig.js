@@ -7,7 +7,64 @@ const DEFAULT_WORKING_MODE_CONFIG = {
 	tls: false,
 	token: '',
 	discovery: false,
+	stun: {
+		host: '',
+		port: 3478,
+		tls: false,
+	},
+	turn: {
+		host: '',
+		port: 3478,
+		tls: false,
+	},
 };
+
+function normalizeRelayEndpoint(rawConfig = {}, key, fallbackPort = 3478) {
+	const nested = rawConfig[key] && typeof rawConfig[key] === 'object' ? rawConfig[key] : {};
+	const host = String(
+		nested.host
+		?? nested.server
+		?? rawConfig[`${key}Host`]
+		?? rawConfig[`${key}Server`]
+		?? '',
+	);
+	const rawPort = nested.port ?? rawConfig[`${key}Port`];
+	const port = Number(rawPort) > 0 ? Number(rawPort) : fallbackPort;
+	const tls = Boolean(nested.tls ?? rawConfig[`${key}Tls`]);
+
+	return {
+		host,
+		port,
+		tls,
+	};
+}
+
+function hasRelayEndpointUpdate(rawConfig = {}, key) {
+	if (
+		Object.prototype.hasOwnProperty.call(rawConfig, `${key}Host`)
+		|| Object.prototype.hasOwnProperty.call(rawConfig, `${key}Server`)
+		|| Object.prototype.hasOwnProperty.call(rawConfig, `${key}Port`)
+		|| Object.prototype.hasOwnProperty.call(rawConfig, `${key}Tls`)
+	) {
+		return true;
+	}
+
+	if (!Object.prototype.hasOwnProperty.call(rawConfig, key)) {
+		return false;
+	}
+
+	const nested = rawConfig[key];
+	if (!nested || typeof nested !== 'object' || Array.isArray(nested)) {
+		return true;
+	}
+
+	return (
+		Object.prototype.hasOwnProperty.call(nested, 'host')
+		|| Object.prototype.hasOwnProperty.call(nested, 'server')
+		|| Object.prototype.hasOwnProperty.call(nested, 'port')
+		|| Object.prototype.hasOwnProperty.call(nested, 'tls')
+	);
+}
 
 function normalizeMode(rawMode) {
 	const mode = String(rawMode || '').trim().toLowerCase();
@@ -35,6 +92,8 @@ function normalizeWorkingModeConfig(rawConfig = {}) {
 			?? rawConfig.exchangeDiscoveryEndpoint
 			?? rawConfig.discoveryEndpoint,
 		),
+		stun: normalizeRelayEndpoint(rawConfig, 'stun', 3478),
+		turn: normalizeRelayEndpoint(rawConfig, 'turn', 3478),
 	};
 }
 
@@ -77,6 +136,14 @@ function normalizeWorkingModeUpdate(rawConfig = {}) {
 			?? rawConfig.exchangeDiscoveryEndpoint
 			?? rawConfig.discoveryEndpoint,
 		);
+	}
+
+	if (hasRelayEndpointUpdate(rawConfig, 'stun')) {
+		normalized.stun = normalizeRelayEndpoint(rawConfig, 'stun', 3478);
+	}
+
+	if (hasRelayEndpointUpdate(rawConfig, 'turn')) {
+		normalized.turn = normalizeRelayEndpoint(rawConfig, 'turn', 3478);
 	}
 
 	return normalized;

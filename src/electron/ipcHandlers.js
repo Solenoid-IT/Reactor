@@ -150,6 +150,8 @@ function setupIpcHandlers(runtime, options = {}) {
 						Boolean(settings.exchangeTls),
 						settings.exchangeToken || '',
 						Boolean(settings.exchangeDiscovery),
+						settings.stun,
+						settings.turn,
 					)
 					.catch(() => {});
 			}
@@ -182,6 +184,8 @@ function setupIpcHandlers(runtime, options = {}) {
 						Boolean(settings.exchangeTls),
 						settings.exchangeToken || '',
 						Boolean(settings.exchangeDiscovery),
+						settings.stun,
+						settings.turn,
 					)
 					.catch(() => {});
 			}
@@ -977,7 +981,7 @@ function setupIpcHandlers(runtime, options = {}) {
 		return { ok: true, config: runtime.getExchangeConfig() };
 	});
 
-	ipcMain.handle('set-exchange-config', async (_, { mode, host, port, tls, token, discovery }) => {
+	ipcMain.handle('set-exchange-config', async (_, { mode, host, port, tls, token, discovery, stun, turn }) => {
 		if (!runtime || !runtime.setExchangeConfig) {
 			return { ok: false, error: 'runtime not ready' };
 		}
@@ -988,14 +992,42 @@ function setupIpcHandlers(runtime, options = {}) {
 		const safeTls = Boolean(tls);
 		const safeToken = String(token || '').trim();
 		const safeDiscovery = Boolean(discovery);
+		const safeStun = stun && typeof stun === 'object' ? stun : {};
+		const safeTurn = turn && typeof turn === 'object' ? turn : {};
 
 		try {
-			await writeUiSettings({ exchangeMode: safeMode, exchangeHost: safeHost, exchangePort: safePort, exchangeTls: safeTls, exchangeToken: safeToken, exchangeDiscovery: safeDiscovery });
-			await runtime.setExchangeConfig(safeMode, safeHost, safePort, safeTls, safeToken, safeDiscovery);
+			await writeUiSettings({ exchangeMode: safeMode, exchangeHost: safeHost, exchangePort: safePort, exchangeTls: safeTls, exchangeToken: safeToken, exchangeDiscovery: safeDiscovery, stun: safeStun, turn: safeTurn });
+			await runtime.setExchangeConfig(safeMode, safeHost, safePort, safeTls, safeToken, safeDiscovery, safeStun, safeTurn);
 			const connectionTest = runtime.testExchangeClientConnection
 				? await runtime.testExchangeClientConnection(5000)
 				: { connected: false, skipped: true, reason: 'connection test unavailable', elapsedMs: 0 };
 			return { ok: true, config: runtime.getExchangeConfig(), connectionTest };
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('save-relay-config', async (_, { kind, config }) => {
+		if (!runtime || !runtime.setRelayConfig) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		const safeKind = String(kind || '').trim().toLowerCase();
+		if (!['stun', 'turn'].includes(safeKind)) {
+			return { ok: false, error: 'invalid relay type: use stun or turn' };
+		}
+
+		const source = config && typeof config === 'object' ? config : {};
+		const safeConfig = {
+			host: String(source.host || '').trim(),
+			port: Number(source.port) > 0 ? Number(source.port) : 3478,
+			tls: Boolean(source.tls),
+		};
+
+		try {
+			const result = await runtime.setRelayConfig(safeKind, safeConfig, true);
+			await writeUiSettings(safeKind === 'stun' ? { stun: safeConfig } : { turn: safeConfig });
+			return result;
 		} catch (error) {
 			return { ok: false, error: error.message };
 		}

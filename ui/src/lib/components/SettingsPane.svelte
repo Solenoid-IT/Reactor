@@ -14,6 +14,15 @@
 	export let exchangeHost = '';
 	export let exchangePort = 7070;
 	export let exchangeTls = false;
+	export let stunHost = '';
+	export let stunPort = 3478;
+	export let turnHost = '';
+	export let turnPort = 3478;
+	export let turnTls = false;
+	export let stunTestConnected = null;
+	export let turnTestConnected = null;
+	export let stunTestStatus = '';
+	export let turnTestStatus = '';
 	export let exchangeToken = '';
 	export let discovery = false;
 	export let exchangeActive = false;
@@ -28,6 +37,8 @@
 	export let onDeleteTlsCert = () => {};
 	export let onGenerateExchangeToken = () => {};
 	export let onSaveExchangeConfig = () => {};
+	export let onSaveStunConfig = () => {};
+	export let onSaveTurnConfig = () => {};
 	export let onRefreshLinkedNodes = () => {};
 	export let onExportBackup = () => {};
 	export let onImportBackup = () => {};
@@ -123,7 +134,21 @@
 			exchangeValues.token ?? exchangeToken,
 			exchangeValues.enabled ?? exchangeEnabled,
 			exchangeValues.discovery ?? discovery,
+			exchangeValues.stun || {
+				host: stunHost,
+				port: stunPort,
+				tls: false,
+			},
+			exchangeValues.turn || {
+				host: turnHost,
+				port: turnPort,
+				tls: turnTls,
+			},
 		);
+	}
+
+	function onTurnTlsChange() {
+		turnPort = turnTls ? 5349 : 3478;
 	}
 
 	function confirmGenerateExchangeToken() {
@@ -163,6 +188,22 @@
 		}
 
 		onStopBackgroundProcess();
+	}
+
+	function saveStunConfig() {
+		onSaveStunConfig({
+			host: stunHost,
+			port: stunPort,
+			tls: false,
+		});
+	}
+
+	function saveTurnConfig() {
+		onSaveTurnConfig({
+			host: turnHost,
+			port: turnPort,
+			tls: turnTls,
+		});
 	}
 </script>
 
@@ -347,6 +388,89 @@
 							</label>
 						</div>
 					</div>
+
+					{#if exchangeEnabled}
+						<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
+							<div class="detail-label" style="margin-bottom:8px;">STUN (optional)</div>
+							{#if stunTestConnected === true}
+								<div class="detail-value" style="color: var(--color-success, #4caf50);"><i class="fa-solid fa-circle-check me-1"></i>Connected</div>
+							{:else if stunTestConnected === false}
+								<div class="detail-value" style="color: var(--color-danger, #ff6b6b);"><i class="fa-solid fa-circle-xmark me-1"></i>Not connected</div>
+							{/if}
+							<div class="row settings-host-port-row">
+								<div class="col">
+									<label class="d-block m-0">
+										<span class="detail-label">Server</span>
+										<input type="text" class="input" name="exchange.stun.host" data-type="string" bind:value={stunHost} placeholder="stun.example.com" />
+									</label>
+								</div>
+								<div class="col-2 settings-port-col">
+									<label class="d-block m-0">
+										<span class="detail-label">Port</span>
+										<input type="number" class="input" name="exchange.stun.port" data-type="int" min="1" max="65535" bind:value={stunPort} />
+									</label>
+								</div>
+							</div>
+							<div class="row mt-2">
+								<div class="col">
+									<div class="detail-value" style="opacity:0.75;">Transport: UDP</div>
+								</div>
+							</div>
+							<div class="row mt-2 settings-submit-row">
+								<div class="col text-center">
+									<button type="button" class="btn-primary" on:click={saveStunConfig}>
+										<i class="fa-solid fa-floppy-disk me-2"></i>
+										Save
+									</button>
+								</div>
+							</div>
+							{#if stunTestStatus}
+								<div class="detail-value mt-2" style="opacity:0.85;">{stunTestStatus}</div>
+							{/if}
+						</div>
+
+						<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
+							<div class="detail-label" style="margin-bottom:8px;">TURN (optional)</div>
+							{#if turnTestConnected === true}
+								<div class="detail-value" style="color: var(--color-success, #4caf50);"><i class="fa-solid fa-circle-check me-1"></i>Connected</div>
+							{:else if turnTestConnected === false}
+								<div class="detail-value" style="color: var(--color-danger, #ff6b6b);"><i class="fa-solid fa-circle-xmark me-1"></i>Not connected</div>
+							{/if}
+							<div class="row settings-host-port-row">
+								<div class="col">
+									<label class="d-block m-0">
+										<span class="detail-label">Server</span>
+										<input type="text" class="input" name="exchange.turn.host" data-type="string" bind:value={turnHost} placeholder="turn.example.com" />
+									</label>
+								</div>
+								<div class="col-2 settings-port-col">
+									<label class="d-block m-0">
+										<span class="detail-label">Port</span>
+										<input type="number" class="input" name="exchange.turn.port" data-type="int" min="1" max="65535" bind:value={turnPort} />
+									</label>
+								</div>
+							</div>
+							<div class="row mt-2">
+								<div class="col">
+									<label class="d-flex align-items-center m-0">
+										<input type="checkbox" class="input me-2" name="exchange.turn.tls" data-type="bool" bind:checked={turnTls} on:change={onTurnTlsChange} />
+										TLS
+									</label>
+								</div>
+							</div>
+							<div class="row mt-2 settings-submit-row">
+								<div class="col text-center">
+									<button type="button" class="btn-primary" on:click={saveTurnConfig}>
+										<i class="fa-solid fa-floppy-disk me-2"></i>
+										Save
+									</button>
+								</div>
+							</div>
+							{#if turnTestStatus}
+								<div class="detail-value mt-2" style="opacity:0.85;">{turnTestStatus}</div>
+							{/if}
+						</div>
+					{/if}
 
 					{#if !exchangeEnabled}
 						<div class="detail-value mt-4" style="opacity:0.6;"><i class="fa-solid fa-pause me-1"></i>Disabled</div>

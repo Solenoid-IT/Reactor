@@ -483,18 +483,37 @@ export async function getExchangeConfig() {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
-export async function setExchangeConfig(mode, host, port, tls = false, token = '', discovery = false) {
+export async function setExchangeConfig(mode, host, port, tls = false, token = '', discovery = false, stun = {}, turn = {}) {
 	const bridge = getBridge();
 	if (bridge && bridge.setExchangeConfig) {
-		return bridge.setExchangeConfig(mode, host, port, tls, token, discovery);
+		return bridge.setExchangeConfig(mode, host, port, tls, token, discovery, stun, turn);
 	}
 
 	const mobile = getMobilePlugin();
 	if (mobile && mobile.setExchangeConfig) {
-		return mobile.setExchangeConfig({ mode, host, port, tls, token, discovery });
+		return mobile.setExchangeConfig({ mode, host, port, tls, token, discovery, stun, turn });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'setExchangeConfig', { mode, host, port, tls, token, discovery });
+	const nativeResult = await invokeNative('ReactorMobile', 'setExchangeConfig', { mode, host, port, tls, token, discovery, stun, turn });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function saveRelayConfig(kind, config = {}) {
+	const bridge = getBridge();
+	if (bridge && bridge.saveRelayConfig) {
+		return bridge.saveRelayConfig(kind, config);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.saveRelayConfig) {
+		return mobile.saveRelayConfig({ kind, config });
+	}
+
+	const nativeResult = await invokeNative('ReactorMobile', 'saveRelayConfig', { kind, config });
 	if (nativeResult) {
 		return nativeResult;
 	}

@@ -68,6 +68,12 @@ Then start (or restart) coturn:
 docker compose --profile turn up -d
 ```
 
+If you changed `.env` values and need to apply them to the TURN container, recreate it:
+
+```bash
+docker compose --profile turn up -d --force-recreate coturn
+```
+
 Notes:
 - Certificate and key are persisted in Docker volume `reactor-coturn-data`.
 - For production use a real certificate and set CN/SAN to your public TURN hostname.
