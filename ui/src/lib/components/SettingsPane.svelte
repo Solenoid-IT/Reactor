@@ -265,7 +265,7 @@
 			<span>Name</span>
 			<Helper ariaLabel="Reactor Name Help">
 				<div>The name uniquely identifies this Reactor as a node in the network.</div>
-				<div class="mt-1">In a multi-node setup, scripts can send messages to another node using this identifier.</div>
+				<div class="mt-1">A script can send messages to other nodes using this identifier.</div>
 			</Helper>
 		</h3>
 		<Form on:submit={onNameSubmit}>
@@ -288,10 +288,10 @@
 			<i class="fa-solid fa-arrows-left-right me-2"></i>
 			<span>Working Mode</span>
 			<Helper ariaLabel="Working Mode Help">
-				<div><strong>Node</strong>: runs local scripts and can use <code>Node.sendMessage</code> directly inside the same LAN.</div>
-				<div class="mt-1"><strong>Use Exchange</strong>: connects this node to a remote Exchange for message routing.</div>
-				<div class="mt-1"><strong>Exchange</strong>: runs this Reactor as a central hub.</div>
-				<div class="mt-1">Exchange is typically used when nodes are on different networks (Internet/VPN), not on the same LAN.</div>
+				<div><strong>Node</strong>: run local scripts and can use <code>Node.sendMessage</code> to communicate with other nodes.</div>
+				<div class="mt-1"><strong>Use Exchange</strong>: connect this node to a remote Exchange for message routing.</div>
+				<div class="mt-1"><strong>Exchange</strong>: run this Reactor as a central hub (like a router).</div>
+				<div class="mt-1">Exchange is used when nodes are on different networks, not on the same LAN.</div>
 			</Helper>
 		</h3>
 		<Form on:submit={onWorkingModeSubmit}>
@@ -735,7 +735,7 @@
 			<i class="fa-solid fa-list-check me-2"></i>
 			<span>Message Queue</span>
 			<Helper ariaLabel="Message Queue Help">
-				<div>If <code>Node.sendMessage()</code> cannot reach Exchange or a target node, the message is not lost.</div>
+				<div>If <code>Node.sendMessage()</code> cannot reach a target node, the message is not lost.</div>
 				<div class="mt-1">Payloads are stored in a temporary local queue and sent automatically when connectivity is restored.</div>
 			</Helper>
 		</h3>
@@ -766,7 +766,7 @@
 				<div class="col settings-submit-col">
 					<button type="submit" class="btn-primary">
 						<i class="fa-solid fa-floppy-disk me-2"></i>
-						Save TTL
+						Save
 					</button>
 				</div>
 			</div>
