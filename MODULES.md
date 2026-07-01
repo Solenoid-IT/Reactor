@@ -71,17 +71,20 @@ Node message trigger:
 ```typescript
 // @on MESSAGE
 // @on MESSAGE [sender_1]
-// @on MESSAGE [10.20.43.20:7070,sender_2]
+// @on MESSAGE [net:10.20.43.20:7070,sender_2]
 ```
 `import { Node } from 'core'` and `Node.sendMessage(target, content, enqueueOnFail)` dispatch POST `/message` and trigger matching MESSAGE listeners.
-- `target` can be a direct host, `node_name`, or `node_name/endpoint_id`.
-- For endpoint projects, the root file `uuid` stores the UUID v4 used as `endpoint_id`.
+- `target` format is `{endpoint}@{node}`.
+- `endpoint` can be an endpoint name or `id:<uuid-v4>`.
+- `node` can be a node name (`R2`) or `net:host:port`.
+- If `@{node}` is omitted, the selected endpoint is invoked on the current node.
+- For endpoint projects, the root file `uuid` stores the UUID v4 used by `id:<uuid-v4>`.
 
 Node stream trigger:
 ```typescript
 // @on STREAM
 // @on STREAM [sender_1]
-// @on STREAM [10.20.43.20:7070,sender_2]
+// @on STREAM [net:10.20.43.20:7070,sender_2]
 ```
 `Node.stream(...)` and `Node.exchange().stream(...)` trigger matching STREAM listeners.
 Inside `run(ctx)` you can read stream packets with `ctx.stream` methods:
@@ -93,7 +96,7 @@ Stream finalization trigger:
 ```typescript
 // @on STREAMEND
 // @on STREAMEND [sender_1]
-// @on STREAMEND [10.20.43.20:7070,sender_2]
+// @on STREAMEND [net:10.20.43.20:7070,sender_2]
 ```
 Runtime reassembles stream chunks on disk and triggers `STREAMEND` when transfer is finalized.
 Inside `run(ctx)` use `ctx.streamEnd` methods:

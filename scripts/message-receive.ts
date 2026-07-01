@@ -9,5 +9,6 @@ import { Node } from 'core';
 
 export async function run ()
 {
-    await Node.sendMessage( '127.0.0.1', 'hello' );
+    // No @node means local endpoint dispatch on the current node.
+    await Node.sendMessage( 'message-send', 'hello' );
 }

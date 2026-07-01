@@ -298,19 +298,30 @@ MESSAGE sender filter rules:
 - @on MESSAGE receives messages from all senders
 - @on MESSAGE [R1] receives only from sender R1
 - @on MESSAGE [R1,R2] receives only from listed senders
-- sender can be reactor name or host[:port]
-- host without port uses default 7070
+- sender can be reactor name, net:host, or net:host:port
+- net:host without port matches that host with default port 7070
+- Sender list uses OR semantics: @on MESSAGE[R2,net:1.2.3.4:5678] matches messages coming from R2 OR from net:1.2.3.4:5678.
 
 MESSAGE target rules:
-- `Node.sendMessage(target, content, enqueueOnFail = false)` accepts `target=node_name` or `target=node_name/endpoint_id`
-- `node_name` delivers to MESSAGE listeners on that node as before
-- `node_name/endpoint_id` delivers only to the endpoint project whose root contains file `uuid` with that UUID v4 value
+- `Node.sendMessage(target, content, enqueueOnFail = false)` accepts `target={endpoint}@{node}`
+- endpoint selector can be endpoint name (for example `send_message`) or UUID selector `id:<uuid-v4>`
+- node selector can be node name (`R2`) or network selector (`net:host:port`)
+- omitting `@{node}` targets the selected endpoint on the current node
 - New endpoint projects automatically create a root file named `uuid`
+
+Target examples:
+- `send_message`
+- `send_message@R2`
+- `send_message@net:1.2.3.4:5678`
+- `send_message@net:www.example.com:5000`
+- `id:550e8400-e29b-41d4-a716-446655440000@R2`
 
 Message transport notes:
 - import { Node } from 'core' then call Node.sendMessage(target, content, enqueueOnFail)
+- in node mode, delivery fallback order is `P2P_DIRECT -> P2P_RELAY -> EXCHANGE`
+- `P2P_DIRECT` uses direct WebRTC DataChannel, `P2P_RELAY` uses TURN-relayed DataChannel, and `EXCHANGE` routes through Exchange
 - request header Reactor-Name contains current node name
-- request headers may also include Reactor-Target-Node and Reactor-Target-Endpoint-Id when the message is endpoint-targeted
+- request headers may include Reactor-Target-Node, Reactor-Target-Endpoint, and Reactor-Target-Endpoint-Id
 - content supports string, JSON object, and binary payloads
 - when `enqueueOnFail` is TRUE, failed deliveries are queued and retried later; when FALSE, the call fails immediately
 

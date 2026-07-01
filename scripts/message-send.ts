@@ -1,5 +1,5 @@
 // @state DISABLED
-// @on MESSAGE [127.0.0.1]
+// @on MESSAGE [net:127.0.0.1]
 
 
 

@@ -15,6 +15,14 @@ function waitFor(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parsePositiveInt(value, fallback) {
+	const parsed = Number(value);
+	if (Number.isInteger(parsed) && parsed > 0) {
+		return parsed;
+	}
+	return fallback;
+}
+
 function decodeSdpFromPayload(payload = {}) {
 	if (!payload || typeof payload !== 'object') {
 		return '';
@@ -35,6 +43,32 @@ function decodeSdpFromPayload(payload = {}) {
 	return String(payload.sdp || '');
 }
 
+function isReliableDataChannel(channel) {
+	if (!channel) {
+		return false;
+	}
+
+	const isUnsetOrDefaultLimit = (value) => {
+		if (value === null || value === undefined) {
+			return true;
+		}
+
+		const numeric = Number(value);
+		if (!Number.isFinite(numeric)) {
+			return false;
+		}
+
+		// Some WebRTC implementations expose 65535 as default "not limited" sentinel.
+		return numeric === 65535;
+	};
+
+	const ordered = channel.ordered !== false;
+	const hasUnlimitedRetransmits = isUnsetOrDefaultLimit(channel.maxRetransmits);
+	const hasNoPacketLifetimeLimit = isUnsetOrDefaultLimit(channel.maxPacketLifeTime);
+
+	return ordered && hasUnlimitedRetransmits && hasNoPacketLifetimeLimit;
+}
+
 class P2PDataChannelManager {
 	constructor(runtime) {
 		this.runtime = runtime;
@@ -42,6 +76,8 @@ class P2PDataChannelManager {
 		this.sessions = new Map();
 		this.connecting = new Map();
 		this.connectTimeoutMs = Number(process.env.REACTOR_P2P_CONNECT_TIMEOUT_MS) > 0 ? Number(process.env.REACTOR_P2P_CONNECT_TIMEOUT_MS) : 25000;
+		this.dataChannelBufferedHighWatermarkBytes = parsePositiveInt(process.env.REACTOR_P2P_DATA_CHANNEL_BUFFER_HIGH_WATERMARK_BYTES, 4 * 1024 * 1024);
+		this.dataChannelBufferedWaitTimeoutMs = parsePositiveInt(process.env.REACTOR_P2P_DATA_CHANNEL_BUFFER_WAIT_TIMEOUT_MS, 15000);
 	}
 
 	isAvailable() {
@@ -144,7 +180,9 @@ class P2PDataChannelManager {
 		};
 
 		if (session.initiator) {
-			const channel = connection.createDataChannel('reactor-data', { ordered: true });
+			const channel = connection.createDataChannel('reactor-data', {
+				ordered: true,
+			});
 			this.attachDataChannel(session, channel);
 		}
 
@@ -153,6 +191,29 @@ class P2PDataChannelManager {
 	}
 
 	attachDataChannel(session, channel) {
+		if (!isReliableDataChannel(channel)) {
+			this.runtime.logGlobalEvent(
+				'P2P_NEGOTIATION',
+				`datachannel rejected (unreliable settings) target=${session.target} ordered=${String(channel?.ordered)} maxRetransmits=${String(channel?.maxRetransmits)} maxPacketLifeTime=${String(channel?.maxPacketLifeTime)}`,
+			).catch(() => {});
+
+			this.runtime.upsertP2PSession(session.target, {
+				sessionId: session.sessionId,
+				state: 'fallback-exchange',
+				lastSignalType: 'failed',
+				usingRelay: true,
+				reason: 'unreliable datachannel',
+			});
+
+			try {
+				channel.close();
+			} catch {
+				// ignore
+			}
+
+			return;
+		}
+
 		session.dataChannel = channel;
 
 		channel.onopen = () => {
@@ -381,6 +442,25 @@ class P2PDataChannelManager {
 		const session = await this.ensureConnected(target);
 		if (!session.dataChannel || session.dataChannel.readyState !== 'open') {
 			throw new Error('p2p data channel is not open');
+		}
+
+		if (!isReliableDataChannel(session.dataChannel)) {
+			throw new Error('p2p data channel is not reliable');
+		}
+
+		const startedAt = Date.now();
+		while (
+			session.dataChannel.readyState === 'open'
+			&& Number(session.dataChannel.bufferedAmount || 0) > this.dataChannelBufferedHighWatermarkBytes
+		) {
+			if (Date.now() - startedAt > this.dataChannelBufferedWaitTimeoutMs) {
+				throw new Error('p2p data channel backpressure timeout');
+			}
+			await waitFor(10);
+		}
+
+		if (session.dataChannel.readyState !== 'open') {
+			throw new Error('p2p data channel closed during backpressure wait');
 		}
 
 		session.dataChannel.send(JSON.stringify(envelope));

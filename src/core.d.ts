@@ -285,6 +285,7 @@ declare module 'core' {
 		messageSenderName?: string | null;
 		messageTarget?: string | null;
 		messageTargetNode?: string | null;
+		messageTargetEndpoint?: string | null;
 		messageTargetEndpointId?: string | null;
 		messageContent?: string;
 		messageContentType?: string;

@@ -228,6 +228,7 @@ public class ReactorHttpService extends Service {
         String originalTarget;
         String baseTarget;
         String nodeName;
+        String endpointSelector;
         String endpointId;
         boolean directAddress;
     }
@@ -274,6 +275,38 @@ public class ReactorHttpService extends Service {
         return "exchange".equals(currentExchangeMode) && running;
     }
     public static boolean isExchangeClientConnected() { return wsExchangeClientSocket != null; }
+
+    public static void refreshExchangeClientProfile(String reason) {
+        ReactorHttpService current = instance;
+        if (current == null) {
+            return;
+        }
+
+        if (!"node".equals(currentExchangeMode)) {
+            return;
+        }
+
+        synchronized (current.wsClientLifecycleLock) {
+            if (wsExchangeClientSocket == null) {
+                return;
+            }
+
+            try {
+                JSONObject packet = new JSONObject();
+                packet.put("type", "profile");
+                packet.put("endpoints", current.buildDiscoveryEndpointsPayload());
+                packet.put("httpPort", currentPort);
+                packet.put("httpTls", false);
+                boolean sent = wsExchangeClientSocket.send(packet.toString());
+                if (sent) {
+                    String safeReason = String.valueOf(reason == null ? "runtime-update" : reason).trim();
+                    current.appendGlobalLog(current.buildExchangeLog("CLIENT_PROFILE_REFRESHED", "reason=" + (safeReason.isEmpty() ? "runtime-update" : safeReason)));
+                }
+            } catch (Exception ignored) {
+                // Best-effort update: discovery profile will be sent again on reconnect.
+            }
+        }
+    }
 
     public static void reconnectExchangeClient(String reason) {
         ReactorHttpService current = instance;
@@ -330,11 +363,69 @@ public class ReactorHttpService extends Service {
         long now = System.currentTimeMillis();
         for (Map.Entry<String, JSONObject> entry : p2pSessions.entrySet()) {
             JSONObject session = entry.getValue();
+            String target = entry.getKey();
+            if (isNativeP2PDataChannelOpen(target)) {
+                try {
+                    if (session == null) {
+                        session = new JSONObject();
+                        session.put("target", normalizeP2PTarget(target));
+                        session.put("sessionId", UUID.randomUUID().toString().toLowerCase(Locale.ROOT));
+                        p2pSessions.put(target, session);
+                    }
+                    session.put("state", "connected-p2p");
+                    session.put("lastSignalType", "connected");
+                    session.put("usingRelay", false);
+                    session.put("reason", "");
+                    session.put("lastUpdateMs", now);
+                } catch (Exception ignored) {
+                    // Ignore refresh failures and proceed with default cleanup logic.
+                }
+                continue;
+            }
+
             long lastUpdateMs = session != null ? session.optLong("lastUpdateMs", 0L) : 0L;
             if (lastUpdateMs <= 0L || (now - lastUpdateMs) > DEFAULT_P2P_SESSION_TIMEOUT_MS) {
                 p2pSessions.remove(entry.getKey());
             }
         }
+    }
+
+    private static boolean isNativeP2PDataChannelOpen(String targetNodeName) {
+        ReactorHttpService current = instance;
+        if (current == null) {
+            return false;
+        }
+
+        String safeTarget = normalizeP2PTarget(targetNodeName);
+        if (safeTarget.isEmpty()) {
+            return false;
+        }
+
+        try {
+            AndroidP2PWebRtcManager nativeManager = AndroidP2PWebRtcManager.getInstance(current.getApplicationContext());
+            JSObject nativeStatus = nativeManager.getNativeStatus();
+            JSONArray sessions = nativeStatus != null ? nativeStatus.optJSONArray("sessions") : null;
+            if (sessions == null) {
+                return false;
+            }
+
+            for (int index = 0; index < sessions.length(); index += 1) {
+                JSONObject nativeSession = sessions.optJSONObject(index);
+                if (nativeSession == null) {
+                    continue;
+                }
+
+                String target = normalizeP2PTarget(nativeSession.optString("target", ""));
+                String dataChannelState = String.valueOf(nativeSession.optString("dataChannel", "")).trim().toLowerCase(Locale.ROOT);
+                if (safeTarget.equals(target) && "open".equals(dataChannelState)) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
+            return false;
+        }
+
+        return false;
     }
 
     private static JSONObject upsertP2PSession(String target, String sessionId, String state, String signalType, boolean usingRelay, String reason) {
@@ -1535,7 +1626,11 @@ public class ReactorHttpService extends Service {
 
                 String senderName = headers.getOrDefault("reactor-name", "");
                 String senderId = headers.getOrDefault("reactor-sender", "");
+                String targetEndpointSelector = headers.getOrDefault("reactor-target-endpoint", "").trim().toLowerCase(Locale.ROOT);
                 String targetEndpointId = headers.getOrDefault("reactor-target-endpoint-id", "").trim().toLowerCase(Locale.ROOT);
+                if (targetEndpointSelector.isEmpty() && !targetEndpointId.isEmpty()) {
+                    targetEndpointSelector = "id:" + targetEndpointId;
+                }
                 String remoteHost = client.getInetAddress() != null ? String.valueOf(client.getInetAddress().getHostAddress()) : "";
 
                 JSONObject entry = new JSONObject();
@@ -1570,7 +1665,7 @@ public class ReactorHttpService extends Service {
                     if (!matchesEventSender(endpoint, senderCandidates, primaryEvent)) {
                         continue;
                     }
-                    if (!matchesTargetEndpoint(endpoint, targetEndpointId)) {
+                    if (!matchesTargetEndpoint(endpoint, targetEndpointSelector)) {
                         continue;
                     }
 
@@ -1590,7 +1685,7 @@ public class ReactorHttpService extends Service {
                         if (!matchesEventSender(endpoint, senderCandidates, "STREAMEND")) {
                             continue;
                         }
-                        if (!matchesTargetEndpoint(endpoint, targetEndpointId)) {
+                        if (!matchesTargetEndpoint(endpoint, targetEndpointSelector)) {
                             continue;
                         }
 
@@ -1861,6 +1956,64 @@ public class ReactorHttpService extends Service {
         return endpoints;
     }
 
+    private String parseEndpointSelector(String rawSelector) {
+        String selector = String.valueOf(rawSelector).trim().toLowerCase(Locale.ROOT);
+        if (selector.isEmpty()) {
+            return null;
+        }
+
+        if (!selector.startsWith("id:")) {
+            return selector;
+        }
+
+        String endpointId = selector.substring(3).trim();
+        if (!isUuidV4(endpointId)) {
+            return null;
+        }
+
+        return "id:" + endpointId;
+    }
+
+    private String normalizeDirectNodeTarget(String rawNode, int fallbackPort) {
+        String node = String.valueOf(rawNode).trim().toLowerCase(Locale.ROOT);
+        if (node.isEmpty()) {
+            return null;
+        }
+
+        if (node.startsWith("http://") || node.startsWith("https://")) {
+            try {
+                URL parsed = new URL(node);
+                String host = String.valueOf(parsed.getHost()).trim().toLowerCase(Locale.ROOT);
+                int resolvedPort = parsed.getPort() > 0 ? parsed.getPort() : fallbackPort;
+                if (host.isEmpty() || resolvedPort < 1 || resolvedPort > 65535) {
+                    return null;
+                }
+                return host + ":" + resolvedPort;
+            } catch (Exception ignored) {
+                return null;
+            }
+        }
+
+        if (node.matches("^[^:]+:[0-9]{1,5}$")) {
+            String[] parts = node.split(":", 2);
+            try {
+                int port = Integer.parseInt(parts[1]);
+                if (parts[0].trim().isEmpty() || port < 1 || port > 65535) {
+                    return null;
+                }
+                return parts[0].trim() + ":" + port;
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+
+        if (node.contains(":")) {
+            return null;
+        }
+
+        return node + ":" + fallbackPort;
+    }
+
     private ParsedTarget parseTarget(String rawTarget) {
         String trimmed = String.valueOf(rawTarget).trim();
         if (trimmed.isEmpty()) {
@@ -1870,27 +2023,50 @@ public class ReactorHttpService extends Service {
         ParsedTarget parsed = new ParsedTarget();
         parsed.originalTarget = trimmed;
 
-        int slashIndex = trimmed.indexOf('/');
-        if (slashIndex < 0) {
-            parsed.baseTarget = trimmed;
-            parsed.nodeName = trimmed.toLowerCase(Locale.ROOT);
-            parsed.endpointId = null;
-        } else {
-            String baseTarget = trimmed.substring(0, slashIndex).trim();
-            String endpointId = trimmed.substring(slashIndex + 1).trim().toLowerCase(Locale.ROOT);
-            if (baseTarget.isEmpty() || !isUuidV4(endpointId)) {
+        int atIndex = trimmed.lastIndexOf('@');
+        if (atIndex < 0) {
+            String endpointSelector = parseEndpointSelector(trimmed);
+            if (endpointSelector == null) {
                 return null;
             }
-            parsed.baseTarget = baseTarget;
-            parsed.nodeName = baseTarget.toLowerCase(Locale.ROOT);
-            parsed.endpointId = endpointId;
+            parsed.baseTarget = "";
+            parsed.nodeName = null;
+            parsed.endpointSelector = endpointSelector;
+            parsed.endpointId = endpointSelector.startsWith("id:") ? endpointSelector.substring(3) : null;
+            parsed.directAddress = false;
+            return parsed;
         }
 
-        String loweredBase = String.valueOf(parsed.baseTarget).trim().toLowerCase(Locale.ROOT);
-        parsed.directAddress = loweredBase.matches("^[^:]+:[0-9]{1,5}$")
-                || loweredBase.matches("^\\d+\\.\\d+\\.\\d+\\.\\d+$")
-                || loweredBase.contains(".");
+        String endpointPart = trimmed.substring(0, atIndex).trim();
+        String nodePart = trimmed.substring(atIndex + 1).trim();
+        String endpointSelector = parseEndpointSelector(endpointPart);
+        if (endpointSelector == null || nodePart.isEmpty()) {
+            return null;
+        }
 
+        parsed.endpointSelector = endpointSelector;
+        parsed.endpointId = endpointSelector.startsWith("id:") ? endpointSelector.substring(3) : null;
+
+        if (nodePart.toLowerCase(Locale.ROOT).startsWith("net:")) {
+            String directTarget = normalizeDirectNodeTarget(nodePart.substring(4), currentPort > 0 ? currentPort : DEFAULT_PORT);
+            if (directTarget == null) {
+                return null;
+            }
+
+            parsed.baseTarget = directTarget;
+            parsed.nodeName = null;
+            parsed.directAddress = true;
+            return parsed;
+        }
+
+        String logicalNode = nodePart.toLowerCase(Locale.ROOT);
+        if (logicalNode.isEmpty()) {
+            return null;
+        }
+
+        parsed.baseTarget = logicalNode;
+        parsed.nodeName = logicalNode;
+        parsed.directAddress = false;
         return parsed;
     }
 
@@ -1933,13 +2109,17 @@ public class ReactorHttpService extends Service {
         Map<String, String> effectiveHeaders = streamEnvelope
                 ? withStreamHeaders(headers, streamPayload, primaryEvent)
                 : new HashMap<>(headers);
+        String targetEndpointSelector = effectiveHeaders.getOrDefault("reactor-target-endpoint", "").trim().toLowerCase(Locale.ROOT);
         String targetEndpointId = effectiveHeaders.getOrDefault("reactor-target-endpoint-id", "").trim().toLowerCase(Locale.ROOT);
+        if (targetEndpointSelector.isEmpty() && !targetEndpointId.isEmpty()) {
+            targetEndpointSelector = "id:" + targetEndpointId;
+        }
 
         for (MessageEndpoint endpoint : listeners) {
             if (!matchesEventSender(endpoint, senderCandidates, primaryEvent)) {
                 continue;
             }
-            if (!matchesTargetEndpoint(endpoint, targetEndpointId)) {
+            if (!matchesTargetEndpoint(endpoint, targetEndpointSelector)) {
                 continue;
             }
 
@@ -1953,12 +2133,16 @@ public class ReactorHttpService extends Service {
 
         if (streamEnvelope && "end".equals(streamPhase)) {
             Map<String, String> streamEndHeaders = withStreamHeaders(headers, streamPayload, "STREAMEND");
+            String streamEndTargetEndpointSelector = streamEndHeaders.getOrDefault("reactor-target-endpoint", "").trim().toLowerCase(Locale.ROOT);
             String streamEndTargetEndpointId = streamEndHeaders.getOrDefault("reactor-target-endpoint-id", "").trim().toLowerCase(Locale.ROOT);
+            if (streamEndTargetEndpointSelector.isEmpty() && !streamEndTargetEndpointId.isEmpty()) {
+                streamEndTargetEndpointSelector = "id:" + streamEndTargetEndpointId;
+            }
             for (MessageEndpoint endpoint : listeners) {
                 if (!matchesEventSender(endpoint, senderCandidates, "STREAMEND")) {
                     continue;
                 }
-                if (!matchesTargetEndpoint(endpoint, streamEndTargetEndpointId)) {
+                if (!matchesTargetEndpoint(endpoint, streamEndTargetEndpointSelector)) {
                     continue;
                 }
 
@@ -2470,10 +2654,65 @@ public class ReactorHttpService extends Service {
                 .matches();
     }
 
+    private boolean isLikelyNetworkIdentity(String value) {
+        String safe = String.valueOf(value).trim().toLowerCase(Locale.ROOT);
+        if (safe.isEmpty()) {
+            return false;
+        }
+
+        if (safe.contains(":")) {
+            return true;
+        }
+
+        return safe.matches("^\\d+\\.\\d+\\.\\d+\\.\\d+$") || safe.contains(".") || safe.endsWith(".local");
+    }
+
     private String normalizeMessageSender(String rawSender) {
         String sender = String.valueOf(rawSender).trim().toLowerCase(Locale.ROOT);
         if (sender.isEmpty()) {
             return null;
+        }
+
+        if (sender.startsWith("net:")) {
+            String networkSender = sender.substring(4).trim();
+            if (networkSender.isEmpty()) {
+                return null;
+            }
+
+            if (networkSender.startsWith("http://") || networkSender.startsWith("https://")) {
+                try {
+                    URL parsed = new URL(networkSender);
+                    String host = String.valueOf(parsed.getHost()).trim().toLowerCase(Locale.ROOT);
+                    int port = parsed.getPort() > 0 ? parsed.getPort() : DEFAULT_PORT;
+                    if (host.isEmpty() || port < 1 || port > 65535) {
+                        return null;
+                    }
+                    return parsed.getPort() > 0 ? "net:" + host + ":" + port : "net:" + host;
+                } catch (Exception ignored) {
+                    return null;
+                }
+            }
+
+            if (networkSender.matches("^[^:]+:[0-9]{1,5}$")) {
+                String[] parts = networkSender.split(":", 2);
+                int port;
+                try {
+                    port = Integer.parseInt(parts[1]);
+                } catch (NumberFormatException ignored) {
+                    return null;
+                }
+
+                if (parts[0].trim().isEmpty() || port < 1 || port > 65535) {
+                    return null;
+                }
+                return "net:" + parts[0].trim() + ":" + port;
+            }
+
+            if (networkSender.contains(":")) {
+                return null;
+            }
+
+            return "net:" + networkSender;
         }
 
         if (sender.startsWith("http://") || sender.startsWith("https://")) {
@@ -2521,14 +2760,30 @@ public class ReactorHttpService extends Service {
             candidates.add(normalizedName);
         }
 
-        String normalizedSender = normalizeMessageSender(senderId);
-        if (normalizedSender != null) {
-            candidates.add(normalizedSender);
+        String normalizedSenderId = String.valueOf(senderId).trim().toLowerCase(Locale.ROOT);
+        if (!normalizedSenderId.isEmpty()) {
+            if (isLikelyNetworkIdentity(normalizedSenderId)) {
+                String normalizedSender = normalizeMessageSender(normalizedSenderId);
+                if (normalizedSender != null) {
+                    candidates.add(normalizedSender);
+                    if (!normalizedSender.startsWith("net:")) {
+                        candidates.add("net:" + normalizedSender);
+                        String[] senderParts = normalizedSender.split(":", 2);
+                        if (senderParts.length > 0 && !senderParts[0].trim().isEmpty()) {
+                            candidates.add("net:" + senderParts[0].trim());
+                        }
+                    }
+                }
+            } else {
+                candidates.add(normalizedSenderId);
+            }
         }
 
         String normalizedRemoteHost = String.valueOf(remoteHost).trim().toLowerCase(Locale.ROOT);
         if (!normalizedRemoteHost.isEmpty()) {
             candidates.add(normalizedRemoteHost + ":" + DEFAULT_PORT);
+            candidates.add("net:" + normalizedRemoteHost + ":" + DEFAULT_PORT);
+            candidates.add("net:" + normalizedRemoteHost);
         }
 
         return candidates;
@@ -2586,13 +2841,18 @@ public class ReactorHttpService extends Service {
         return false;
     }
 
-    private boolean matchesTargetEndpoint(MessageEndpoint endpoint, String targetEndpointId) {
-        String safeTargetEndpointId = String.valueOf(targetEndpointId).trim().toLowerCase(Locale.ROOT);
-        if (safeTargetEndpointId.isEmpty()) {
+    private boolean matchesTargetEndpoint(MessageEndpoint endpoint, String targetEndpointSelector) {
+        String safeSelector = String.valueOf(targetEndpointSelector).trim().toLowerCase(Locale.ROOT);
+        if (safeSelector.isEmpty()) {
             return true;
         }
 
-        return safeTargetEndpointId.equals(String.valueOf(endpoint.endpointId).trim().toLowerCase(Locale.ROOT));
+        if (safeSelector.startsWith("id:")) {
+            String expectedId = safeSelector.substring(3).trim();
+            return expectedId.equals(String.valueOf(endpoint.endpointId).trim().toLowerCase(Locale.ROOT));
+        }
+
+        return safeSelector.equals(String.valueOf(endpoint.endpointName).trim().toLowerCase(Locale.ROOT));
     }
 
     private JSONObject tryParseJsonObject(String value) {
@@ -2641,6 +2901,13 @@ public class ReactorHttpService extends Service {
         String targetEndpointId = headers.getOrDefault("reactor-target-endpoint-id", "").trim().toLowerCase(Locale.ROOT);
         if (!targetEndpointId.isEmpty()) {
             headers.put("reactor-target-endpoint-id", targetEndpointId);
+        }
+        String targetEndpoint = headers.getOrDefault("reactor-target-endpoint", "").trim().toLowerCase(Locale.ROOT);
+        if (targetEndpoint.isEmpty() && !targetEndpointId.isEmpty()) {
+            targetEndpoint = "id:" + targetEndpointId;
+        }
+        if (!targetEndpoint.isEmpty()) {
+            headers.put("reactor-target-endpoint", targetEndpoint);
         }
 
         if (streamPayload.has("index")) {
@@ -2964,9 +3231,16 @@ public class ReactorHttpService extends Service {
         if (extraHeaders != null) {
             effectiveHeaders.putAll(extraHeaders);
         }
+        if (parsedTarget.endpointSelector != null && !parsedTarget.endpointSelector.isEmpty()) {
+            effectiveHeaders.put("Reactor-Target-Endpoint", parsedTarget.endpointSelector);
+        }
         if (parsedTarget.endpointId != null && !parsedTarget.endpointId.isEmpty()) {
-            effectiveHeaders.put("Reactor-Target-Node", String.valueOf(parsedTarget.baseTarget).trim().toLowerCase(Locale.ROOT));
             effectiveHeaders.put("Reactor-Target-Endpoint-Id", parsedTarget.endpointId);
+        }
+        if (parsedTarget.nodeName != null && !parsedTarget.nodeName.isEmpty()) {
+            effectiveHeaders.put("Reactor-Target-Node", parsedTarget.nodeName);
+        } else if (parsedTarget.directAddress) {
+            effectiveHeaders.put("Reactor-Target-Node", "net:" + String.valueOf(parsedTarget.baseTarget).trim().toLowerCase(Locale.ROOT));
         }
 
         String streamTarget = parsedTarget.directAddress ? parsedTarget.baseTarget : parsedTarget.originalTarget;
@@ -3155,7 +3429,7 @@ public class ReactorHttpService extends Service {
         }
 
         ParsedTarget parsedTarget = parseTarget(targetValue);
-        if (parsedTarget == null || parsedTarget.baseTarget == null || parsedTarget.baseTarget.trim().isEmpty()) {
+        if (parsedTarget == null) {
             throw new RuntimeException("invalid target");
         }
 
@@ -3163,9 +3437,31 @@ public class ReactorHttpService extends Service {
         if (extraHeaders != null) {
             effectiveHeaders.putAll(extraHeaders);
         }
+        if (parsedTarget.endpointSelector != null && !parsedTarget.endpointSelector.isEmpty()) {
+            effectiveHeaders.put("Reactor-Target-Endpoint", parsedTarget.endpointSelector);
+        }
         if (parsedTarget.endpointId != null && !parsedTarget.endpointId.isEmpty()) {
-            effectiveHeaders.put("Reactor-Target-Node", String.valueOf(parsedTarget.baseTarget).trim().toLowerCase(Locale.ROOT));
             effectiveHeaders.put("Reactor-Target-Endpoint-Id", parsedTarget.endpointId);
+        }
+
+        if (parsedTarget.nodeName == null && !parsedTarget.directAddress) {
+            String reactorName = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .getString(PREF_REACTOR_NAME, "mobile-reactor");
+            String safeNode = String.valueOf(reactorName == null ? "mobile-reactor" : reactorName).trim().toLowerCase(Locale.ROOT);
+            if (safeNode.isEmpty()) {
+                safeNode = "mobile-reactor";
+            }
+
+            effectiveHeaders.put("Reactor-Target-Node", safeNode);
+            String envelope = buildP2PEnvelope(String.valueOf(content), String.valueOf(contentType), effectiveHeaders);
+            handleIncomingP2PEnvelopeInternal(safeNode, envelope);
+            return SendDeliveryResult.success(targetValue, "LOCAL");
+        }
+
+        if (parsedTarget.nodeName != null && !parsedTarget.nodeName.isEmpty()) {
+            effectiveHeaders.put("Reactor-Target-Node", parsedTarget.nodeName);
+        } else if (parsedTarget.directAddress) {
+            effectiveHeaders.put("Reactor-Target-Node", "net:" + String.valueOf(parsedTarget.baseTarget).trim().toLowerCase(Locale.ROOT));
         }
 
         if (!parsedTarget.directAddress) {
@@ -3187,7 +3483,7 @@ public class ReactorHttpService extends Service {
             }
         }
 
-        List<String> normalizedTargets = buildTargetCandidates(targetValue);
+        List<String> normalizedTargets = buildTargetCandidates(String.valueOf(parsedTarget.baseTarget));
         if (normalizedTargets.isEmpty()) {
             throw new RuntimeException("invalid target");
         }
@@ -3207,17 +3503,12 @@ public class ReactorHttpService extends Service {
         }
 
         if (lastError != null) {
-            try {
-                sendExchangeMessageNow(targetValue.toLowerCase(Locale.ROOT), String.valueOf(content), String.valueOf(contentType));
-                return SendDeliveryResult.success(targetValue, "EXCHANGE");
-            } catch (Exception ignored) {
-                enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), String.valueOf(contentType), effectiveHeaders);
-                return SendDeliveryResult.queued(targetValue, "EXCHANGE", lastError.getMessage());
-            }
+            enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), String.valueOf(contentType), effectiveHeaders);
+            return SendDeliveryResult.queued(targetValue, "P2P_DIRECT", lastError.getMessage());
         }
 
         enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), String.valueOf(contentType), effectiveHeaders);
-        return SendDeliveryResult.queued(targetValue, "EXCHANGE", "no direct route found");
+        return SendDeliveryResult.queued(targetValue, "P2P_DIRECT", "no direct route found");
     }
 
     private SendDeliveryResult sendNodeMessage(String target, String content, Map<String, String> extraHeaders) {
@@ -3517,7 +3808,7 @@ public class ReactorHttpService extends Service {
             throw new RuntimeException("exchange client not connected");
         }
 
-        ParsedTarget parsedTarget = parseTarget(target);
+        ParsedTarget parsedTarget = parseExchangeTransportTarget(target);
         if (parsedTarget == null || parsedTarget.baseTarget == null || parsedTarget.baseTarget.trim().isEmpty()) {
             throw new RuntimeException("invalid exchange target");
         }
@@ -3526,6 +3817,9 @@ public class ReactorHttpService extends Service {
         try {
             packet.put("type", "message");
             packet.put("to", String.valueOf(parsedTarget.baseTarget).toLowerCase(Locale.ROOT));
+            if (parsedTarget.endpointSelector != null && !parsedTarget.endpointSelector.isEmpty()) {
+                packet.put("targetEndpoint", parsedTarget.endpointSelector);
+            }
             if (parsedTarget.endpointId != null && !parsedTarget.endpointId.isEmpty()) {
                 packet.put("targetEndpointId", parsedTarget.endpointId);
             }
@@ -3544,7 +3838,7 @@ public class ReactorHttpService extends Service {
             throw new RuntimeException("exchange client not connected");
         }
 
-        ParsedTarget parsedTarget = parseTarget(target);
+        ParsedTarget parsedTarget = parseExchangeTransportTarget(target);
         if (parsedTarget == null || parsedTarget.baseTarget == null || parsedTarget.baseTarget.trim().isEmpty()) {
             throw new RuntimeException("invalid exchange target");
         }
@@ -3561,6 +3855,9 @@ public class ReactorHttpService extends Service {
             packet.put("signalType", safeSignalType);
             packet.put("sessionId", String.valueOf(sessionId == null ? "" : sessionId).trim());
             packet.put("payload", payload != null ? new JSONObject(payload.toString()) : JSONObject.NULL);
+            if (parsedTarget.endpointSelector != null && !parsedTarget.endpointSelector.isEmpty()) {
+                packet.put("targetEndpoint", parsedTarget.endpointSelector);
+            }
             if (parsedTarget.endpointId != null && !parsedTarget.endpointId.isEmpty()) {
                 packet.put("targetEndpointId", parsedTarget.endpointId);
             }
@@ -3571,6 +3868,49 @@ public class ReactorHttpService extends Service {
         if (!wsExchangeClientSocket.send(packet.toString())) {
             throw new RuntimeException("exchange websocket send failed");
         }
+    }
+
+    private ParsedTarget parseExchangeTransportTarget(String rawTarget) {
+        String trimmed = String.valueOf(rawTarget == null ? "" : rawTarget).trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+
+        ParsedTarget parsed = new ParsedTarget();
+        parsed.originalTarget = trimmed;
+
+        int atIndex = trimmed.lastIndexOf('@');
+        if (atIndex < 0) {
+            // Internal P2P signaling uses plain peer node names (for example "r1").
+            String nodeName = trimmed.toLowerCase(Locale.ROOT);
+            if (nodeName.isEmpty()) {
+                return null;
+            }
+            parsed.baseTarget = nodeName;
+            parsed.nodeName = nodeName;
+            parsed.endpointSelector = null;
+            parsed.endpointId = null;
+            parsed.directAddress = false;
+            return parsed;
+        }
+
+        String endpointPart = trimmed.substring(0, atIndex).trim();
+        String nodePart = trimmed.substring(atIndex + 1).trim().toLowerCase(Locale.ROOT);
+        if (endpointPart.isEmpty() || nodePart.isEmpty()) {
+            return null;
+        }
+
+        String endpointSelector = parseEndpointSelector(endpointPart);
+        if (endpointSelector == null) {
+            return null;
+        }
+
+        parsed.baseTarget = nodePart;
+        parsed.nodeName = nodePart;
+        parsed.endpointSelector = endpointSelector;
+        parsed.endpointId = endpointSelector.startsWith("id:") ? endpointSelector.substring(3) : null;
+        parsed.directAddress = false;
+        return parsed;
     }
 
     // =========================================================================
@@ -3712,7 +4052,9 @@ public class ReactorHttpService extends Service {
                                 packet.optString("to", "").trim().toLowerCase(Locale.ROOT),
                                 clientName != null ? clientName : "unknown",
                                 packet.optString("content", ""),
-                                packet.optString("contentType", "text/plain"));
+                                packet.optString("contentType", "text/plain"),
+                                packet.optString("targetEndpoint", ""),
+                                packet.optString("targetEndpointId", ""));
                     } else if ("signal".equals(type)) {
                         routeExchangeSignal(packet, clientName != null ? clientName : "unknown");
                     } else if ("stream-chunk-bin".equals(type)) {
@@ -3775,7 +4117,7 @@ public class ReactorHttpService extends Service {
         return thread;
     }
 
-    private void routeExchangeMessage(String to, String from, String content, String contentType) {
+    private void routeExchangeMessage(String to, String from, String content, String contentType, String targetEndpoint, String targetEndpointId) {
         WsConnection target = wsExchangeClients.get(to);
         if (target == null) {
             appendGlobalLog(buildExchangeLog("ROUTE_MISS", "target not connected: " + to));
@@ -3785,6 +4127,8 @@ public class ReactorHttpService extends Service {
             JSONObject packet = new JSONObject();
             packet.put("type", "message");
             packet.put("from", from);
+            packet.put("targetEndpoint", String.valueOf(targetEndpoint == null ? "" : targetEndpoint).trim().toLowerCase(Locale.ROOT));
+            packet.put("targetEndpointId", String.valueOf(targetEndpointId == null ? "" : targetEndpointId).trim().toLowerCase(Locale.ROOT));
             packet.put("content", content);
             packet.put("contentType", contentType);
             target.send(packet.toString());
@@ -3822,6 +4166,7 @@ public class ReactorHttpService extends Service {
             outbound.put("sessionId", packet.optString("sessionId", ""));
             outbound.put("signalType", signalType);
             outbound.put("payload", packet.has("payload") ? packet.opt("payload") : JSONObject.NULL);
+            outbound.put("targetEndpoint", packet.optString("targetEndpoint", ""));
             outbound.put("targetEndpointId", packet.optString("targetEndpointId", ""));
             outbound.put("timestamp", Instant.now().toString());
             target.send(outbound.toString());
@@ -4455,31 +4800,44 @@ public class ReactorHttpService extends Service {
             String from = packet.optString("from", "unknown");
             String content = packet.optString("content", "");
             String contentType = packet.optString("contentType", "text/plain");
+            String targetEndpointSelector = packet.optString("targetEndpoint", "").trim().toLowerCase(Locale.ROOT);
+            String targetEndpointId = packet.optString("targetEndpointId", "").trim().toLowerCase(Locale.ROOT);
+            if (targetEndpointSelector.isEmpty() && !targetEndpointId.isEmpty()) {
+                targetEndpointSelector = "id:" + targetEndpointId;
+            }
 
             appendGlobalLog(buildExchangeLog("MESSAGE_RECEIVED", "message from " + from + " via exchange"));
 
             List<MessageEndpoint> listeners = collectMessageEndpoints();
-            Set<String> senderCandidates = new HashSet<>();
-            senderCandidates.add(from.toLowerCase(Locale.ROOT));
+            Set<String> senderCandidates = resolveSenderCandidates(from, from, "");
             JSONObject streamPayload = tryParseJsonObject(content);
             boolean streamEnvelope = isStreamEnvelope(streamPayload);
             String streamPhase = streamEnvelope
                     ? streamPayload.optString("phase", "").trim().toLowerCase(Locale.ROOT)
                     : "";
             String primaryEvent = streamEnvelope ? "STREAM" : "MESSAGE";
+                int deliveredCount = 0;
 
             Map<String, String> headers = new HashMap<>();
             headers.put("content-type", contentType);
             headers.put("x-exchange-from", from);
+            if (!targetEndpointSelector.isEmpty()) {
+                headers.put("reactor-target-endpoint", targetEndpointSelector);
+            }
+            if (!targetEndpointId.isEmpty()) {
+                headers.put("reactor-target-endpoint-id", targetEndpointId);
+            }
             Map<String, String> effectiveHeaders = streamEnvelope
                     ? withStreamHeaders(headers, streamPayload, primaryEvent)
                     : headers;
 
             for (MessageEndpoint endpoint : listeners) {
                 if (!matchesEventSender(endpoint, senderCandidates, primaryEvent)) continue;
+                if (!matchesTargetEndpoint(endpoint, targetEndpointSelector)) continue;
                 try {
                     writeExecutionStart(endpoint, primaryEvent, primaryEvent);
                     executeEndpointActions(endpoint, content, effectiveHeaders);
+                    deliveredCount += 1;
                 } catch (Exception e) {
                     writeExecutionError(endpoint, primaryEvent, primaryEvent, e.getMessage());
                 }
@@ -4489,6 +4847,7 @@ public class ReactorHttpService extends Service {
                 Map<String, String> streamEndHeaders = withStreamHeaders(headers, streamPayload, "STREAMEND");
                 for (MessageEndpoint endpoint : listeners) {
                     if (!matchesEventSender(endpoint, senderCandidates, "STREAMEND")) continue;
+                    if (!matchesTargetEndpoint(endpoint, targetEndpointSelector)) continue;
                     try {
                         writeExecutionStart(endpoint, "STREAMEND", "STREAMEND");
                         executeEndpointActions(endpoint, content, streamEndHeaders);
@@ -4496,6 +4855,18 @@ public class ReactorHttpService extends Service {
                         writeExecutionError(endpoint, "STREAMEND", "STREAMEND", e.getMessage());
                     }
                 }
+            }
+
+            if (deliveredCount == 0) {
+                String selectorValue = targetEndpointSelector.isEmpty() ? "*" : targetEndpointSelector;
+                appendGlobalLog(buildExchangeLog(
+                        "MESSAGE_IGNORED",
+                        "reason=no-matching-listener from=" + String.valueOf(from).trim().toLowerCase(Locale.ROOT)
+                                + " event=" + primaryEvent
+                                + " targetEndpoint=" + selectorValue
+                                + " senderCandidates=" + String.join(",", senderCandidates)
+                                + " listeners=" + listeners.size()
+                ));
             }
         } catch (Exception ignored) {}
     }

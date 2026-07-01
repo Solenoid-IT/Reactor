@@ -59,65 +59,158 @@ function isUuidV4(value) {
 	return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '').trim());
 }
 
-function parseLogicalNodeTarget(rawTarget) {
-	const trimmed = String(rawTarget || '').trim();
-	if (!trimmed || trimmed.includes('://')) {
+function isLikelyNetworkIdentity(value) {
+	const safe = String(value || '').trim().toLowerCase();
+	if (!safe) {
+		return false;
+	}
+
+	if (safe.includes(':')) {
+		return true;
+	}
+
+	if (/^\d+\.\d+\.\d+\.\d+$/.test(safe)) {
+		return true;
+	}
+
+	if (safe.includes('.') || safe.endsWith('.local')) {
+		return true;
+	}
+
+	return false;
+}
+
+function parseEndpointSelector(rawSelector) {
+	const trimmed = String(rawSelector || '').trim();
+	if (!trimmed) {
 		return null;
 	}
 
-	const slashIndex = trimmed.indexOf('/');
-	if (slashIndex === -1) {
-		if (trimmed.includes(':') || /^\d+\.\d+\.\d+\.\d+$/.test(trimmed) || trimmed.includes('.')) {
+	const lowered = trimmed.toLowerCase();
+	if (lowered.startsWith('id:')) {
+		const endpointId = lowered.slice(3).trim();
+		if (!isUuidV4(endpointId)) {
 			return null;
 		}
 
 		return {
-			nodeName: trimmed.toLowerCase(),
-			endpointId: null,
-			rawTarget: trimmed,
+			type: 'id',
+			value: endpointId,
+			headerValue: `id:${endpointId}`,
 		};
 	}
 
-	const nodeName = trimmed.slice(0, slashIndex).trim().toLowerCase();
-	const endpointId = trimmed.slice(slashIndex + 1).trim().toLowerCase();
-	if (!nodeName || !endpointId || !isUuidV4(endpointId)) {
-		return null;
-	}
-
-	if (nodeName.includes(':') || /^\d+\.\d+\.\d+\.\d+$/.test(nodeName) || nodeName.includes('.')) {
-		return null;
-	}
-
 	return {
-		nodeName,
-		endpointId,
-		rawTarget: trimmed,
+		type: 'name',
+		value: lowered,
+		headerValue: lowered,
 	};
 }
 
-function parseEndpointScopedTarget(rawTarget) {
-	const trimmed = String(rawTarget || '').trim();
-	if (!trimmed || trimmed.includes('://')) {
+function parseNetNodeTarget(rawNode, defaultPort = 7070) {
+	const safeNode = String(rawNode || '').trim().toLowerCase();
+	if (!safeNode) {
 		return null;
 	}
 
-	const slashIndex = trimmed.indexOf('/');
-	if (slashIndex === -1) {
+	if (/^https?:\/\//i.test(safeNode)) {
+		try {
+			const parsed = new URL(safeNode);
+			const host = String(parsed.hostname || '').trim().toLowerCase();
+			const resolvedPort = parsed.port ? Number(parsed.port) : defaultPort;
+			if (!host || !Number.isInteger(resolvedPort) || resolvedPort < 1 || resolvedPort > 65535) {
+				return null;
+			}
+
+			return {
+				host,
+				port: resolvedPort,
+				hostPort: `${host}:${resolvedPort}`,
+			};
+		} catch {
+			return null;
+		}
+	}
+
+	const hostPort = normalizeHostPort(safeNode, defaultPort);
+	if (!hostPort) {
 		return null;
 	}
 
-	const baseTarget = trimmed.slice(0, slashIndex).trim();
-	const endpointId = trimmed.slice(slashIndex + 1).trim().toLowerCase();
-	if (!baseTarget || !isUuidV4(endpointId)) {
+	const [host, portString] = hostPort.split(':');
+	const port = Number(portString || defaultPort);
+	if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
 		return null;
 	}
 
-	const isDirectAddress = baseTarget.includes(':') || /^\d+\.\d+\.\d+\.\d+$/.test(baseTarget) || baseTarget.includes('.');
 	return {
-		baseTarget,
-		endpointId,
-		isDirectAddress,
+		host,
+		port,
+		hostPort,
+	};
+}
+
+function parseNodeDispatchTarget(rawTarget, defaultDirectPort = 7070) {
+	const trimmed = String(rawTarget || '').trim();
+	if (!trimmed) {
+		return null;
+	}
+
+	const atIndex = trimmed.lastIndexOf('@');
+	if (atIndex === -1) {
+		const endpointSelector = parseEndpointSelector(trimmed);
+		if (!endpointSelector) {
+			return null;
+		}
+
+		return {
+			rawTarget: trimmed,
+			endpointSelector,
+			routeKind: 'local',
+			nodeName: null,
+			directAddress: null,
+		};
+	}
+
+	const endpointRaw = trimmed.slice(0, atIndex).trim();
+	const nodeRaw = trimmed.slice(atIndex + 1).trim();
+	if (!endpointRaw || !nodeRaw) {
+		return null;
+	}
+
+	const endpointSelector = parseEndpointSelector(endpointRaw);
+	if (!endpointSelector) {
+		return null;
+	}
+
+	if (nodeRaw.toLowerCase().startsWith('net:')) {
+		const parsedNet = parseNetNodeTarget(nodeRaw.slice(4), defaultDirectPort);
+		if (!parsedNet) {
+			return null;
+		}
+
+		return {
+			rawTarget: trimmed,
+			endpointSelector,
+			routeKind: 'direct',
+			nodeName: null,
+			directAddress: parsedNet.hostPort,
+			nodeSelector: `net:${parsedNet.hostPort}`,
+		};
+	}
+
+	const nodeName = String(nodeRaw || '').trim().toLowerCase();
+	if (!nodeName) {
+		return null;
+	}
+
+	return {
 		rawTarget: trimmed,
+		endpointSelector,
+		routeKind: 'logical',
+		nodeName,
+		directAddress: null,
+		nodeSelector: nodeName,
 	};
 }
 
@@ -1150,6 +1243,27 @@ class ReactorRuntime {
 
 	cleanupExpiredP2PSessions(nowMs = Date.now()) {
 		for (const [key, session] of this.p2pSessions.entries()) {
+			const transportSession = this.p2pTransportManager && this.p2pTransportManager.getSession
+				? this.p2pTransportManager.getSession(key)
+				: null;
+			const transportOpen = Boolean(
+				transportSession
+				&& transportSession.dataChannel
+				&& transportSession.dataChannel.readyState === 'open'
+				&& transportSession.isOpen,
+			);
+
+			if (transportOpen) {
+				this.upsertP2PSession(key, {
+					sessionId: String(transportSession.sessionId || session?.sessionId || '').trim() || undefined,
+					state: 'connected-p2p',
+					lastSignalType: 'connected',
+					usingRelay: false,
+					reason: '',
+				});
+				continue;
+			}
+
 			const lastUpdateMs = Number(session?.lastUpdateMs || 0);
 			if (!lastUpdateMs || nowMs - lastUpdateMs > this.p2pSessionTimeoutMs) {
 				this.p2pSessions.delete(key);
@@ -2117,31 +2231,54 @@ class ReactorRuntime {
 		return listeners;
 	}
 
-	filterMessageListenersByTarget(listeners, targetEndpointId = null) {
-		if (!targetEndpointId) {
-			return Array.isArray(listeners) ? listeners : [];
+	matchesEndpointTarget(endpoint, targetEndpointSelector = null) {
+		if (!targetEndpointSelector) {
+			return true;
 		}
 
-		return (Array.isArray(listeners) ? listeners : [])
-			.filter((endpoint) => String(endpoint?.endpointId || '').trim().toLowerCase() === targetEndpointId);
+		if (!endpoint || typeof endpoint !== 'object') {
+			return false;
+		}
+
+		const selectorType = String(targetEndpointSelector.type || '').trim().toLowerCase();
+		if (selectorType === 'id') {
+			const endpointId = String(endpoint.endpointId || '').trim().toLowerCase();
+			return Boolean(endpointId) && endpointId === String(targetEndpointSelector.value || '').trim().toLowerCase();
+		}
+
+		if (selectorType === 'name') {
+			const endpointName = String(endpoint.name || '').trim().toLowerCase();
+			return Boolean(endpointName) && endpointName === String(targetEndpointSelector.value || '').trim().toLowerCase();
+		}
+
+		return false;
 	}
 
-	filterStreamListenersByTarget(listeners, targetEndpointId = null) {
-		if (!targetEndpointId) {
+	filterMessageListenersByTarget(listeners, targetEndpointSelector = null) {
+		if (!targetEndpointSelector) {
 			return Array.isArray(listeners) ? listeners : [];
 		}
 
 		return (Array.isArray(listeners) ? listeners : [])
-			.filter((endpoint) => String(endpoint?.endpointId || '').trim().toLowerCase() === targetEndpointId);
+			.filter((endpoint) => this.matchesEndpointTarget(endpoint, targetEndpointSelector));
 	}
 
-	filterStreamEndListenersByTarget(listeners, targetEndpointId = null) {
-		if (!targetEndpointId) {
+	filterStreamListenersByTarget(listeners, targetEndpointSelector = null) {
+		if (!targetEndpointSelector) {
 			return Array.isArray(listeners) ? listeners : [];
 		}
 
 		return (Array.isArray(listeners) ? listeners : [])
-			.filter((endpoint) => String(endpoint?.endpointId || '').trim().toLowerCase() === targetEndpointId);
+			.filter((endpoint) => this.matchesEndpointTarget(endpoint, targetEndpointSelector));
+	}
+
+	filterStreamEndListenersByTarget(listeners, targetEndpointSelector = null) {
+		if (!targetEndpointSelector) {
+			return Array.isArray(listeners) ? listeners : [];
+		}
+
+		return (Array.isArray(listeners) ? listeners : [])
+			.filter((endpoint) => this.matchesEndpointTarget(endpoint, targetEndpointSelector));
 	}
 
 	registerEndpointStreamListeners(endpoint) {
@@ -2388,7 +2525,7 @@ class ReactorRuntime {
 		const messageTarget = this.resolveMessageTarget(messageHeaders || {});
 		const listeners = this.filterStreamEndListenersByTarget(
 			this.findStreamEndListeners(senderMeta?.candidates || streamEndData.senderCandidates || []),
-			messageTarget.endpointId,
+			messageTarget.endpointSelector,
 		);
 		if (listeners.length === 0) {
 			return [];
@@ -2405,6 +2542,7 @@ class ReactorRuntime {
 					messageTarget: messageTarget.nodeName || null,
 					messageTargetNode: messageTarget.nodeName || null,
 					messageTargetEndpointId: messageTarget.endpointId || null,
+					messageTargetEndpoint: messageTarget.endpointSelector ? messageTarget.endpointSelector.headerValue : null,
 					messageHeaders,
 					stream: null,
 					streamEnd: streamEndInfo,
@@ -2441,19 +2579,43 @@ class ReactorRuntime {
 		const rawName = String(headers['reactor-name'] || '').trim();
 		const rawSender = String(headers['reactor-sender'] || '').trim();
 		const remoteHost = extractRemoteHost(req.socket && req.socket.remoteAddress);
-		const candidates = new Set();
+		return this.resolveSenderCandidatesFromValues(rawName, rawSender, remoteHost);
+	}
 
-		const normalizedSender = normalizeHostPort(rawSender, 7070);
-		if (normalizedSender) {
-			candidates.add(normalizedSender);
-		}
+	resolveSenderCandidatesFromValues(rawNameValue, rawSenderValue, remoteHostValue) {
+		const rawName = String(rawNameValue || '').trim();
+		const rawSender = String(rawSenderValue || '').trim();
+		const remoteHost = extractRemoteHost(remoteHostValue);
+		const candidates = new Set();
 
 		if (rawName) {
 			candidates.add(rawName.toLowerCase());
 		}
 
+		if (rawSender) {
+			const loweredSender = rawSender.toLowerCase();
+			if (isLikelyNetworkIdentity(loweredSender)) {
+				const normalizedSender = normalizeHostPort(loweredSender, 7070);
+				if (normalizedSender) {
+					const [senderHost] = normalizedSender.split(':');
+					candidates.add(normalizedSender);
+					candidates.add(`net:${normalizedSender}`);
+					if (senderHost) {
+						candidates.add(`net:${senderHost}`);
+					}
+				}
+			} else {
+				candidates.add(loweredSender);
+			}
+		}
+
 		if (remoteHost) {
-			candidates.add(normalizeHostPort(remoteHost, 7070));
+			const normalizedRemote = normalizeHostPort(remoteHost, 7070);
+			if (normalizedRemote) {
+				candidates.add(normalizedRemote);
+				candidates.add(`net:${normalizedRemote}`);
+			}
+			candidates.add(`net:${remoteHost}`);
 		}
 
 		return {
@@ -2466,11 +2628,21 @@ class ReactorRuntime {
 
 	resolveMessageTarget(headers = {}) {
 		const rawNode = String(headers['reactor-target-node'] || '').trim().toLowerCase();
+		const rawEndpoint = String(headers['reactor-target-endpoint'] || '').trim();
 		const rawEndpointId = String(headers['reactor-target-endpoint-id'] || '').trim().toLowerCase();
+		const endpointSelector = parseEndpointSelector(rawEndpoint) || (isUuidV4(rawEndpointId)
+			? {
+				type: 'id',
+				value: rawEndpointId,
+				headerValue: `id:${rawEndpointId}`,
+			}
+			: null);
 
 		return {
 			nodeName: rawNode || null,
-			endpointId: isUuidV4(rawEndpointId) ? rawEndpointId : null,
+			endpointSelector,
+			endpointId: endpointSelector && endpointSelector.type === 'id' ? endpointSelector.value : null,
+			endpointName: endpointSelector && endpointSelector.type === 'name' ? endpointSelector.value : null,
 		};
 	}
 
@@ -2628,8 +2800,8 @@ class ReactorRuntime {
 		const messageTarget = this.resolveMessageTarget(messageHeaders || {});
 		const isStreamEnvelope = Boolean(body.json && typeof body.json === 'object' && body.json.__reactorStream === true);
 		const listeners = isStreamEnvelope
-			? this.filterStreamListenersByTarget(this.findStreamListeners(senderMeta.candidates), messageTarget.endpointId)
-			: this.filterMessageListenersByTarget(this.findMessageListeners(senderMeta.candidates), messageTarget.endpointId);
+			? this.filterStreamListenersByTarget(this.findStreamListeners(senderMeta.candidates), messageTarget.endpointSelector)
+			: this.filterMessageListenersByTarget(this.findMessageListeners(senderMeta.candidates), messageTarget.endpointSelector);
 
 		const streamPacket = isStreamEnvelope ? this.createIncomingStreamPacket(body.json) : null;
 		const streamEndData = isStreamEnvelope ? await this.processIncomingStreamPacket(streamPacket, senderMeta) : null;
@@ -2659,6 +2831,7 @@ class ReactorRuntime {
 					messageTarget: messageTarget.nodeName || null,
 					messageTargetNode: messageTarget.nodeName || null,
 					messageTargetEndpointId: messageTarget.endpointId || null,
+					messageTargetEndpoint: messageTarget.endpointSelector ? messageTarget.endpointSelector.headerValue : null,
 					messageContent: body.text,
 					messageContentType: body.contentType,
 					messageBodyBase64: body.base64,
@@ -2856,63 +3029,73 @@ class ReactorRuntime {
 	async sendNodeMessage(target, content, extraHeaders = {}, dispatchOptions = {}) {
 		const targetId = String(target || '').trim();
 		if (!targetId) {
-			throw new Error('invalid target. expected host or host:port');
+			throw new Error('invalid target. expected {endpoint}@{node} or endpoint');
 		}
 
 		const shouldEnqueueOnFail = dispatchOptions && dispatchOptions.noEnqueue
 			? false
 			: Boolean(dispatchOptions && dispatchOptions.enqueueOnFail);
-
-		const endpointScopedTarget = parseEndpointScopedTarget(targetId);
-		if (endpointScopedTarget && !endpointScopedTarget.isDirectAddress) {
-			const scopedHeaders = {
-				...(extraHeaders || {}),
-				'Reactor-Target-Node': String(endpointScopedTarget.baseTarget || '').trim().toLowerCase(),
-				'Reactor-Target-Endpoint-Id': endpointScopedTarget.endpointId,
-			};
-
-			if (this.hasConnectedP2PRoute(endpointScopedTarget.baseTarget)) {
-				try {
-					return await this.sendP2PMessage(endpointScopedTarget.baseTarget, content, scopedHeaders);
-				} catch (p2pError) {
-					this.log(`[P2P] fallback to exchange for ${endpointScopedTarget.baseTarget}: ${p2pError.message}`);
-				}
-			}
-
-			return this.sendExchangeMessage(targetId, content, {
-				...dispatchOptions,
-				enqueueOnFail: shouldEnqueueOnFail,
-			});
+		const parsedTarget = parseNodeDispatchTarget(targetId, this.httpServerPort);
+		if (!parsedTarget) {
+			throw new Error('invalid target. expected {endpoint}@{node} or endpoint');
 		}
 
-		const effectiveTarget = endpointScopedTarget && endpointScopedTarget.isDirectAddress
-			? endpointScopedTarget.baseTarget
-			: targetId;
-		const effectiveHeaders = {
+		const endpointHeaders = {
 			...(extraHeaders || {}),
-			...(endpointScopedTarget && endpointScopedTarget.isDirectAddress
-				? {
-					'Reactor-Target-Node': String(endpointScopedTarget.baseTarget || '').trim().toLowerCase(),
-					'Reactor-Target-Endpoint-Id': endpointScopedTarget.endpointId,
-				}
+			'Reactor-Target-Endpoint': parsedTarget.endpointSelector.headerValue,
+			...(parsedTarget.endpointSelector.type === 'id'
+				? { 'Reactor-Target-Endpoint-Id': parsedTarget.endpointSelector.value }
 				: {}),
 		};
 
-		const logicalTarget = parseLogicalNodeTarget(targetId);
-		if (logicalTarget) {
-			if (this.hasConnectedP2PRoute(logicalTarget.nodeName)) {
+		if (parsedTarget.routeKind === 'local') {
+			const reactorName = String(await this.getReactorName() || '').trim().toLowerCase();
+			const senderHost = pickPrimaryLocalHost();
+			const senderId = `${senderHost}:${this.httpServerPort}`;
+			const localHeaders = {
+				...endpointHeaders,
+				'Reactor-Name': reactorName,
+				'Reactor-Sender': senderId,
+				'Reactor-Target-Node': reactorName,
+			};
+
+			const parsedBody = this.parseIncomingP2PEnvelope(this.buildP2PEnvelope(content, localHeaders));
+			const senderMeta = this.resolveSenderCandidatesFromValues(reactorName, senderId, senderHost);
+			const dispatch = await this.dispatchIncomingMessageEnvelope(parsedBody, senderMeta, localHeaders);
+
+			return {
+				target: targetId,
+				via: 'local',
+				deliveredVia: 'LOCAL',
+				...dispatch,
+			};
+		}
+
+		if (parsedTarget.routeKind === 'logical') {
+			const logicalHeaders = {
+				...endpointHeaders,
+				'Reactor-Target-Node': parsedTarget.nodeName,
+			};
+
+			if (this.hasConnectedP2PRoute(parsedTarget.nodeName)) {
 				try {
-					return await this.sendP2PMessage(logicalTarget.nodeName, content, extraHeaders || {});
+					return await this.sendP2PMessage(parsedTarget.nodeName, content, logicalHeaders);
 				} catch (p2pError) {
-					this.log(`[P2P] fallback to exchange for ${logicalTarget.nodeName}: ${p2pError.message}`);
+					this.log(`[P2P] fallback to exchange for ${parsedTarget.nodeName}: ${p2pError.message}`);
 				}
 			}
 
-			return this.sendExchangeMessage(targetId, content, {
+			return this.sendExchangeMessage(`${parsedTarget.endpointSelector.headerValue}@${parsedTarget.nodeName}`, content, {
 				...dispatchOptions,
 				enqueueOnFail: shouldEnqueueOnFail,
 			});
 		}
+
+		const effectiveTarget = parsedTarget.directAddress;
+		const effectiveHeaders = {
+			...endpointHeaders,
+			'Reactor-Target-Node': parsedTarget.nodeSelector || `net:${parsedTarget.directAddress}`,
+		};
 
 		let hasExplicitPort = false;
 		if (/^https?:\/\//i.test(effectiveTarget)) {
@@ -2935,7 +3118,7 @@ class ReactorRuntime {
 			: preferredPorts.map((port) => normalizeHostPort(effectiveTarget, port)).filter(Boolean);
 
 		if (normalizedTargets.length === 0) {
-			throw new Error('invalid target. expected host or host:port');
+			throw new Error('invalid target. expected {endpoint}@net:host:port');
 		}
 
 		let payload = content;
@@ -3098,7 +3281,7 @@ class ReactorRuntime {
 		const deliveredViaSeen = new Set();
 		const trackDeliveredVia = (result) => {
 			const safe = String(result?.deliveredVia || '').trim().toUpperCase();
-			if (safe === 'P2P_DIRECT' || safe === 'P2P_RELAY' || safe === 'EXCHANGE') {
+			if (safe === 'LOCAL' || safe === 'P2P_DIRECT' || safe === 'P2P_RELAY' || safe === 'EXCHANGE') {
 				deliveredViaSeen.add(safe);
 			}
 		};
@@ -3152,6 +3335,8 @@ class ReactorRuntime {
 			deliveredVia = 'P2P_RELAY';
 		} else if (deliveredViaSeen.has('P2P_DIRECT')) {
 			deliveredVia = 'P2P_DIRECT';
+		} else if (deliveredViaSeen.has('LOCAL')) {
+			deliveredVia = 'LOCAL';
 		}
 
 		return {

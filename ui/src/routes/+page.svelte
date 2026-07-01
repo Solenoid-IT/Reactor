@@ -1,5 +1,5 @@
 <script>
-	import { onMount, tick } from 'svelte';
+	import { onDestroy, onMount, tick } from 'svelte';
 	import HeaderActions from '$lib/components/HeaderActions.svelte';
 	import EndpointList from '$lib/components/EndpointList.svelte';
 	import DetailPane from '$lib/components/DetailPane.svelte';
@@ -93,6 +93,8 @@
 	let networkRequestInFlight = '';
 	let networkRequestError = '';
 	let networkRuntimeStartedAt = '';
+	let networkCopiedKey = '';
+	let networkCopiedTimer = null;
 	let tlsEnabled = false;
 	let tlsSubject = '';
 	let tlsNotAfter = '';
@@ -240,11 +242,17 @@
 
 	$: exchangeIndicator = (() => {
 		const state = String(exchangeStatus?.state || '').trim().toLowerCase();
+		const connectedAtRaw = String(exchangeStatus?.connectedAt || '').trim();
+		const connectedAtMs = connectedAtRaw ? Date.parse(connectedAtRaw) : NaN;
+		const connectedAtUtc = Number.isFinite(connectedAtMs)
+			? new Date(connectedAtMs).toISOString()
+			: connectedAtRaw;
+		const connectedSinceTitle = connectedAtUtc ? ` | Connected since (UTC): ${connectedAtUtc}` : '';
 		if (state === 'connected' || state === 'active') {
 			return {
 				level: 'green',
 				label: 'EXCHANGE active',
-				title: exchangeStatus?.mode === 'exchange' ? 'EXCHANGE server active' : 'Connected to EXCHANGE',
+				title: `${exchangeStatus?.mode === 'exchange' ? 'EXCHANGE server active' : 'Connected to EXCHANGE'}${connectedSinceTitle}`,
 			};
 		}
 
@@ -576,6 +584,80 @@
 		networkViewOpen = false;
 		networkRequestInFlight = '';
 		networkRequestError = '';
+	}
+
+	function showNetworkCopyFeedback(copyKey) {
+		networkCopiedKey = String(copyKey || '').trim();
+		if (networkCopiedTimer) {
+			clearTimeout(networkCopiedTimer);
+		}
+
+		networkCopiedTimer = setTimeout(() => {
+			networkCopiedKey = '';
+			networkCopiedTimer = null;
+		}, 1500);
+	}
+
+	function networkCopyKeyFor(endpoint, field) {
+		const safeField = String(field || '').trim().toLowerCase();
+		const safeNode = String(networkSelectedNode || '').trim().toLowerCase();
+		const safeUuid = String(endpoint?.uuid || '').trim().toLowerCase();
+		const safeName = String(endpoint?.name || '').trim().toLowerCase();
+		return `${safeNode}:${safeField}:${safeUuid || safeName}`;
+	}
+
+	function isNetworkEndpointCopied(endpoint, field) {
+		return networkCopiedKey === networkCopyKeyFor(endpoint, field);
+	}
+
+	async function copyTextWithFallback(text, promptTitle) {
+		const safeText = String(text || '').trim();
+		if (!safeText) {
+			return 'none';
+		}
+
+		try {
+			if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+				await navigator.clipboard.writeText(safeText);
+				return 'clipboard';
+			}
+		} catch {
+			// Fallback below.
+		}
+
+		try {
+			const nativeCopyResult = await copyTextToClipboard(safeText);
+			if (nativeCopyResult?.ok) {
+				return 'native';
+			}
+		} catch {
+			// Fallback below.
+		}
+
+		if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
+			window.prompt(promptTitle || 'Copy text', safeText);
+			return 'prompt';
+		}
+
+		return 'none';
+	}
+
+	async function copyNetworkEndpointField(endpoint, field) {
+		const safeField = String(field || '').trim().toLowerCase();
+		const value = safeField === 'name' ? String(endpoint?.name || '').trim() : String(endpoint?.uuid || '').trim();
+		if (!value) {
+			status = `Error: endpoint ${safeField || 'value'} unavailable`;
+			return;
+		}
+
+		const result = await copyTextWithFallback(value, `Copy endpoint ${safeField || 'value'}`);
+		if (result === 'none') {
+			status = `Endpoint ${safeField || 'value'}: ${value}`;
+			return;
+		}
+
+		showNetworkCopyFeedback(networkCopyKeyFor(endpoint, safeField));
+		status = `Copied endpoint ${safeField || 'value'}: ${value}`;
 	}
 
 	async function requestNetworkNodeEndpoints(nodeName, silent = false) {
@@ -1216,30 +1298,20 @@
 			return;
 		}
 
-		try {
-			if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-				await navigator.clipboard.writeText(endpointId);
-				status = `Copied ID: ${endpoint.name}`;
-				return;
-			}
-		} catch {
-			// Fallback below.
-		}
-
-		const nativeCopyResult = await copyTextToClipboard(endpointId);
-		if (nativeCopyResult?.ok) {
-			status = `Copied ID: ${endpoint.name}`;
+		const copyResult = await copyTextWithFallback(endpointId, `Copy endpoint ID for ${endpoint.name}`);
+		if (copyResult === 'none') {
+			status = `Endpoint ID: ${endpointId}`;
 			return;
 		}
 
-		if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
-			window.prompt(`Copy endpoint ID for ${endpoint.name}`, endpointId);
-			status = `Endpoint ID ready to copy: ${endpoint.name}`;
-			return;
-		}
-
-		status = `Endpoint ID: ${endpointId}`;
+		status = `Copied ID: ${endpoint.name}`;
 	}
+
+	onDestroy(() => {
+		if (networkCopiedTimer) {
+			clearTimeout(networkCopiedTimer);
+		}
+	});
 
 	async function stopBackgroundProcessHandler() {
 		status = 'Stopping background process...';
@@ -1570,9 +1642,50 @@
 						<div class="network-endpoint-list">
 							{#each selectedNetworkEndpoints as endpoint}
 								<div class="network-endpoint-item">
-									<div class="network-endpoint-name">{endpoint.name || 'unnamed endpoint'}</div>
-									<div class="network-endpoint-meta">UUID: {endpoint.uuid || '-'}</div>
-									<div class="network-endpoint-meta">Triggers: {Array.isArray(endpoint.triggers) && endpoint.triggers.length > 0 ? endpoint.triggers.join(', ') : '-'}</div>
+									<button
+										type="button"
+										class="network-endpoint-copy network-endpoint-name"
+										title="Copy endpoint name"
+										on:click={() => copyNetworkEndpointField(endpoint, 'name')}
+									>
+										<span class="network-copy-icon" aria-hidden="true"><i class="fa-solid fa-copy"></i></span>
+										<span>{endpoint.name || 'unnamed endpoint'}</span>
+										{#if isNetworkEndpointCopied(endpoint, 'name')}
+											<span class="network-copy-badge">Copied</span>
+										{/if}
+									</button>
+									<div class="network-endpoint-meta">
+										UUID:
+										{#if endpoint.uuid}
+											<button
+												type="button"
+												class="network-endpoint-copy network-endpoint-inline"
+												title="Copy endpoint UUID"
+												on:click={() => copyNetworkEndpointField(endpoint, 'uuid')}
+											>
+												<span class="network-copy-icon" aria-hidden="true"><i class="fa-solid fa-copy"></i></span>
+												<span>{endpoint.uuid}</span>
+												{#if isNetworkEndpointCopied(endpoint, 'uuid')}
+													<span class="network-copy-badge">Copied</span>
+												{/if}
+											</button>
+										{:else}
+											<span>-</span>
+										{/if}
+									</div>
+									<details class="network-triggers-accordion">
+										<summary>
+											Triggers
+											{#if Array.isArray(endpoint.triggers) && endpoint.triggers.length > 0}
+												<span class="network-triggers-count">({endpoint.triggers.length})</span>
+											{/if}
+										</summary>
+										{#if Array.isArray(endpoint.triggers) && endpoint.triggers.length > 0}
+											<div class="network-triggers-list">{endpoint.triggers.join(', ')}</div>
+										{:else}
+											<div class="network-triggers-list">-</div>
+										{/if}
+									</details>
 									<div class="network-endpoint-meta">Enabled: {endpoint.enabled ? 'yes' : 'no'} · Mutex: {endpoint.mutex ? 'yes' : 'no'}</div>
 								</div>
 							{/each}
@@ -1911,6 +2024,107 @@
 	.network-endpoint-name {
 		font-weight: 600;
 		font-size: 0.83rem;
+	}
+
+	.network-endpoint-copy {
+		appearance: none;
+		border: 0;
+		background: transparent;
+		padding: 0;
+		margin: 0;
+		color: inherit;
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.network-endpoint-copy:hover {
+		opacity: 1;
+		text-decoration: underline;
+	}
+
+	.network-endpoint-copy:focus-visible {
+		outline: 2px solid rgba(120, 198, 255, 0.65);
+		outline-offset: 2px;
+		border-radius: 6px;
+	}
+
+	.network-endpoint-inline {
+		font-size: 0.74rem;
+		opacity: 0.9;
+		word-break: break-all;
+		vertical-align: middle;
+	}
+
+	.network-copy-icon {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 0.7rem;
+		opacity: 0.78;
+		min-width: 0.9rem;
+	}
+
+	.network-copy-badge {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 0.62rem;
+		line-height: 1;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		padding: 3px 6px;
+		border-radius: 999px;
+		background: rgba(96, 230, 154, 0.16);
+		border: 1px solid rgba(96, 230, 154, 0.5);
+		color: rgba(169, 247, 205, 0.96);
+	}
+
+	.network-triggers-accordion {
+		margin-top: 4px;
+	}
+
+	.network-triggers-accordion > summary {
+		list-style: none;
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 0.74rem;
+		opacity: 0.86;
+		cursor: pointer;
+		user-select: none;
+	}
+
+	.network-triggers-accordion > summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.network-triggers-accordion > summary::before {
+		content: '\25B8';
+		display: inline-block;
+		font-size: 0.68rem;
+		opacity: 0.9;
+		transform: translateY(-1px);
+	}
+
+	.network-triggers-accordion[open] > summary::before {
+		content: '\25BE';
+	}
+
+	.network-triggers-count {
+		font-size: 0.68rem;
+		opacity: 0.78;
+	}
+
+	.network-triggers-list {
+		margin-top: 5px;
+		padding-left: 16px;
+		font-size: 0.72rem;
+		opacity: 0.82;
+		word-break: break-word;
 	}
 
 	.network-endpoint-meta {

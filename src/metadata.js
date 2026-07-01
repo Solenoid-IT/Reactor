@@ -343,6 +343,44 @@ function normalizeMessageSender(rawSender, defaultPort = 7070) {
 	}
 
 	const lower = sender.toLowerCase();
+	if (lower.startsWith('net:')) {
+		const networkRaw = lower.slice(4).trim();
+		if (!networkRaw) {
+			return null;
+		}
+
+		if (/^https?:\/\//i.test(networkRaw)) {
+			try {
+				const parsed = new URL(networkRaw);
+				const host = String(parsed.hostname || '').toLowerCase();
+				const hasExplicitPort = Boolean(parsed.port);
+				const port = hasExplicitPort ? Number(parsed.port) : defaultPort;
+				if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+					return null;
+				}
+				return hasExplicitPort ? `net:${host}:${port}` : `net:${host}`;
+			} catch {
+				return null;
+			}
+		}
+
+		const hostPortMatch = networkRaw.match(/^([^:]+):(\d{1,5})$/);
+		if (hostPortMatch) {
+			const host = hostPortMatch[1].trim();
+			const port = Number(hostPortMatch[2]);
+			if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+				return null;
+			}
+			return `net:${host}:${port}`;
+		}
+
+		if (networkRaw.includes(':')) {
+			return null;
+		}
+
+		return `net:${networkRaw}`;
+	}
+
 	if (!isLikelyHostSender(lower)) {
 		return lower;
 	}

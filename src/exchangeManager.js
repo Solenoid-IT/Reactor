@@ -9,30 +9,59 @@ const DEFAULT_UNDELIVERED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_UNDELIVERED_RETRY_MS = 30 * 1000;
 const DEFAULT_PENDING_SIGNAL_TTL_MS = 15000;
 
+function parseExchangeEndpointSelector(rawSelector) {
+	const trimmed = String(rawSelector || '').trim();
+	if (!trimmed) {
+		return null;
+	}
+
+	const lowered = trimmed.toLowerCase();
+	if (lowered.startsWith('id:')) {
+		const endpointId = lowered.slice(3).trim();
+		if (!endpointId) {
+			return null;
+		}
+		return {
+			type: 'id',
+			value: endpointId,
+			headerValue: `id:${endpointId}`,
+		};
+	}
+
+	return {
+		type: 'name',
+		value: lowered,
+		headerValue: lowered,
+	};
+}
+
 function parseLogicalExchangeTarget(rawTarget) {
 	const trimmed = String(rawTarget || '').trim();
 	if (!trimmed) {
 		return null;
 	}
 
-	const slashIndex = trimmed.indexOf('/');
-	if (slashIndex === -1) {
+	const atIndex = trimmed.lastIndexOf('@');
+	if (atIndex === -1) {
 		return {
 			nodeName: trimmed.toLowerCase(),
+			endpointSelector: null,
 			endpointId: null,
 			rawTarget: trimmed,
 		};
 	}
 
-	const nodeName = trimmed.slice(0, slashIndex).trim().toLowerCase();
-	const endpointId = trimmed.slice(slashIndex + 1).trim().toLowerCase();
-	if (!nodeName || !endpointId) {
+	const endpointRaw = trimmed.slice(0, atIndex).trim();
+	const nodeName = trimmed.slice(atIndex + 1).trim().toLowerCase();
+	const endpointSelector = parseExchangeEndpointSelector(endpointRaw);
+	if (!nodeName || !endpointSelector) {
 		return null;
 	}
 
 	return {
 		nodeName,
-		endpointId,
+		endpointSelector,
+		endpointId: endpointSelector.type === 'id' ? endpointSelector.value : null,
 		rawTarget: trimmed,
 	};
 }
@@ -172,6 +201,7 @@ class ExchangeManager {
 				mode: this.mode,
 				state: this.wss ? 'connected' : 'disconnected',
 				connected: Boolean(this.wss),
+				connectedAt: null,
 				authenticated: true,
 				reason: '',
 				lastError: '',
@@ -187,6 +217,7 @@ class ExchangeManager {
 				mode: this.mode,
 				state: 'connected',
 				connected: true,
+				connectedAt: this._clientConnectedAt ? new Date(this._clientConnectedAt).toISOString() : null,
 				authenticated: true,
 				reason: '',
 				lastError: '',
@@ -201,6 +232,7 @@ class ExchangeManager {
 				mode: this.mode,
 				state: 'connecting',
 				connected: false,
+				connectedAt: null,
 				authenticated: false,
 				reason: 'connecting to exchange',
 				lastError: this._clientLastError,
@@ -215,6 +247,7 @@ class ExchangeManager {
 			mode: this.mode,
 			state: 'disconnected',
 			connected: false,
+			connectedAt: null,
 			authenticated: false,
 			reason,
 			lastError: this._clientLastError,
@@ -326,12 +359,13 @@ class ExchangeManager {
 		await fs.writeFile(this._undeliveredQueuePath, `${JSON.stringify(queue, null, 2)}\n`, 'utf8');
 	}
 
-	async _enqueueUndeliveredMessage(to, from, content, contentType, targetEndpointId = null) {
+	async _enqueueUndeliveredMessage(to, from, content, contentType, targetEndpoint = null, targetEndpointId = null) {
 		const now = Date.now();
 		const queue = await this._readUndeliveredQueue();
 		queue.push({
 			id: `${now}-${Math.random().toString(16).slice(2)}`,
 			to,
+			targetEndpoint: targetEndpoint || null,
 			targetEndpointId: targetEndpointId || null,
 			from,
 			content,
@@ -411,6 +445,7 @@ class ExchangeManager {
 					targetWs.send(JSON.stringify({
 						type: 'message',
 						from: item.from || 'unknown',
+						targetEndpoint: item.targetEndpoint || null,
 						targetEndpointId: item.targetEndpointId || null,
 						content: item.content !== undefined ? item.content : '',
 						contentType: String(item.contentType || 'text/plain'),
@@ -839,6 +874,7 @@ class ExchangeManager {
 				fromName || 'unknown',
 				packet.content !== undefined ? packet.content : '',
 				String(packet.contentType || 'text/plain'),
+				packet.targetEndpoint || null,
 				packet.targetEndpointId || null,
 			).catch(() => {});
 			return;
@@ -848,6 +884,7 @@ class ExchangeManager {
 			targetWs.send(JSON.stringify({
 				type: 'message',
 				from: fromName || 'unknown',
+				targetEndpoint: packet.targetEndpoint || null,
 				targetEndpointId: packet.targetEndpointId || null,
 				content: packet.content !== undefined ? packet.content : '',
 				contentType: String(packet.contentType || 'text/plain'),
@@ -860,6 +897,7 @@ class ExchangeManager {
 				fromName || 'unknown',
 				packet.content !== undefined ? packet.content : '',
 				String(packet.contentType || 'text/plain'),
+				packet.targetEndpoint || null,
 				packet.targetEndpointId || null,
 			).catch(() => {});
 		}
@@ -882,6 +920,7 @@ class ExchangeManager {
 					sessionId: String(packet.sessionId || '').trim() || null,
 					signalType: safeSignalType,
 					payload: packet.payload !== undefined ? packet.payload : null,
+					targetEndpoint: packet.targetEndpoint || null,
 					targetEndpointId: packet.targetEndpointId || null,
 					timestamp: new Date().toISOString(),
 				});
@@ -901,6 +940,7 @@ class ExchangeManager {
 				sessionId: String(packet.sessionId || '').trim() || null,
 				signalType,
 				payload: packet.payload !== undefined ? packet.payload : null,
+				targetEndpoint: packet.targetEndpoint || null,
 				targetEndpointId: packet.targetEndpointId || null,
 				timestamp: new Date().toISOString(),
 			};
@@ -1237,16 +1277,26 @@ class ExchangeManager {
 		if (isStreamEnvelope) {
 			this._handleIncomingStreamEnvelope(from, messageJson, content, contentType, {
 				nodeName: String(packet.to || '').trim().toLowerCase() || null,
+				endpointSelector: String(packet.targetEndpoint || '').trim().toLowerCase() || null,
 				endpointId: String(packet.targetEndpointId || '').trim().toLowerCase() || null,
 			});
 			return;
 		}
 
 		this.runtime.log(`[Exchange] Message from: ${from}`);
+		const targetEndpointSelector = String(packet.targetEndpoint || '').trim().toLowerCase() || null;
 		const targetEndpointId = String(packet.targetEndpointId || '').trim().toLowerCase() || null;
 		const listeners = this.runtime.filterMessageListenersByTarget(
 			this.runtime.findMessageListeners([from.toLowerCase()]),
-			targetEndpointId,
+			targetEndpointSelector
+				? {
+					type: targetEndpointSelector.startsWith('id:') ? 'id' : 'name',
+					value: targetEndpointSelector.startsWith('id:') ? targetEndpointSelector.slice(3).trim() : targetEndpointSelector,
+					headerValue: targetEndpointSelector,
+				}
+				: (targetEndpointId
+					? { type: 'id', value: targetEndpointId, headerValue: `id:${targetEndpointId}` }
+					: null),
 		);
 
 		Promise.allSettled(
@@ -1259,6 +1309,7 @@ class ExchangeManager {
 					messageTarget: String(packet.to || '').trim().toLowerCase() || null,
 					messageTargetNode: String(packet.to || '').trim().toLowerCase() || null,
 					messageTargetEndpointId: targetEndpointId,
+					messageTargetEndpoint: targetEndpointSelector || (targetEndpointId ? `id:${targetEndpointId}` : null),
 					messageContent: content,
 					messageContentType: contentType,
 					messageBodyBase64: Buffer.from(content, 'utf8').toString('base64'),
@@ -1284,6 +1335,7 @@ class ExchangeManager {
 				sessionId: String(packet.sessionId || '').trim() || null,
 				signalType,
 				payload: packet.payload !== undefined ? packet.payload : null,
+				targetEndpoint: String(packet.targetEndpoint || '').trim().toLowerCase() || null,
 				targetEndpointId: String(packet.targetEndpointId || '').trim().toLowerCase() || null,
 				timestamp: String(packet.timestamp || '').trim() || new Date().toISOString(),
 			});
@@ -1297,13 +1349,22 @@ class ExchangeManager {
 			remoteHost: from,
 			candidates: [from.toLowerCase()],
 		};
+		const targetEndpointSelector = String(targetMeta.endpointSelector || '').trim().toLowerCase() || null;
 		const targetEndpointId = String(targetMeta.endpointId || '').trim().toLowerCase() || null;
 		const targetNode = String(targetMeta.nodeName || '').trim().toLowerCase() || null;
 
 		this.runtime.log(`[Exchange] Message from: ${from}`);
 		const listeners = this.runtime.filterStreamListenersByTarget(
 			this.runtime.findStreamListeners(senderMeta.candidates),
-			targetEndpointId,
+			targetEndpointSelector
+				? {
+					type: targetEndpointSelector.startsWith('id:') ? 'id' : 'name',
+					value: targetEndpointSelector.startsWith('id:') ? targetEndpointSelector.slice(3).trim() : targetEndpointSelector,
+					headerValue: targetEndpointSelector,
+				}
+				: (targetEndpointId
+					? { type: 'id', value: targetEndpointId, headerValue: `id:${targetEndpointId}` }
+					: null),
 		);
 		const streamPacket = this.runtime && this.runtime.createIncomingStreamPacket
 			? this.runtime.createIncomingStreamPacket(streamEnvelope)
@@ -1328,6 +1389,7 @@ class ExchangeManager {
 							messageTarget: targetNode,
 							messageTargetNode: targetNode,
 							messageTargetEndpointId: targetEndpointId,
+							messageTargetEndpoint: targetEndpointSelector || (targetEndpointId ? `id:${targetEndpointId}` : null),
 							messageContent: safeRawContent,
 							messageContentType: contentType,
 							messageBodyBase64: safeMessageBodyBase64,
@@ -1337,6 +1399,7 @@ class ExchangeManager {
 							messageHeaders: {
 								'x-exchange-from': from,
 								'Reactor-Target-Node': targetNode || '',
+								'Reactor-Target-Endpoint': targetEndpointSelector || (targetEndpointId ? `id:${targetEndpointId}` : ''),
 								'Reactor-Target-Endpoint-Id': targetEndpointId || '',
 							},
 						}),
@@ -1347,6 +1410,7 @@ class ExchangeManager {
 						await this.runtime.emitStreamEnd(streamEndData, senderMeta, {
 							'x-exchange-from': from,
 							'Reactor-Target-Node': targetNode || '',
+							'Reactor-Target-Endpoint': targetEndpointSelector || (targetEndpointId ? `id:${targetEndpointId}` : ''),
 							'Reactor-Target-Endpoint-Id': targetEndpointId || '',
 						});
 				}
@@ -1385,6 +1449,7 @@ class ExchangeManager {
 		this.wsClient.send(JSON.stringify({
 			type: 'message',
 			to: parsedTarget.nodeName,
+			targetEndpoint: parsedTarget.endpointSelector ? parsedTarget.endpointSelector.headerValue : null,
 			targetEndpointId: parsedTarget.endpointId || null,
 			content: serializedContent,
 			contentType,
@@ -1417,6 +1482,7 @@ class ExchangeManager {
 		this.wsClient.send(JSON.stringify({
 			type: 'signal',
 			to: parsedTarget.nodeName,
+			targetEndpoint: parsedTarget.endpointSelector ? parsedTarget.endpointSelector.headerValue : null,
 			targetEndpointId: parsedTarget.endpointId || null,
 			sessionId: String(options.sessionId || '').trim() || null,
 			signalType: safeSignalType,

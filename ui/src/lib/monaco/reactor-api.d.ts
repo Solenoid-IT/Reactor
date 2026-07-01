@@ -4,6 +4,11 @@ declare module 'core' {
 
 	/**
 	 * Additional options for Node.sendMessage(...).
+	 *
+	 * Delivery in node mode scales with fallback across 3 levels:
+	 * 1) P2P_DIRECT: direct peer-to-peer DataChannel path.
+	 * 2) P2P_RELAY: peer-to-peer path relayed by TURN when direct ICE is not possible.
+	 * 3) EXCHANGE: Exchange-routed delivery when P2P is unavailable.
 	 */
 	export interface NodeSendMessageOptions {
 		/** Custom HTTP headers sent to the target node. */
@@ -14,6 +19,11 @@ declare module 'core' {
 
 	/**
 	 * Options for Node.stream(...).
+	 *
+	 * Delivery in node mode scales with fallback across 3 levels:
+	 * 1) P2P_DIRECT: direct peer-to-peer DataChannel path.
+	 * 2) P2P_RELAY: peer-to-peer path relayed by TURN when direct ICE is not possible.
+	 * 3) EXCHANGE: Exchange-routed delivery when P2P is unavailable.
 	 */
 	export interface NodeStreamOptions {
 		/** Chunk size in bytes (best effort). */
@@ -83,11 +93,9 @@ declare module 'core' {
 		/**
 		 * Sends a message forcing Exchange transport.
 		 *
-		 * @param target Supported formats:
-		 * - node_name
-		 * - node_name/endpoint_uuid
-		 * - host_or_ip:port
-		 * - host_or_ip:port/endpoint_uuid
+		 * @param target Format: {endpoint}@{node}
+		 * - endpoint: endpoint_name or id:<uuid-v4>
+		 * - node: node_name
 		 */
 		sendMessage: (
 			target: string,
@@ -97,11 +105,9 @@ declare module 'core' {
 		/**
 		 * Sends a stream forcing Exchange transport.
 		 *
-		 * @param target Supported formats:
-		 * - node_name
-		 * - node_name/endpoint_uuid
-		 * - host_or_ip:port
-		 * - host_or_ip:port/endpoint_uuid
+		 * @param target Format: {endpoint}@{node}
+		 * - endpoint: endpoint_name or id:<uuid-v4>
+		 * - node: node_name
 		 */
 		stream: (
 			target: string,
@@ -114,15 +120,13 @@ declare module 'core' {
 		/**
 		 * Sends a message to a Reactor node.
 		 *
-		 * @param target Supported formats:
-		 * - node_name
-		 * - node_name/endpoint_uuid
-		 * - host_or_ip
-		 * - host_or_ip:port
-		 * - host_or_ip/endpoint_uuid
-		 * - host_or_ip:port/endpoint_uuid
+		 * Delivery fallback levels for logical node targets:
+		 * P2P_DIRECT -> P2P_RELAY -> EXCHANGE.
 		 *
-		 * If /endpoint_uuid is provided, the message is routed only to that target endpoint.
+		 * @param target Format: {endpoint}@{node}
+		 * - endpoint: endpoint_name or id:<uuid-v4>
+		 * - node: node_name or net:host:port
+		 * - omitting @node targets the endpoint on the current node
 		 */
 		sendMessage: (
 			target: string,
@@ -138,6 +142,9 @@ declare module 'core' {
 
 		/**
 		 * Sends a binary/text stream to a Reactor node.
+		 *
+		 * Delivery fallback levels for logical node targets:
+		 * P2P_DIRECT -> P2P_RELAY -> EXCHANGE.
 		 *
 		 * @param target Supported formats:
 		 * - node_name

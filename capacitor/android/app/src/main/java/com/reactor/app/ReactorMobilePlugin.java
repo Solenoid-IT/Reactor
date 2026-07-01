@@ -111,6 +111,14 @@ public class ReactorMobilePlugin extends Plugin {
         return configured;
     }
 
+    private void notifyExchangeProfileUpdated(String reason) {
+        try {
+            ReactorHttpService.refreshExchangeClientProfile(reason);
+        } catch (Exception ignored) {
+            // Best-effort profile refresh.
+        }
+    }
+
     private void setConfiguredHttpPort(int port) {
         getPrefs().edit().putInt(ReactorHttpService.PREF_HTTP_PORT, port).apply();
     }
@@ -1200,6 +1208,7 @@ public class ReactorMobilePlugin extends Plugin {
             result.put("path", bootFile.getAbsolutePath());
             result.put("name", projectName + ".ts");
             result.put("storagePath", projectDir.getAbsolutePath());
+            notifyExchangeProfileUpdated("endpoint-created");
             call.resolve(result);
         } catch (Exception e) {
             call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
@@ -1270,6 +1279,7 @@ public class ReactorMobilePlugin extends Plugin {
             }
 
             writeTextFile(file, content);
+            notifyExchangeProfileUpdated("endpoint-saved");
             call.resolve(new JSObject().put("ok", true).put("path", file.getAbsolutePath()));
         } catch (Exception e) {
             call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
@@ -1393,6 +1403,7 @@ public class ReactorMobilePlugin extends Plugin {
             result.put("ok", true);
             result.put("path", movedEndpoint.getAbsolutePath());
             result.put("name", safeNextName + ".ts");
+            notifyExchangeProfileUpdated("endpoint-renamed");
             call.resolve(result);
         } catch (Exception e) {
             call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
@@ -1417,6 +1428,7 @@ public class ReactorMobilePlugin extends Plugin {
             }
 
             deleteRecursively(projectDir.toPath());
+            notifyExchangeProfileUpdated("endpoint-deleted");
             call.resolve(new JSObject().put("ok", true));
         } catch (Exception e) {
             call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
@@ -1466,6 +1478,7 @@ public class ReactorMobilePlugin extends Plugin {
                 }
 
                 writeTextFile(endpointFile, source);
+                notifyExchangeProfileUpdated("endpoint-directive-toggled");
                 call.resolve(new JSObject().put("ok", true).put("directive", "state").put("value", nextValue));
                 return;
             }
@@ -1491,6 +1504,7 @@ public class ReactorMobilePlugin extends Plugin {
                 }
 
                 writeTextFile(endpointFile, source);
+                notifyExchangeProfileUpdated("endpoint-directive-toggled");
                 call.resolve(new JSObject().put("ok", true).put("directive", "mutex").put("value", nextValue));
                 return;
             }
