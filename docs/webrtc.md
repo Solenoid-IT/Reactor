@@ -146,6 +146,13 @@ Typical P2P session states:
 
 The UI uses these states to color the network graph and to explain whether a peer is only discovered or actually connected.
 
+The status payload returned by `getP2PStatus` includes:
+
+* `dataChannelSupported`
+* `dataChannelSessions`
+* `iceServersConfigured`
+* `iceServers`
+
 ## Practical Debugging Notes
 
 If P2P does not open:
@@ -155,6 +162,8 @@ If P2P does not open:
 * Verify that the desktop runtime can load `@roamhq/wrtc`.
 * Verify that Android uses the real `working-mode.json` values.
 * Check whether the remote description is set before ICE candidates are flushed.
+* If TURN uses TLS with a self-signed certificate, Android native WebRTC is configured to allow insecure TURN TLS cert policy when `turn.tls=true`.
+* Desktop includes a best-effort TURN TLS policy hint (`tlsCertPolicy=insecure_no_check`) in ICE server config for WebRTC runtimes that support it.
 
 If the DataChannel is still not open, the problem is usually one of these:
 

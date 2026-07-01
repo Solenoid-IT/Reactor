@@ -78,18 +78,18 @@ Notes:
 - Certificate and key are persisted in Docker volume `reactor-coturn-data`.
 - For production use a real certificate and set CN/SAN to your public TURN hostname.
 
-## 2) Start coturn Service
+## 2) Start Services
 
-Start only TURN/STUN profile:
+Start the default stack (Exchange + TURN/coturn):
 
 ```bash
-docker compose --profile turn up -d
+docker compose up -d --build
 ```
 
-Or start Exchange + TURN together:
+Optional: start the client container too:
 
 ```bash
-docker compose --profile exchange --profile turn up -d --build
+docker compose --profile client up -d --build
 ```
 
 Check service status:

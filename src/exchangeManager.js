@@ -7,6 +7,7 @@ const DEFAULT_WS_HEARTBEAT_INTERVAL_MS = 15000;
 const DEFAULT_WS_HEARTBEAT_TIMEOUT_MS = 45000;
 const DEFAULT_UNDELIVERED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_UNDELIVERED_RETRY_MS = 30 * 1000;
+const DEFAULT_PENDING_SIGNAL_TTL_MS = 15000;
 
 function parseLogicalExchangeTarget(rawTarget) {
 	const trimmed = String(rawTarget || '').trim();
@@ -93,6 +94,68 @@ class ExchangeManager {
 		this._undeliveredQueueRetryMs = this._readHeartbeatValue('REACTOR_MESSAGE_QUEUE_RETRY_MS', DEFAULT_UNDELIVERED_RETRY_MS, 5 * 1000);
 		this._undeliveredFlushTimer = null;
 		this._isFlushingUndelivered = false;
+		this._pendingSignalTtlMs = this._readHeartbeatValue('REACTOR_SIGNAL_QUEUE_TTL_MS', DEFAULT_PENDING_SIGNAL_TTL_MS, 1000);
+		this._pendingSignalsByTarget = new Map();
+	}
+
+	_enqueuePendingSignal(target, outboundSignal) {
+		const safeTarget = String(target || '').trim().toLowerCase();
+		if (!safeTarget || !outboundSignal || typeof outboundSignal !== 'object') {
+			return;
+		}
+
+		const now = Date.now();
+		const expiresAt = now + this._pendingSignalTtlMs;
+		const queue = this._pendingSignalsByTarget.get(safeTarget) || [];
+		queue.push({
+			queuedAt: now,
+			expiresAt,
+			packet: outboundSignal,
+		});
+		this._pendingSignalsByTarget.set(safeTarget, queue);
+	}
+
+	_flushPendingSignalsForTarget(target) {
+		const safeTarget = String(target || '').trim().toLowerCase();
+		if (!safeTarget) {
+			return;
+		}
+
+		const targetWs = this.connectedClients.get(safeTarget);
+		if (!targetWs || targetWs.readyState !== WebSocket.OPEN) {
+			return;
+		}
+
+		const now = Date.now();
+		const queue = this._pendingSignalsByTarget.get(safeTarget) || [];
+		if (queue.length === 0) {
+			return;
+		}
+
+		const remaining = [];
+		let delivered = 0;
+		for (const item of queue) {
+			if (!item || !item.packet || Number(item.expiresAt || 0) <= now) {
+				continue;
+			}
+
+			try {
+				targetWs.send(JSON.stringify(item.packet));
+				delivered += 1;
+			} catch {
+				remaining.push(item);
+			}
+		}
+
+		if (remaining.length > 0) {
+			this._pendingSignalsByTarget.set(safeTarget, remaining);
+		} else {
+			this._pendingSignalsByTarget.delete(safeTarget);
+		}
+
+		if (delivered > 0) {
+			this.runtime.log(`[Exchange] Flushed ${delivered} queued signaling packet(s) to ${safeTarget}`);
+		}
 	}
 
 	_emitConnectionStatus(reason = '') {
@@ -486,6 +549,7 @@ class ExchangeManager {
 		this.connectedClients.clear();
 		this._connectedClientDetails.clear();
 		this._knownRemotePeers.clear();
+		this._pendingSignalsByTarget.clear();
 		await this._writeActiveConnectionsSnapshot();
 	}
 
@@ -539,6 +603,10 @@ class ExchangeManager {
 
 	_handleIncomingPeerList(packet = {}) {
 		this._knownRemotePeers = this._extractRemotePeerNamesFromPacket(packet);
+		if (this.runtime && typeof this.runtime.logGlobalEvent === 'function') {
+			const peers = this.getKnownRemotePeers();
+			this.runtime.logGlobalEvent('EXCHANGE/PEER_LIST', `received peer-list peers=${peers.join(',') || 'none'}`).catch(() => {});
+		}
 		if (this.runtime && typeof this.runtime.handleDiscoveredRemotePeers === 'function') {
 			this.runtime.handleDiscoveredRemotePeers(this.getKnownRemotePeers()).catch(() => {});
 		}
@@ -688,6 +756,7 @@ class ExchangeManager {
 					this._emitConnectionStatus('exchange-registered');
 					this._broadcastClientPeerList();
 					this._flushUndeliveredQueue(clientName).catch(() => {});
+					this._flushPendingSignalsForTarget(clientName);
 				}
 			} else if (packet.type === 'profile' && clientName && this._connectedClientDetails.has(clientName)) {
 				const current = this._connectedClientDetails.get(clientName);
@@ -805,6 +874,18 @@ class ExchangeManager {
 		const targetWs = this.connectedClients.get(to);
 		if (!targetWs || targetWs.readyState !== WebSocket.OPEN) {
 			this.runtime.log(`[Exchange] Signaling target not found or disconnected: ${to}`);
+			const safeSignalType = String(packet.signalType || '').trim().toLowerCase();
+			if (safeSignalType) {
+				this._enqueuePendingSignal(to, {
+					type: 'signal',
+					from: fromName || 'unknown',
+					sessionId: String(packet.sessionId || '').trim() || null,
+					signalType: safeSignalType,
+					payload: packet.payload !== undefined ? packet.payload : null,
+					targetEndpointId: packet.targetEndpointId || null,
+					timestamp: new Date().toISOString(),
+				});
+			}
 			return;
 		}
 
@@ -814,7 +895,7 @@ class ExchangeManager {
 		}
 
 		try {
-			targetWs.send(JSON.stringify({
+			const outboundSignal = {
 				type: 'signal',
 				from: fromName || 'unknown',
 				sessionId: String(packet.sessionId || '').trim() || null,
@@ -822,7 +903,9 @@ class ExchangeManager {
 				payload: packet.payload !== undefined ? packet.payload : null,
 				targetEndpointId: packet.targetEndpointId || null,
 				timestamp: new Date().toISOString(),
-			}));
+			};
+
+			targetWs.send(JSON.stringify(outboundSignal));
 		} catch (error) {
 			this.runtime.log(`[Exchange] Signaling routing error to ${to}: ${error.message}`);
 		}

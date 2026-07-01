@@ -1172,11 +1172,15 @@ class ReactorRuntime {
 			const turnScheme = Boolean(this.turn?.tls) ? 'turns' : 'turn';
 			const username = String(this.turn?.username || this.exchangeAuthToken || '').trim();
 			const credential = String(this.turn?.password || this.exchangeAuthToken || '').trim();
-			servers.push({
+			const turnServer = {
 				urls: [`${turnScheme}:${turnHost}:${turnPort}?transport=tcp`, `turn:${turnHost}:${turnPort}?transport=udp`],
 				username,
 				credential,
-			});
+			};
+			if (Boolean(this.turn?.tls)) {
+				turnServer.tlsCertPolicy = 'insecure_no_check';
+			}
+			servers.push(turnServer);
 		}
 
 		return servers;
@@ -1229,31 +1233,70 @@ class ReactorRuntime {
 			return;
 		}
 
-		if (!this.shouldPreferP2PForNodeRouting()) {
+		const normalizedPeers = peers
+			.map((peer) => String(peer || '').trim().toLowerCase())
+			.filter(Boolean);
+
+		if (normalizedPeers.length === 0) {
+			return;
+		}
+
+		this.logGlobalEvent('EXCHANGE/PEER_LIST_RECEIVED', `peers=${normalizedPeers.join(',')}`).catch(() => {});
+
+		const p2pRoutingEligibility = this.getP2PRoutingEligibility();
+		if (!p2pRoutingEligibility.ok) {
+			this.logGlobalEvent(
+				'EXCHANGE/P2P_AUTODIAL_SKIPPED',
+				`reason=${p2pRoutingEligibility.reason} peers=${normalizedPeers.length}`,
+			).catch(() => {});
 			return;
 		}
 
 		const now = Date.now();
-		for (const rawPeer of peers) {
+		const staleConnectingSessionMs = 4000;
+		for (const rawPeer of normalizedPeers) {
 			const target = String(rawPeer || '').trim().toLowerCase();
 			if (!target) {
 				continue;
 			}
 
+			this.logGlobalEvent('EXCHANGE/P2P_PEER_DISCOVERED', `peer on exchange: ${target}`).catch(() => {});
+
 			const currentSession = this.p2pSessions.get(target);
 			if (currentSession) {
 				const state = String(currentSession.state || '').toLowerCase();
 				if (state === 'connecting' || state === 'connected-p2p' || state === 'connected-turn') {
-					continue;
+					if (state === 'connecting') {
+						const lastUpdateMs = Number(currentSession.lastUpdateMs || 0);
+						if (lastUpdateMs > 0 && now - lastUpdateMs >= staleConnectingSessionMs) {
+							this.logGlobalEvent(
+								'EXCHANGE/P2P_AUTODIAL_RESTART',
+								`reason=stale-connecting-session target=${target}`,
+							).catch(() => {});
+
+							if (this.p2pTransportManager && this.p2pTransportManager.closeSession) {
+								this.p2pTransportManager.closeSession(target, false);
+							}
+							this.p2pSessions.delete(target);
+						} else {
+							this.logGlobalEvent('EXCHANGE/P2P_AUTODIAL_SKIPPED', `reason=session-state-${state} target=${target}`).catch(() => {});
+							continue;
+						}
+					} else {
+						this.logGlobalEvent('EXCHANGE/P2P_AUTODIAL_SKIPPED', `reason=session-state-${state} target=${target}`).catch(() => {});
+						continue;
+					}
 				}
 			}
 
 			const lastAttemptMs = Number(this.p2pAutodialAttempts.get(target) || 0);
 			if (lastAttemptMs > 0 && now - lastAttemptMs < this.p2pAutodialCooldownMs) {
+				this.logGlobalEvent('EXCHANGE/P2P_AUTODIAL_SKIPPED', `reason=cooldown target=${target}`).catch(() => {});
 				continue;
 			}
 
 			this.p2pAutodialAttempts.set(target, now);
+			this.logGlobalEvent('EXCHANGE/P2P_NEGOTIATION_START', `starting native P2P negotiation with ${target}`).catch(() => {});
 			this.upsertP2PSession(target, {
 				state: 'connecting',
 				lastSignalType: 'offer',
@@ -1263,6 +1306,7 @@ class ReactorRuntime {
 
 			if (this.p2pTransportManager && this.p2pTransportManager.ensureConnected) {
 				this.p2pTransportManager.ensureConnected(target).catch((error) => {
+					this.logGlobalEvent('EXCHANGE/P2P_AUTODIAL', `failed toward ${target}: ${String(error?.message || 'p2p auto-connect failed')}`).catch(() => {});
 					this.upsertP2PSession(target, {
 						state: 'fallback-exchange',
 						lastSignalType: 'failed',
@@ -1274,18 +1318,36 @@ class ReactorRuntime {
 		}
 	}
 
-	shouldPreferP2PForNodeRouting() {
+	getP2PRoutingEligibility() {
 		if (this.exchangeMode !== 'node') {
-			return false;
+			return { ok: false, reason: 'exchange-mode-not-node' };
 		}
 
 		const stunHost = String(this.stun?.host || '').trim();
-		const turnHost = String(this.turn?.host || '').trim();
-		if (!stunHost || !turnHost) {
-			return false;
+		if (!stunHost) {
+			return { ok: false, reason: 'stun-not-configured' };
 		}
 
-		return Boolean(this.p2pTransportManager && this.p2pTransportManager.isAvailable && this.p2pTransportManager.isAvailable());
+		const turnHost = String(this.turn?.host || '').trim();
+		if (!turnHost) {
+			return { ok: false, reason: 'turn-not-configured' };
+		}
+
+		const dataChannelSupported = Boolean(
+			this.p2pTransportManager
+			&& this.p2pTransportManager.isAvailable
+			&& this.p2pTransportManager.isAvailable(),
+		);
+
+		if (!dataChannelSupported) {
+			return { ok: false, reason: 'datachannel-transport-unavailable' };
+		}
+
+		return { ok: true, reason: 'ok' };
+	}
+
+	shouldPreferP2PForNodeRouting() {
+		return this.getP2PRoutingEligibility().ok;
 	}
 
 	upsertP2PSession(target, updates = {}) {
@@ -1323,6 +1385,15 @@ class ReactorRuntime {
 		const signalType = String(signal.signalType || '').trim().toLowerCase();
 		if (!from || !signalType) {
 			return;
+		}
+
+		if (['offer', 'answer', 'candidate', 'connected', 'failed', 'close', 'relay'].includes(signalType)) {
+			const reason = signalType === 'failed' ? String(signal?.payload?.reason || 'p2p failed') : '';
+			let detail = `signal=${signalType} from=${from}`;
+			if (reason) {
+				detail += ` reason=${reason}`;
+			}
+			this.logGlobalEvent('EXCHANGE/P2P_SIGNAL', detail).catch(() => {});
 		}
 
 		if (this.p2pTransportManager && this.p2pTransportManager.handleSignal) {
@@ -3399,8 +3470,75 @@ class ReactorRuntime {
 		console.log(`[Reactor] ${message}`);
 	}
 
+	buildReadableGlobalLogLine(category, message) {
+		const safeCategory = String(category || 'LOG').trim() || 'LOG';
+		const safeMessage = String(message || '').trim() || '-';
+		return `${new Date().toISOString()} [${safeCategory}] ${safeMessage}`;
+	}
+
+	formatEventLogLine(entry) {
+		if (typeof entry === 'string') {
+			const raw = entry.trim();
+			if (!raw) {
+				return this.buildReadableGlobalLogLine('LOG', '-');
+			}
+			if (!(raw.startsWith('{') && raw.endsWith('}'))) {
+				return this.buildReadableGlobalLogLine('LOG', raw);
+			}
+
+			try {
+				const parsed = JSON.parse(raw);
+				return this.formatEventLogLine(parsed);
+			} catch {
+				return this.buildReadableGlobalLogLine('LOG', raw);
+			}
+		}
+
+		if (!entry || typeof entry !== 'object') {
+			return this.buildReadableGlobalLogLine('LOG', String(entry || '-'));
+		}
+
+		const timestamp = String(entry.timestamp || new Date().toISOString()).trim() || new Date().toISOString();
+		const type = String(entry.type || 'LOG').trim().toUpperCase() || 'LOG';
+		const phase = String(entry.phase || '').trim().toUpperCase();
+		const category = phase ? `${type}/${phase}` : type;
+
+		let message = String(entry.message || '').trim();
+		if (!message) {
+			message = String(entry.error || '').trim();
+		}
+
+		if (!message && type === 'ENDPOINT_EXECUTION') {
+			const endpointName = String(entry?.endpoint?.name || '').trim() || 'unknown';
+			const trigger = String(entry?.trigger || '').trim() || 'unknown';
+			const event = String(entry?.event || '').trim() || 'unknown';
+			message = `endpoint=${endpointName} trigger=${trigger} event=${event}`;
+		}
+
+		if (!message && type === 'MESSAGE_RECEIVED') {
+			const senderName = String(entry.senderName || '').trim() || 'unknown';
+			const remoteHost = String(entry.remoteHost || '').trim() || 'unknown';
+			const contentType = String(entry.contentType || '').trim() || 'unknown';
+			message = `sender=${senderName} remote=${remoteHost} contentType=${contentType}`;
+		}
+
+		if (!message) {
+			message = JSON.stringify(entry);
+		}
+
+		if (entry.exchangeMode) {
+			message = `${message} (mode=${entry.exchangeMode})`;
+		}
+
+		return `${timestamp} [${category}] ${message}`;
+	}
+
+	async logGlobalEvent(category, message) {
+		await this.writeEventLog(this.eventLogPath, this.buildReadableGlobalLogLine(category, message));
+	}
+
 	async writeEventLog(logPath, entry) {
-		const logLine = `${JSON.stringify(entry)}\n`;
+		const logLine = `${this.formatEventLogLine(entry)}\n`;
 		try {
 			if (this.platformServices && this.platformServices.fileWriter && this.platformServices.fileWriter.appendText) {
 				await this.platformServices.fileWriter.appendText(logPath, logLine, 'utf8');

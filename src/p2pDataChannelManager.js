@@ -85,6 +85,8 @@ class P2PDataChannelManager {
 				return;
 			}
 
+			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `local ICE candidate generated for ${safeTarget}`).catch(() => {});
+
 			this.runtime.sendP2PSignal(safeTarget, 'candidate', {
 				candidate: event.candidate.candidate,
 				sdpMid: event.candidate.sdpMid,
@@ -94,6 +96,7 @@ class P2PDataChannelManager {
 
 		connection.onconnectionstatechange = () => {
 			const state = String(connection.connectionState || '').toLowerCase();
+			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `peerconnection state=${state} target=${safeTarget}`).catch(() => {});
 			if (state === 'connected') {
 				this.runtime.upsertP2PSession(safeTarget, {
 					sessionId: session.sessionId,
@@ -134,15 +137,18 @@ class P2PDataChannelManager {
 
 		channel.onopen = () => {
 			session.isOpen = true;
+			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `datachannel state=open target=${session.target}`).catch(() => {});
 			session.openResolve(true);
 		};
 
 		channel.onclose = () => {
 			session.isOpen = false;
+			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `datachannel state=closed target=${session.target}`).catch(() => {});
 		};
 
 		channel.onerror = () => {
 			session.isOpen = false;
+			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `datachannel state=error target=${session.target}`).catch(() => {});
 		};
 
 		channel.onmessage = (event) => {
@@ -171,6 +177,7 @@ class P2PDataChannelManager {
 		const connectPromise = (async () => {
 			const session = this.createSession(safeTarget, true);
 			const offer = await session.connection.createOffer();
+			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `offer created for ${safeTarget}`).catch(() => {});
 			await session.connection.setLocalDescription(offer);
 
 			await this.runtime.sendP2PSignal(safeTarget, 'offer', {
@@ -178,11 +185,26 @@ class P2PDataChannelManager {
 				sdp: offer.sdp,
 			}, { sessionId: session.sessionId });
 
+			let nextOfferRetryAt = Date.now() + 3000;
+
 			const started = Date.now();
 			while (Date.now() - started < this.connectTimeoutMs) {
 				if (session.isOpen && session.dataChannel && session.dataChannel.readyState === 'open') {
 					return session;
 				}
+
+				if (!session.remoteDescriptionSet && Date.now() >= nextOfferRetryAt) {
+					const localDescription = session.connection.localDescription;
+					if (localDescription && localDescription.sdp) {
+						this.runtime.logGlobalEvent('P2P_NEGOTIATION', `offer retransmit for ${safeTarget}`).catch(() => {});
+						await this.runtime.sendP2PSignal(safeTarget, 'offer', {
+							type: String(localDescription.type || 'offer'),
+							sdp: String(localDescription.sdp || ''),
+						}, { sessionId: session.sessionId }).catch(() => {});
+					}
+					nextOfferRetryAt = Date.now() + 3000;
+				}
+
 				await waitFor(100);
 			}
 
@@ -226,6 +248,7 @@ class P2PDataChannelManager {
 		}
 
 		if (signalType === 'offer') {
+			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `remote offer received from ${from}`).catch(() => {});
 			const remoteDesc = new webrtc.RTCSessionDescription({
 				type: 'offer',
 				sdp: String(signal?.payload?.sdp || ''),
@@ -242,6 +265,7 @@ class P2PDataChannelManager {
 			await this.flushQueuedCandidates(session);
 
 			const answer = await session.connection.createAnswer();
+			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `answer created for ${from}`).catch(() => {});
 			await new Promise((resolve, reject) => {
 				session.connection.setLocalDescription(answer, resolve, reject);
 			});
@@ -253,6 +277,7 @@ class P2PDataChannelManager {
 		}
 
 		if (signalType === 'answer') {
+			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `remote answer received from ${from}`).catch(() => {});
 			const remoteDesc = new webrtc.RTCSessionDescription({
 				type: 'answer',
 				sdp: String(signal?.payload?.sdp || ''),
@@ -280,10 +305,12 @@ class P2PDataChannelManager {
 
 			if (!session.remoteDescriptionSet || session.remoteDescriptionPending) {
 				session.queuedCandidates.push(candidate);
+				this.runtime.logGlobalEvent('P2P_NEGOTIATION', `queued ICE candidate for ${from} (remote SDP not ready)`).catch(() => {});
 				return;
 			}
 
 			await session.connection.addIceCandidate(candidate).catch(() => {});
+			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `applied ICE candidate for ${from}`).catch(() => {});
 		}
 	}
 
@@ -296,6 +323,7 @@ class P2PDataChannelManager {
 		session.queuedCandidates.length = 0;
 		for (const candidate of queue) {
 			await session.connection.addIceCandidate(candidate).catch(() => {});
+			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `flushed queued ICE candidate for ${session.target}`).catch(() => {});
 		}
 	}
 

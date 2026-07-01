@@ -2,10 +2,8 @@
 
 This guide provides the fastest way to run Reactor on Linux with Docker Compose.
 You can run:
-- only Exchange server
-- only Client node
-- both Exchange and Client in the same compose stack
-- optional STUN/TURN server (coturn) for WebRTC peer connectivity
+- Exchange server + STUN/TURN server (coturn) as the default stack
+- optional Client node (reactor-client)
 
 ## Files included
 
@@ -39,38 +37,18 @@ Edit `.env` for your setup:
 - `COTURN_PASSWORD`
 - `COTURN_EXTERNAL_IP`
 
-## Start profiles
+## Start services
 
-Start only Exchange profile:
+Start the default stack (Exchange + coturn):
 
 ```bash
-docker compose --profile exchange up -d --build
+docker compose up -d --build
 ```
 
-Start only Client profile:
+Start the default stack plus optional client node:
 
 ```bash
 docker compose --profile client up -d --build
-```
-
-Start both profiles:
-
-From project root:
-
-```bash
-docker compose --profile exchange --profile client up -d --build
-```
-
-Start only TURN/STUN profile:
-
-```bash
-docker compose --profile turn up -d
-```
-
-Start Exchange + TURN:
-
-```bash
-docker compose --profile exchange --profile turn up -d --build
 ```
 
 Check status:
@@ -127,7 +105,7 @@ docker compose exec -T reactor-exchange node daemonctl.js set-discovery off
 Discovery state is persisted in `/data/working-mode.json`.
 Set `REACTOR_EXCHANGE_DISCOVERY_ENDPOINT=true|false` only if you want an explicit environment override at startup.
 
-If you run the client profile too, verify client config:
+If you run the optional client profile too, verify client config:
 
 ```bash
 docker compose exec reactor-client node daemonctl.js get-exchange

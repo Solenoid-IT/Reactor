@@ -21,13 +21,17 @@ REACTOR_EXCHANGE_PORT=7070
 REACTOR_EXCHANGE_TOKEN=
 ```
 
-## 3) Start the exchange container
+## 3) Start the default containers (Exchange + coturn)
 
 From the project root:
 
 ```bash
-docker compose --profile exchange up -d --build
+docker compose up -d --build
 ```
+
+Note:
+- This starts `reactor-exchange` and `coturn` by default.
+- `reactor-client` remains optional and starts only with `--profile client`.
 
 Check status:
 

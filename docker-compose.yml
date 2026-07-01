@@ -1,6 +1,5 @@
 services:
   coturn:
-    profiles: ["turn"]
     image: coturn/coturn:latest
     container_name: reactor-coturn
     restart: always
@@ -30,7 +29,6 @@ services:
       - coturn-data:/var/lib/coturn
 
   reactor-exchange:
-    profiles: ["exchange"]
     build:
       context: .
       dockerfile: Dockerfile.daemon

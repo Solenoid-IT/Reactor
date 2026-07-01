@@ -1282,7 +1282,7 @@
 	});
 
 	async function openGlobalLog() {
-		status = 'Loading project activity.log';
+		status = 'Loading activity.log';
 		const ready = await ensureCodeEditorComponent();
 		if (!ready) {
 			return;
@@ -1301,16 +1301,16 @@
 		}
 
 		editorFilePath = logPathResult.path;
-		editorFileName = 'project activity.log';
+		editorFileName = 'activity.log';
 		editorLanguage = 'log';
 		editorContent = result.content || '';
 		editorOpen = true;
-		status = 'Editing project activity.log';
+		status = 'Editing activity.log';
 	}
 
 	async function clearGlobalLog() {
 		const result = await clearEventLog();
-		status = result?.ok ? 'Cleared project activity.log' : `Error: ${result?.error || 'unknown'}`;
+		status = result?.ok ? 'Cleared activity.log' : `Error: ${result?.error || 'unknown'}`;
 	}
 
 	function openSettings() {

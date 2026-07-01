@@ -25,6 +25,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -63,6 +65,10 @@ public final class AndroidP2PWebRtcManager {
     }
 
     public void initialize() {
+        ReactorHttpService.setP2PSignalListener((from, sessionId, signalType, payload) ->
+                handleIncomingSignal(from, sessionId, signalType, payload)
+        );
+
         executor.execute(() -> {
             if (initialized) {
                 return;
@@ -79,10 +85,6 @@ public final class AndroidP2PWebRtcManager {
                 peerConnectionFactory = PeerConnectionFactory.builder()
                         .setOptions(options)
                         .createPeerConnectionFactory();
-
-                ReactorHttpService.setP2PSignalListener((from, sessionId, signalType, payload) ->
-                        handleIncomingSignal(from, sessionId, signalType, payload)
-                );
 
                 initialized = true;
             } catch (Exception error) {
@@ -114,6 +116,9 @@ public final class AndroidP2PWebRtcManager {
         }
 
         ensureInitialized();
+        if (!waitForFactoryReady(3000L)) {
+            return new JSObject().put("ok", false).put("error", "webrtc initialization timeout");
+        }
 
         try {
             SessionState session = ensureSession(safeTarget, initiator, relayConfig);
@@ -165,6 +170,9 @@ public final class AndroidP2PWebRtcManager {
         }
 
         ensureInitialized();
+        if (!waitForFactoryReady(3000L)) {
+            return new JSObject().put("ok", false).put("error", "webrtc initialization timeout");
+        }
 
         try {
             SessionState session = ensureSession(safeTarget, true, relayConfig != null ? relayConfig : new RelayConfig());
@@ -289,6 +297,25 @@ public final class AndroidP2PWebRtcManager {
         initialize();
     }
 
+    private boolean waitForFactoryReady(long timeoutMs) {
+        long safeTimeoutMs = timeoutMs > 0 ? timeoutMs : 3000L;
+        long deadline = System.currentTimeMillis() + safeTimeoutMs;
+
+        while (System.currentTimeMillis() < deadline) {
+            if (initialized && peerConnectionFactory != null) {
+                return true;
+            }
+            try {
+                Thread.sleep(20L);
+            } catch (InterruptedException interruptedException) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+
+        return initialized && peerConnectionFactory != null;
+    }
+
     private SessionState ensureSession(String target, boolean initiator, RelayConfig relayConfig) {
         SessionState existing = sessions.get(target);
         if (existing != null) {
@@ -339,6 +366,9 @@ public final class AndroidP2PWebRtcManager {
             PeerConnection.IceServer.Builder builder = PeerConnection.IceServer.builder(
                     scheme + config.turnHost + ":" + config.turnPort + "?transport=tcp"
             );
+            if (config.turnTls) {
+                applyInsecureTurnTlsPolicy(builder);
+            }
             String username = config.turnUsername != null && !config.turnUsername.isEmpty() ? config.turnUsername : config.token;
             String password = config.turnPassword != null && !config.turnPassword.isEmpty() ? config.turnPassword : config.token;
             if (username != null && !username.isEmpty()) {
@@ -353,8 +383,29 @@ public final class AndroidP2PWebRtcManager {
         return servers;
     }
 
+    private void applyInsecureTurnTlsPolicy(PeerConnection.IceServer.Builder builder) {
+        if (builder == null) {
+            return;
+        }
+
+        try {
+            Class<?> policyClass = Class.forName("org.webrtc.PeerConnection$TlsCertPolicy");
+            Field insecurePolicy = policyClass.getField("TLS_CERT_POLICY_INSECURE_NO_CHECK");
+            Object policyValue = insecurePolicy.get(null);
+            Method setTlsCertPolicyMethod = builder.getClass().getMethod("setTlsCertPolicy", policyClass);
+            setTlsCertPolicyMethod.invoke(builder, policyValue);
+        } catch (Exception ignored) {
+            // Keep default strict TLS validation if policy API is unavailable.
+        }
+    }
+
     private void handleIncomingSignal(String from, String sessionId, String signalType, JSONObject payload) {
         executor.execute(() -> {
+            ensureInitialized();
+            if (!waitForFactoryReady(3000L)) {
+                return;
+            }
+
             String safeTarget = normalizeTarget(from);
             String safeSignalType = String.valueOf(signalType == null ? "" : signalType).trim().toLowerCase(Locale.ROOT);
             if (safeTarget.isEmpty() || safeSignalType.isEmpty()) {
@@ -405,6 +456,7 @@ public final class AndroidP2PWebRtcManager {
 
         session.peerConnection.createOffer(new SimpleSdpObserver(
                 sdp -> {
+                ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "offer created for " + session.target);
                         CountDownLatch localDescriptionLatch = new CountDownLatch(1);
                         session.peerConnection.setLocalDescription(new SdpObserver() {
                         @Override
@@ -437,7 +489,10 @@ public final class AndroidP2PWebRtcManager {
                     payload.put("sdp", sdp.description);
                     ReactorHttpService.sendP2PSignal(session.target, "offer", payload, session.sessionId);
                 },
-                error -> ReactorHttpService.sendP2PSignal(session.target, "failed", new JSObject().put("reason", "offer failed: " + error), session.sessionId)
+                error -> {
+                    ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "offer failed for " + session.target + ": " + error);
+                    ReactorHttpService.sendP2PSignal(session.target, "failed", new JSObject().put("reason", "offer failed: " + error), session.sessionId);
+                }
         ), constraints);
     }
 
@@ -452,6 +507,7 @@ public final class AndroidP2PWebRtcManager {
 
         session.peerConnection.createAnswer(new SimpleSdpObserver(
                 sdp -> {
+                ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "answer created for " + session.target);
                         CountDownLatch localDescriptionLatch = new CountDownLatch(1);
                         session.peerConnection.setLocalDescription(new SdpObserver() {
                         @Override
@@ -484,17 +540,22 @@ public final class AndroidP2PWebRtcManager {
                     answerPayload.put("sdp", sdp.description);
                     ReactorHttpService.sendP2PSignal(session.target, "answer", answerPayload, session.sessionId);
                 },
-                error -> ReactorHttpService.sendP2PSignal(session.target, "failed", new JSObject().put("reason", "answer failed: " + error), session.sessionId)
+                error -> {
+                    ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "answer failed for " + session.target + ": " + error);
+                    ReactorHttpService.sendP2PSignal(session.target, "failed", new JSObject().put("reason", "answer failed: " + error), session.sessionId);
+                }
         ), constraints);
     }
 
     private boolean applyRemoteSdp(SessionState session, JSONObject payload, SessionDescription.Type defaultType) {
         if (payload == null) {
+            ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "remote SDP missing payload from " + (session != null ? session.target : "unknown"));
             return false;
         }
 
         String sdp = String.valueOf(payload.optString("sdp", "")).trim();
         if (sdp.isEmpty()) {
+            ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "remote SDP empty for " + session.target);
             return false;
         }
 
@@ -528,12 +589,16 @@ public final class AndroidP2PWebRtcManager {
 
         try {
             if (!remoteDescriptionLatch.await(3L, TimeUnit.SECONDS)) {
+                ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "remote SDP timeout for " + session.target + " type=" + sdpType.canonicalForm());
                 return false;
             }
         } catch (InterruptedException interruptedException) {
             Thread.currentThread().interrupt();
+            ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "remote SDP interrupted for " + session.target + " type=" + sdpType.canonicalForm());
             return false;
         }
+
+        ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "remote SDP applied for " + session.target + " type=" + sdpType.canonicalForm());
 
         if (sdpType == SessionDescription.Type.ANSWER) {
             session.state = "connected-p2p";
@@ -558,10 +623,12 @@ public final class AndroidP2PWebRtcManager {
         IceCandidate candidate = new IceCandidate(sdpMid, sdpMLineIndex, candidateValue);
         if (!session.remoteDescriptionSet) {
             session.queuedCandidates.add(candidate);
+            ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "queued ICE candidate for " + session.target + " (remote SDP not ready)");
             return;
         }
 
         session.peerConnection.addIceCandidate(candidate);
+        ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "applied ICE candidate for " + session.target);
     }
 
     private void flushQueuedCandidates(SessionState session) {
@@ -595,6 +662,7 @@ public final class AndroidP2PWebRtcManager {
             public void onStateChange() {
                 DataChannel.State state = session.dataChannel != null ? session.dataChannel.state() : DataChannel.State.CLOSED;
                 session.dataChannelState = state.name().toLowerCase(Locale.ROOT);
+                ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "datachannel state=" + session.dataChannelState + " target=" + session.target);
                 if (state == DataChannel.State.OPEN) {
                     session.state = "connected-p2p";
                     ReactorHttpService.sendP2PSignal(session.target, "connected", null, session.sessionId);
