@@ -4,72 +4,9 @@ const { spawn } = require('child_process');
 const path = require('path');
 const AdmZip = require('adm-zip');
 const { parseDirectiveHeader, rebuildDirectiveHeader } = require('./directiveHeader');
+const { buildBackupZip, resolveSafeBackupTarget } = require('./backupArchive');
+const { ensureExternalTemplatesDirectory, readEndpointTemplate } = require('./endpointTemplates');
 const { readUiSettings, writeUiSettings } = require('./uiSettings');
-
-const ALLOWED_ENDPOINT_TEMPLATE_KEYS = new Set(['blank', 'schedule', 'event', 'watch']);
-
-async function ensureExternalTemplatesDirectory(appRootDir) {
-	if (!appRootDir) {
-		return;
-	}
-
-	const externalTemplatesDir = path.resolve(appRootDir, 'templates');
-	try {
-		const stats = await fs.stat(externalTemplatesDir);
-		if (stats.isDirectory()) {
-			return;
-		}
-	} catch (error) {
-		if (!error || error.code !== 'ENOENT') {
-			return;
-		}
-	}
-
-	await fs.mkdir(externalTemplatesDir, { recursive: true });
-	for (const templateKey of ALLOWED_ENDPOINT_TEMPLATE_KEYS) {
-		const template = await readEndpointTemplate(templateKey, templateKey, appRootDir);
-		const targetPath = path.join(externalTemplatesDir, template.key);
-		await fs.writeFile(targetPath, template.content, { encoding: 'utf8' });
-	}
-}
-
-function resolveEndpointTemplateCandidates(appRootDir, templateKey) {
-	const candidates = [
-		path.resolve(appRootDir, 'templates', templateKey),
-		path.resolve(__dirname, '..', '..', 'templates', templateKey),
-		path.resolve(process.cwd(), 'templates', templateKey),
-		path.resolve(app.getAppPath(), 'templates', templateKey),
-		path.resolve(app.getAppPath(), 'ui', 'build', 'templates', templateKey),
-	];
-
-	if (process.resourcesPath) {
-		candidates.push(path.resolve(process.resourcesPath, 'templates', templateKey));
-		candidates.push(path.resolve(process.resourcesPath, 'app.asar.unpacked', 'templates', templateKey));
-	}
-
-	return Array.from(new Set(candidates));
-}
-
-async function readEndpointTemplate(templateKey, fallbackTemplateKey, appRootDir) {
-	const requestedTemplate = String(templateKey || '').trim().toLowerCase();
-	const safeTemplateKey = ALLOWED_ENDPOINT_TEMPLATE_KEYS.has(requestedTemplate)
-		? requestedTemplate
-		: fallbackTemplateKey;
-
-	let lastReadError = '';
-	for (const candidatePath of resolveEndpointTemplateCandidates(appRootDir, safeTemplateKey)) {
-		try {
-			const content = await fs.readFile(candidatePath, 'utf8');
-			return { key: safeTemplateKey, content };
-		} catch (error) {
-			if (error && error.code !== 'ENOENT') {
-				lastReadError = error.message || String(error);
-			}
-		}
-	}
-
-	throw new Error(lastReadError || `endpoint template file not found at ./templates/${safeTemplateKey}`);
-}
 
 async function openWithConfiguredProgramOrDefault(targetPath) {
 	const settings = await readUiSettings();
@@ -127,79 +64,6 @@ function setupIpcHandlers(runtime, options = {}) {
 
 	function isEditableExtension(targetPath) {
 		return /\.(ts|js|log)$/i.test(targetPath || '');
-	}
-
-	function getBackupEntries(rootDir) {
-		return [
-			{ sourcePath: path.join(rootDir, 'endpoints'), archiveName: 'endpoints' },
-			{ sourcePath: path.join(rootDir, 'working-mode.json'), archiveName: 'working-mode.json' },
-			{ sourcePath: path.join(rootDir, 'name'), archiveName: 'name' },
-			{ sourcePath: path.join(rootDir, 'ui-settings.json'), archiveName: 'ui-settings.json' },
-			{ sourcePath: path.join(rootDir, 'workflow.json'), archiveName: 'workflow.json' },
-			{ sourcePath: path.join(rootDir, 'activity.log'), archiveName: 'activity.log' },
-			{ sourcePath: path.join(rootDir, 'tls'), archiveName: 'tls' },
-		];
-	}
-
-	async function addPathToZip(zip, sourcePath, archiveName) {
-		let stats;
-		try {
-			stats = await fs.stat(sourcePath);
-		} catch {
-			return;
-		}
-
-		if (stats.isDirectory()) {
-			const entries = await fs.readdir(sourcePath, { withFileTypes: true });
-			if (entries.length === 0) {
-				zip.addFile(`${archiveName.replace(/\\/g, '/')}/.keep`, Buffer.from('', 'utf8'));
-				return;
-			}
-
-			for (const entry of entries) {
-				const childSource = path.join(sourcePath, entry.name);
-				const childArchive = `${archiveName.replace(/\\/g, '/')}/${entry.name}`;
-				await addPathToZip(zip, childSource, childArchive);
-			}
-			return;
-		}
-
-		const data = await fs.readFile(sourcePath);
-		zip.addFile(archiveName.replace(/\\/g, '/'), data);
-	}
-
-	async function buildBackupZip(rootDir) {
-		const zip = new AdmZip();
-		for (const entry of getBackupEntries(rootDir)) {
-			await addPathToZip(zip, entry.sourcePath, entry.archiveName);
-		}
-
-		const metadata = {
-			createdAt: new Date().toISOString(),
-			format: 'reactor-backup-v1',
-		};
-		zip.addFile('backup-meta.json', Buffer.from(JSON.stringify(metadata, null, 2), 'utf8'));
-		return zip;
-	}
-
-	function resolveSafeBackupTarget(rootDir, rawEntryName) {
-		const normalized = String(rawEntryName || '').replace(/\\/g, '/').replace(/^\/+/, '');
-		if (!normalized || normalized.includes('..')) {
-			return null;
-		}
-
-		const firstSegment = normalized.split('/')[0];
-		const allowedRoots = new Set(['endpoints', 'working-mode.json', 'name', 'ui-settings.json', 'workflow.json', 'activity.log', 'tls', 'backup-meta.json']);
-		if (!allowedRoots.has(firstSegment)) {
-			return null;
-		}
-
-		const targetPath = path.resolve(path.join(rootDir, normalized));
-		if (!targetPath.startsWith(path.resolve(rootDir) + path.sep) && targetPath !== path.resolve(rootDir, normalized)) {
-			return null;
-		}
-
-		return targetPath;
 	}
 
 	async function applyRuntimeStateFromImportedConfig() {

@@ -1,57 +1,8 @@
-function getBridge() {
-	if (typeof window === 'undefined') {
-		return null;
-	}
-	return window.reactor || null;
-}
+import { getBridge, getMobilePlugin, invokeNative } from './reactorBridge';
 
-function getMobilePlugin() {
-	if (typeof window === 'undefined') {
-		return null;
-	}
-	const plugins = window.Capacitor && window.Capacitor.Plugins ? window.Capacitor.Plugins : null;
-	return plugins && plugins.ReactorMobile ? plugins.ReactorMobile : null;
-}
-
-function getCapacitorRuntime() {
-	if (typeof window === 'undefined') {
-		return null;
-	}
-	return window.Capacitor || null;
-}
-
-async function invokeNative(pluginName, methodName, options = {}) {
-	const capacitor = getCapacitorRuntime();
-	if (!capacitor || typeof capacitor.nativePromise !== 'function') {
-		return null;
-	}
-
-	try {
-		const raw = await capacitor.nativePromise(pluginName, methodName, options);
-		if (!raw || typeof raw !== 'object') {
-			return raw;
-		}
-
-		if (Object.prototype.hasOwnProperty.call(raw, 'ok') || Object.prototype.hasOwnProperty.call(raw, 'endpoints') || Object.prototype.hasOwnProperty.call(raw, 'path')) {
-			return raw;
-		}
-
-		if (raw.value && typeof raw.value === 'object') {
-			return raw.value;
-		}
-
-		if (raw.data && typeof raw.data === 'object') {
-			return raw.data;
-		}
-
-		if (raw.result && typeof raw.result === 'object') {
-			return raw.result;
-		}
-
-		return raw;
-	} catch (error) {
-		return { ok: false, error: error?.message || 'native bridge unavailable' };
-	}
+async function callNative(methodName, options = {}) {
+	const nativeResult = await invokeNative('ReactorMobile', methodName, options);
+	return nativeResult || null;
 }
 
 export async function getEndpointsInfo() {
@@ -65,7 +16,7 @@ export async function getEndpointsInfo() {
 		return mobile.getEndpointsInfo();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'getEndpointsInfo');
+	const nativeResult = await callNative('getEndpointsInfo');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -84,7 +35,7 @@ export async function getUiSettings() {
 		return mobile.getUiSettings();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'getUiSettings');
+	const nativeResult = await callNative('getUiSettings');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -103,7 +54,7 @@ export async function stopBackgroundProcess() {
 		return mobile.stopBackgroundProcess();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'stopBackgroundProcess');
+	const nativeResult = await callNative('stopBackgroundProcess');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -118,7 +69,7 @@ export async function copyTextToClipboard(text) {
 		return mobile.copyTextToClipboard({ text: safeText });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'copyTextToClipboard', { text: safeText });
+	const nativeResult = await callNative('copyTextToClipboard', { text: safeText });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -152,7 +103,7 @@ export async function readEndpointContent(filePath) {
 		return mobile.readEndpointContent({ filePath });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'readEndpointContent', { filePath });
+	const nativeResult = await callNative('readEndpointContent', { filePath });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -171,7 +122,7 @@ export async function saveEndpointContent(filePath, content) {
 		return mobile.saveEndpointContent({ filePath, content });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'saveEndpointContent', { filePath, content });
+	const nativeResult = await callNative('saveEndpointContent', { filePath, content });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -190,7 +141,7 @@ export async function resolveEndpointLogPath(filePath) {
 		return mobile.resolveEndpointLogPath({ filePath });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'resolveEndpointLogPath', { filePath });
+	const nativeResult = await callNative('resolveEndpointLogPath', { filePath });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -217,7 +168,7 @@ export async function runEndpointNow(filePath) {
 		return mobile.runEndpointNow({ filePath });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'runEndpointNow', { filePath });
+	const nativeResult = await callNative('runEndpointNow', { filePath });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -236,7 +187,7 @@ export async function createEndpointFile(templateKey, endpointName = '') {
 		return mobile.createEndpointFile({ templateKey, endpointName });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'createEndpointFile', { templateKey, endpointName });
+	const nativeResult = await callNative('createEndpointFile', { templateKey, endpointName });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -255,7 +206,7 @@ export async function renameEndpointFile(filePath, nextName) {
 		return mobile.renameEndpointFile({ filePath, nextName });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'renameEndpointFile', { filePath, nextName });
+	const nativeResult = await callNative('renameEndpointFile', { filePath, nextName });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -288,7 +239,7 @@ export async function deleteEndpointFile(filePath) {
 		return mobile.deleteEndpointFile({ filePath });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'deleteEndpointFile', { filePath });
+	const nativeResult = await callNative('deleteEndpointFile', { filePath });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -307,7 +258,7 @@ export async function toggleEndpointDirective(filePath, directive) {
 		return mobile.toggleEndpointDirective({ filePath, directive });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'toggleEndpointDirective', { filePath, directive });
+	const nativeResult = await callNative('toggleEndpointDirective', { filePath, directive });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -326,7 +277,7 @@ export async function openEventLog(filePath) {
 		return mobile.openEventLog({ filePath });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'openEventLog', { filePath });
+	const nativeResult = await callNative('openEventLog', { filePath });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -345,7 +296,7 @@ export async function clearEventLog(filePath) {
 		return mobile.clearEventLog({ filePath });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'clearEventLog', { filePath });
+	const nativeResult = await callNative('clearEventLog', { filePath });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -364,7 +315,7 @@ export async function getHttpServerConfig() {
 		return mobile.getHttpServerConfig();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'getHttpServerConfig');
+	const nativeResult = await callNative('getHttpServerConfig');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -383,7 +334,7 @@ export async function setHttpServerPort(port) {
 		return mobile.setHttpServerPort({ port });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'setHttpServerPort', { port });
+	const nativeResult = await callNative('setHttpServerPort', { port });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -402,7 +353,7 @@ export async function getReactorName() {
 		return mobile.getReactorName();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'getReactorName');
+	const nativeResult = await callNative('getReactorName');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -421,7 +372,7 @@ export async function setReactorName(name) {
 		return mobile.setReactorName({ name });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'setReactorName', { name });
+	const nativeResult = await callNative('setReactorName', { name });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -440,7 +391,7 @@ export async function openServerStatus() {
 		return mobile.openServerStatus();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'openServerStatus');
+	const nativeResult = await callNative('openServerStatus');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -475,7 +426,7 @@ export async function getExchangeConfig() {
 		return mobile.getExchangeConfig();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'getExchangeConfig');
+	const nativeResult = await callNative('getExchangeConfig');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -494,7 +445,7 @@ export async function setExchangeConfig(mode, host, port, tls = false, token = '
 		return mobile.setExchangeConfig({ mode, host, port, tls, token, discovery, stun, turn });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'setExchangeConfig', { mode, host, port, tls, token, discovery, stun, turn });
+	const nativeResult = await callNative('setExchangeConfig', { mode, host, port, tls, token, discovery, stun, turn });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -513,7 +464,7 @@ export async function saveRelayConfig(kind, config = {}) {
 		return mobile.saveRelayConfig({ kind, config });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'saveRelayConfig', { kind, config });
+	const nativeResult = await callNative('saveRelayConfig', { kind, config });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -532,7 +483,7 @@ export async function getP2PStatus() {
 		return mobile.getP2PStatus();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'getP2PStatus');
+	const nativeResult = await callNative('getP2PStatus');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -551,7 +502,7 @@ export async function sendP2PSignal(target, signalType, payload = null, sessionI
 		return mobile.sendP2PSignal({ target, signalType, payload, sessionId });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'sendP2PSignal', { target, signalType, payload, sessionId });
+	const nativeResult = await callNative('sendP2PSignal', { target, signalType, payload, sessionId });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -570,7 +521,7 @@ export async function closeP2PSession(target, sessionId = null, payload = null) 
 		return mobile.closeP2PSession({ target, sessionId, payload });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'closeP2PSession', { target, sessionId, payload });
+	const nativeResult = await callNative('closeP2PSession', { target, sessionId, payload });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -589,7 +540,7 @@ export async function startP2PSession(target, initiator = true) {
 		return mobile.startP2PSession({ target, initiator });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'startP2PSession', { target, initiator });
+	const nativeResult = await callNative('startP2PSession', { target, initiator });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -608,7 +559,7 @@ export async function sendP2PData(target, text = '') {
 		return mobile.sendP2PData({ target, text });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'sendP2PData', { target, text });
+	const nativeResult = await callNative('sendP2PData', { target, text });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -627,7 +578,7 @@ export async function requestRemoteEndpointsP2P(target, timeoutMs = 8000) {
 		return mobile.requestRemoteEndpointsP2P({ target, timeoutMs });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'requestRemoteEndpointsP2P', { target, timeoutMs });
+	const nativeResult = await callNative('requestRemoteEndpointsP2P', { target, timeoutMs });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -646,7 +597,7 @@ export async function getExchangeLinkedNodes() {
 		return mobile.getExchangeLinkedNodes();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'getExchangeLinkedNodes');
+	const nativeResult = await callNative('getExchangeLinkedNodes');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -665,7 +616,7 @@ export async function getExchangeToken() {
 		return mobile.getExchangeToken();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'getExchangeToken');
+	const nativeResult = await callNative('getExchangeToken');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -684,7 +635,7 @@ export async function generateExchangeToken() {
 		return mobile.generateExchangeToken();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'generateExchangeToken');
+	const nativeResult = await callNative('generateExchangeToken');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -727,7 +678,7 @@ export async function exportBackup() {
 		return mobile.exportBackup();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'exportBackup');
+	const nativeResult = await callNative('exportBackup');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -746,7 +697,7 @@ export async function importBackup() {
 		return mobile.importBackup();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'importBackup');
+	const nativeResult = await callNative('importBackup');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -765,7 +716,7 @@ export async function getMessageQueueStatus() {
 		return mobile.getMessageQueueStatus();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'getMessageQueueStatus');
+	const nativeResult = await callNative('getMessageQueueStatus');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -784,7 +735,7 @@ export async function setMessageQueueTtlDays(ttlDays) {
 		return mobile.setMessageQueueTtlDays({ ttlDays });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'setMessageQueueTtlDays', { ttlDays });
+	const nativeResult = await callNative('setMessageQueueTtlDays', { ttlDays });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -803,7 +754,7 @@ export async function flushMessageQueue() {
 		return mobile.flushMessageQueue();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'flushMessageQueue');
+	const nativeResult = await callNative('flushMessageQueue');
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -822,7 +773,7 @@ export async function clearMessageQueue() {
 		return mobile.clearMessageQueue();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'clearMessageQueue');
+	const nativeResult = await callNative('clearMessageQueue');
 	if (nativeResult) {
 		return nativeResult;
 	}

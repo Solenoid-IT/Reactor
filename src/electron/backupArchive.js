@@ -1,0 +1,81 @@
+const fs = require('fs/promises');
+const path = require('path');
+const AdmZip = require('adm-zip');
+
+function getBackupEntries(rootDir) {
+	return [
+		{ sourcePath: path.join(rootDir, 'endpoints'), archiveName: 'endpoints' },
+		{ sourcePath: path.join(rootDir, 'working-mode.json'), archiveName: 'working-mode.json' },
+		{ sourcePath: path.join(rootDir, 'name'), archiveName: 'name' },
+		{ sourcePath: path.join(rootDir, 'ui-settings.json'), archiveName: 'ui-settings.json' },
+		{ sourcePath: path.join(rootDir, 'workflow.json'), archiveName: 'workflow.json' },
+		{ sourcePath: path.join(rootDir, 'activity.log'), archiveName: 'activity.log' },
+		{ sourcePath: path.join(rootDir, 'tls'), archiveName: 'tls' },
+	];
+}
+
+async function addPathToZip(zip, sourcePath, archiveName) {
+	let stats;
+	try {
+		stats = await fs.stat(sourcePath);
+	} catch {
+		return;
+	}
+
+	if (stats.isDirectory()) {
+		const entries = await fs.readdir(sourcePath, { withFileTypes: true });
+		if (entries.length === 0) {
+			zip.addFile(`${archiveName.replace(/\\/g, '/')}/.keep`, Buffer.from('', 'utf8'));
+			return;
+		}
+
+		for (const entry of entries) {
+			const childSource = path.join(sourcePath, entry.name);
+			const childArchive = `${archiveName.replace(/\\/g, '/')}/${entry.name}`;
+			await addPathToZip(zip, childSource, childArchive);
+		}
+		return;
+	}
+
+	const data = await fs.readFile(sourcePath);
+	zip.addFile(archiveName.replace(/\\/g, '/'), data);
+}
+
+async function buildBackupZip(rootDir) {
+	const zip = new AdmZip();
+	for (const entry of getBackupEntries(rootDir)) {
+		await addPathToZip(zip, entry.sourcePath, entry.archiveName);
+	}
+
+	const metadata = {
+		createdAt: new Date().toISOString(),
+		format: 'reactor-backup-v1',
+	};
+	zip.addFile('backup-meta.json', Buffer.from(JSON.stringify(metadata, null, 2), 'utf8'));
+	return zip;
+}
+
+function resolveSafeBackupTarget(rootDir, rawEntryName) {
+	const normalized = String(rawEntryName || '').replace(/\\/g, '/').replace(/^\/+/, '');
+	if (!normalized || normalized.includes('..')) {
+		return null;
+	}
+
+	const firstSegment = normalized.split('/')[0];
+	const allowedRoots = new Set(['endpoints', 'working-mode.json', 'name', 'ui-settings.json', 'workflow.json', 'activity.log', 'tls', 'backup-meta.json']);
+	if (!allowedRoots.has(firstSegment)) {
+		return null;
+	}
+
+	const targetPath = path.resolve(path.join(rootDir, normalized));
+	if (!targetPath.startsWith(path.resolve(rootDir) + path.sep) && targetPath !== path.resolve(rootDir, normalized)) {
+		return null;
+	}
+
+	return targetPath;
+}
+
+module.exports = {
+	buildBackupZip,
+	resolveSafeBackupTarget,
+};
