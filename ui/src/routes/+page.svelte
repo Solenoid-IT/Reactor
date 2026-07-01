@@ -450,7 +450,7 @@
 			return 'Connected P2P';
 		}
 		if (key === 'relay') {
-			return 'Connected TURN';
+			return 'Connected RELAY';
 		}
 		if (key === 'dialing') {
 			return 'Dialing';
@@ -1444,7 +1444,7 @@
 				<div class="network-state-legend">
 					<span class="legend-item"><i class="legend-dot is-current"></i>Current node</span>
 					<span class="legend-item"><i class="legend-dot is-connected"></i>Connected P2P</span>
-					<span class="legend-item"><i class="legend-dot is-relay"></i>Connected TURN</span>
+					<span class="legend-item"><i class="legend-dot is-relay"></i>Connected RELAY</span>
 					<span class="legend-item"><i class="legend-dot is-dialing"></i>Dialing</span>
 					<span class="legend-item"><i class="legend-dot is-fallback"></i>Fallback</span>
 					<span class="legend-item"><i class="legend-dot is-discovered"></i>Discovered</span>
