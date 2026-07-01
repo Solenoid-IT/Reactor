@@ -1,12 +1,12 @@
 // @state ENABLED
 // @mutex ON
+
 // @on WATCH "/Abs/Path/of/Desktop"
 // @on WATCH "/Abs/Path/of/Downloads" [file:created]
 
 
 
-import { log } from 'core';
-import type { Context } from 'core';
+import { Context, log } from 'core';
 
 
 

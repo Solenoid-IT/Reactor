@@ -123,11 +123,12 @@ Prevents concurrent executions. Default: `FALSE`
 
 **Context example:**
 ```typescript
-import { log } from 'core';
-import type { Context } from 'core';
+import { Context, log } from 'core';
 
-export async function run(ctx: Context) {
-	if (ctx.trigger === 'WATCH') {
+export async function run (ctx: Context)
+{
+	if ( ctx.trigger === 'WATCH' )
+  {
     await log(`File event: ${ctx.watchPath} (${ctx.watchType})`, 'I');
 	}
 }

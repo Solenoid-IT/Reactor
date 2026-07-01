@@ -136,12 +136,13 @@ Sender filters use OR semantics. Example: `@on MESSAGE [R2,net:1.2.3.4:5678]` me
 
 ```ts
 // @enabled TRUE
+
 // @on MESSAGE [R2,net:192.168.1.10:7070,net:www.example.com]
 
-import type { Context } from 'core';
-import { log } from 'core';
+import { Context, log } from 'core';
 
-export async function run(ctx: Context) {
+export async function run (ctx: Context)
+{
 	await log(`MESSAGE from ${ctx.messageSender || 'unknown'}`);
 	await log(`target node=${ctx.messageTargetNode || 'n/a'} endpoint=${ctx.messageTargetEndpoint || 'broadcast'} endpointId=${ctx.messageTargetEndpointId || 'n/a'}`);
 
@@ -149,7 +150,8 @@ export async function run(ctx: Context) {
 	await log(`content=${ctx.messageContent || ''}`);
 
 	// JSON body (if content-type is json)
-	if (ctx.messageJson) {
+	if (ctx.messageJson)
+	{
 		await log(`json received`);
 	}
 }
@@ -231,10 +233,10 @@ export async function run() {
 
 ```ts
 // @enabled TRUE
+
 // @on STREAM [R2,net:192.168.1.10:7070]
 
-import type { Context } from 'core';
-import { log } from 'core';
+import { Context, log } from 'core';
 
 const buffersByStreamId = new Map<string, Buffer[]>();
 
@@ -273,12 +275,13 @@ For low-RAM transfers, let runtime spool chunks to disk and finalize on `STREAME
 
 ```ts
 // @enabled TRUE
+
 // @on STREAMEND [R2,net:192.168.1.10:7070]
 
-import type { Context } from 'core';
-import { log } from 'core';
+import { Context, log } from 'core';
 
-export async function run(ctx: Context) {
+export async function run (ctx: Context)
+{
 	const end = ctx.streamEnd;
 	if (!end) return;
 

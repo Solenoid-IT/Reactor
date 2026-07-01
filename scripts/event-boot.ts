@@ -7,7 +7,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { log } from 'core';
 
-import type { Context } from 'core';
+import { Context } from 'core';
 
 
 

@@ -1,5 +1,6 @@
 // @state ENABLED
 // @mutex ON
+
 // @on SCHEDULE "EVERY 30 SECOND"
 
 
@@ -9,7 +10,7 @@ import os from 'os';
 import path from 'path';
 import { log } from 'core';
 
-import type { Context } from 'core';
+import { Context } from 'core';
 
 
 

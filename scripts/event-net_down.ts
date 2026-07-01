@@ -1,4 +1,5 @@
 // @state DISABLED
+
 // @on NET_DOWN
 
 
@@ -8,11 +9,11 @@ import os from 'os';
 import path from 'path';
 import { log } from 'core';
 
-import type { Context } from 'core';
+import { Context } from 'core';
 
 
 
-export async function run(ctx : Context)
+export async function run (ctx : Context)
 {
   const targetPath = path.join(os.homedir(), 'Desktop', 'net_off');
   await fs.mkdir(targetPath, { recursive: true });

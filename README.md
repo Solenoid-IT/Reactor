@@ -404,13 +404,14 @@ Minimal example:
 ```ts
 // @enabled TRUE
 // @mutex FALSE
+
 // @on SCHEDULE "EVERY 30 SECOND"
 
-import { log } from 'core';
-import type { Context } from 'core';
+import { Context, log } from 'core';
 
-export async function run(ctx: Context) {
-  await log("scheduled execution", "I");
+export async function run (ctx: Context)
+{
+  await log( 'scheduled execution', 'I' );
 }
 ```
 
@@ -432,7 +433,7 @@ Available ctx fields:
 - watchType: watch event type
 
 Runtime APIs must be imported from `core`:
-- `import type { Context } from 'core'`
+- `import { Context } from 'core'`
 - `import { log } from 'core'`
 - `import { Node } from 'core'` then `Node.sendMessage(...)`
 - `import { HttpClient, FileSystem, Device, System, api } from 'core'`
@@ -442,14 +443,16 @@ WATCH example with listener filter:
 ```ts
 // @enabled TRUE
 // @mutex TRUE
+
 // @on WATCH "/my/folder" [file:created, file:moved, dir:deleted]
 
-import { log } from 'core';
-import type { Context } from 'core';
+import { Context, log } from 'core';
 
-export async function run(ctx: Context) {
-  if (ctx.trigger === 'WATCH') {
-    await log('watch event: ' + ctx.watchPath + ' (' + ctx.watchType + ')', 'I');
+export async function run (ctx: Context)
+{
+  if ( ctx.trigger === 'WATCH' )
+  {
+    await log( 'watch event: ' + ctx.watchPath + ' (' + ctx.watchType + ')', 'I' );
   }
 }
 ```
