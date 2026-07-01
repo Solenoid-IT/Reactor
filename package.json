@@ -63,6 +63,7 @@
       "preload.js",
       "src/**/*",
       "ui/build/**/*",
+      "templates/**/*",
       "assets/**/*",
       "reactor.service",
       "package.json",

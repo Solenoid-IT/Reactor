@@ -245,6 +245,15 @@ public class ReactorHttpService extends Service {
     }
     public static boolean isExchangeClientConnected() { return wsExchangeClientSocket != null; }
 
+    public static void reconnectExchangeClient(String reason) {
+        ReactorHttpService current = instance;
+        if (current == null) {
+            return;
+        }
+
+        current.reconnectExchangeClientInternal(reason);
+    }
+
     public interface P2PSignalListener {
         void onSignal(String from, String sessionId, String signalType, JSONObject payload);
     }
@@ -3212,6 +3221,10 @@ public class ReactorHttpService extends Service {
                         }
                         if (!name.isEmpty()) {
                             if (clientName != null) wsExchangeClients.remove(clientName);
+                            WsConnection previousConn = wsExchangeClients.get(name);
+                            if (previousConn != null && previousConn != conn) {
+                                try { previousConn.socket.close(); } catch (IOException ignored) {}
+                            }
                             clientName = name;
                             wsExchangeClients.put(clientName, conn);
                             appendGlobalLog(buildExchangeLog("CLIENT_REGISTERED", "client: " + clientName));
@@ -3242,8 +3255,10 @@ public class ReactorHttpService extends Service {
                 heartbeatThread.interrupt();
             }
             if (clientName != null) {
-                wsExchangeClients.remove(clientName);
-                appendGlobalLog(buildExchangeLog("CLIENT_DISCONNECTED", clientName));
+                if (wsExchangeClients.get(clientName) == conn) {
+                    wsExchangeClients.remove(clientName);
+                    appendGlobalLog(buildExchangeLog("CLIENT_DISCONNECTED", clientName));
+                }
             }
             if (conn != null) {
                 wsExchangePendingBinaryByConn.remove(conn);
@@ -3586,6 +3601,24 @@ public class ReactorHttpService extends Service {
             try { lock.wait(); } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+        }
+    }
+
+    private void reconnectExchangeClientInternal(String reason) {
+        if (!"node".equals(currentExchangeMode) || !wsClientRunning) {
+            return;
+        }
+
+        appendGlobalLog(buildExchangeLog(
+                "CLIENT_RECONNECT",
+                "reason=" + String.valueOf(reason == null ? "runtime-update" : reason)
+        ));
+
+        try {
+            stopWsExchangeClient();
+            startWsExchangeClient();
+        } catch (Exception error) {
+            appendGlobalLog(buildExchangeLog("CLIENT_FAILURE", "reconnect error: " + error.getMessage()));
         }
     }
 

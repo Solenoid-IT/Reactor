@@ -1,0 +1,15 @@
+// @enabled FALSE
+// @mutex TRUE
+
+// @on MESSAGE
+
+
+
+import { Context, log } from 'core';
+
+
+
+export async function run (ctx : Context)
+{
+	await log('message from ' + (ctx.messageSenderName || ctx.messageSender || 'unknown') + ': ' + (ctx.messageContent || ''));
+}

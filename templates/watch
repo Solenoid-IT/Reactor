@@ -1,0 +1,16 @@
+// @enabled FALSE
+// @mutex TRUE
+
+// @on WATCH "/Abs/Path/of/Desktop"
+// @on WATCH "/Abs/Path/of/Downloads" [file:created]
+
+
+
+import { Context, log } from 'core';
+
+
+
+export async function run (ctx : Context)
+{
+	await log('watch event: ' + ctx.watchPath + ' (' + ctx.watchType + ')');
+}

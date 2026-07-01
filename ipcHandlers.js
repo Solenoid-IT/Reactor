@@ -6,6 +6,35 @@ const AdmZip = require('adm-zip');
 const { parseDirectiveHeader, rebuildDirectiveHeader } = require('./directiveHeader');
 const { readUiSettings, writeUiSettings } = require('./uiSettings');
 
+const ALLOWED_ENDPOINT_TEMPLATE_KEYS = new Set(['blank', 'schedule', 'event', 'watch']);
+
+function resolveEndpointTemplateCandidates(appRootDir, templateKey) {
+	return [
+		path.resolve(appRootDir, 'templates', templateKey),
+	];
+}
+
+async function readEndpointTemplate(templateKey, fallbackTemplateKey, appRootDir) {
+	const requestedTemplate = String(templateKey || '').trim().toLowerCase();
+	const safeTemplateKey = ALLOWED_ENDPOINT_TEMPLATE_KEYS.has(requestedTemplate)
+		? requestedTemplate
+		: fallbackTemplateKey;
+
+	let lastReadError = '';
+	for (const candidatePath of resolveEndpointTemplateCandidates(appRootDir, safeTemplateKey)) {
+		try {
+			const content = await fs.readFile(candidatePath, 'utf8');
+			return { key: safeTemplateKey, content };
+		} catch (error) {
+			if (error && error.code !== 'ENOENT') {
+				lastReadError = error.message || String(error);
+			}
+		}
+	}
+
+	throw new Error(lastReadError || `endpoint template file not found at ./templates/${safeTemplateKey}`);
+}
+
 async function openWithConfiguredProgramOrDefault(targetPath) {
 	const settings = await readUiSettings();
 	if (!settings.defaultProgramPath) {
@@ -536,6 +565,8 @@ function setupIpcHandlers(runtime, options = {}) {
 			return { ok: false, error: 'project path outside endpoints directory' };
 		}
 
+		const appRootDir = path.resolve(runtime.reactorRootDir || path.dirname(runtime.endpointsDir));
+
 		const endpointFileName = 'boot.ts';
 		const endpointFilePath = path.join(projectRoot, endpointFileName);
 		const projectUuidPath = path.join(projectRoot, 'uuid');
@@ -548,86 +579,15 @@ function setupIpcHandlers(runtime, options = {}) {
 			.replace(/[^a-z0-9._-]/g, '-')
 			.replace(/^[._-]+/, '') || 'reactor-endpoint';
 
-		const templateMap = {
-			blank: [
-				'// @enabled FALSE',
-				'// @mutex FALSE',
-				'',
-				'',
-				'',
-				"import { log } from 'core';",
-				"import type { Context } from 'core';",
-				'',
-				'',
-				'',
-				'export async function run (ctx : Context)',
-				'{',
-				"\tawait log('new blank endpoint');",
-				'}',
-				'',
-			],
-			schedule: [
-				'// @enabled FALSE',
-				'// @mutex FALSE',
-				'',
-				'// @on SCHEDULE "EVERY 30 SECOND"',
-				'',
-				'',
-				'',
-				"import { log } from 'core';",
-				"import type { Context } from 'core';",
-				'',
-				'',
-				'',
-				'export async function run (ctx : Context)',
-				'{',
-				"\tawait log('scheduled endpoint tick');",
-				'}',
-				'',
-			],
-			event: [
-				'// @enabled FALSE',
-				'// @mutex TRUE',
-				'',
-				'// @on MESSAGE [sender_1]',
-				'',
-				'',
-				'',
-				"import { log } from 'core';",
-				"import type { Context } from 'core';",
-				'',
-				'',
-				'',
-				'export async function run (ctx : Context)',
-				'{',
-				"\tawait log('message from ' + (ctx.messageSenderName || ctx.messageSender || 'unknown') + ': ' + (ctx.messageContent || ''));",
-				'}',
-				'',
-			],
-			watch: [
-				'// @enabled FALSE',
-				'// @mutex TRUE',
-				'',
-				'// @on WATCH "/Abs/Path/of/Desktop"',
-				'// @on WATCH "/Abs/Path/of/Downloads" [file:created]',
-				'',
-				'',
-				'',
-				"import { log } from 'core';",
-				"import type { Context } from 'core';",
-				'',
-				'',
-				'',
-				'export async function run (ctx : Context)',
-				'{',
-				"\tawait log('watch event: ' + ctx.watchPath + ' (' + ctx.watchType + ')');",
-				'}',
-				'',
-			],
-		};
-
-		const safeTemplateKey = templateKey && templateMap[templateKey] ? templateKey : 'schedule';
-		const initialContent = templateMap[safeTemplateKey].join('\n');
+		let safeTemplateKey = 'schedule';
+		let initialContent = '';
+		try {
+			const template = await readEndpointTemplate(templateKey, 'schedule', appRootDir);
+			safeTemplateKey = template.key;
+			initialContent = template.content;
+		} catch (error) {
+			return { ok: false, error: error.message || 'endpoint template file not found' };
+		}
 		const contextContent = [
 			"export type { Context } from 'core';",
 			'',

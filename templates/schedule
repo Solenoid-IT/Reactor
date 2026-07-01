@@ -1,0 +1,15 @@
+// @enabled FALSE
+// @mutex FALSE
+
+// @on SCHEDULE "EVERY 30 SECOND"
+
+
+
+import { Context, log } from 'core';
+
+
+
+export async function run (ctx : Context)
+{
+	await log('scheduled endpoint tick');
+}

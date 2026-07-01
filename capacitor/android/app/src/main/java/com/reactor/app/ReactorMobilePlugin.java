@@ -71,6 +71,9 @@ public class ReactorMobilePlugin extends Plugin {
     private static final String TAG = "ReactorMobilePlugin";
     private static final String WORKING_MODE_FILE = "working-mode.json";
     private static final String REACTOR_NAME_FILE = "name";
+    private static final String ENDPOINT_TEMPLATES_DIR = "templates";
+    private static final String ENDPOINT_TEMPLATE_ASSETS_DIR = "public/templates";
+    private static final Set<String> ALLOWED_ENDPOINT_TEMPLATE_KEYS = new LinkedHashSet<>(Arrays.asList("blank", "schedule", "event", "watch"));
     private File pendingBackupExportFile = null;
     private AndroidP2PWebRtcManager nativeP2PManager;
 
@@ -79,6 +82,7 @@ public class ReactorMobilePlugin extends Plugin {
         super.load();
         nativeP2PManager = AndroidP2PWebRtcManager.getInstance(getContext());
         nativeP2PManager.initialize();
+        ensureEndpointTemplatesPresent();
         ensureHttpServerRunning();
     }
 
@@ -697,6 +701,14 @@ public class ReactorMobilePlugin extends Plugin {
         return new File(getContext().getFilesDir(), "tls");
     }
 
+    private File getTemplatesDir() {
+        File templatesDir = new File(getContext().getFilesDir(), ENDPOINT_TEMPLATES_DIR);
+        if (!templatesDir.exists()) {
+            templatesDir.mkdirs();
+        }
+        return templatesDir;
+    }
+
     private File getBackupsDir() {
         File externalDir = getContext().getExternalFilesDir("backups");
         File backupsDir = externalDir != null ? externalDir : new File(getContext().getFilesDir(), "backups");
@@ -887,6 +899,78 @@ public class ReactorMobilePlugin extends Plugin {
         }
     }
 
+    private String normalizeEndpointTemplateKey(String rawTemplate, String fallbackTemplate) {
+        String normalized = String.valueOf(rawTemplate == null ? "" : rawTemplate)
+                .trim()
+                .toLowerCase()
+                .replaceAll("[^a-z0-9_-]", "");
+        if (ALLOWED_ENDPOINT_TEMPLATE_KEYS.contains(normalized)) {
+            return normalized;
+        }
+        return fallbackTemplate;
+    }
+
+    private String readAssetTextFile(String assetPath) throws IOException {
+        StringBuilder content = new StringBuilder();
+        try (InputStream stream = getContext().getAssets().open(assetPath);
+             BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                content.append(line).append('\n');
+            }
+        }
+        return content.toString();
+    }
+
+    private String readEndpointTemplateFromAssets(String templateKey) throws IOException {
+        String safeTemplateKey = normalizeEndpointTemplateKey(templateKey, "blank");
+        String[] candidates = new String[] {
+                ENDPOINT_TEMPLATE_ASSETS_DIR + "/" + safeTemplateKey,
+                "templates/" + safeTemplateKey
+        };
+
+        IOException lastError = null;
+        for (String candidate : candidates) {
+            try {
+                return readAssetTextFile(candidate);
+            } catch (IOException error) {
+                lastError = error;
+            }
+        }
+
+        if (lastError != null) {
+            throw new IOException("endpoint template file not found for type \"" + safeTemplateKey + "\": " + lastError.getMessage(), lastError);
+        }
+
+        throw new IOException("endpoint template file not found for type \"" + safeTemplateKey + "\"");
+    }
+
+    private String readEndpointTemplateFromStorage(String templateKey) throws IOException {
+        String safeTemplateKey = normalizeEndpointTemplateKey(templateKey, "blank");
+        File templateFile = new File(getTemplatesDir(), safeTemplateKey);
+        if (!templateFile.exists()) {
+            throw new IOException("endpoint template file not found at ./templates/" + safeTemplateKey);
+        }
+        return readTextFile(templateFile);
+    }
+
+    private void ensureEndpointTemplatesPresent() {
+        File templatesDir = getTemplatesDir();
+        for (String key : ALLOWED_ENDPOINT_TEMPLATE_KEYS) {
+            File target = new File(templatesDir, key);
+            if (target.exists()) {
+                continue;
+            }
+
+            try {
+                String content = readEndpointTemplateFromAssets(key);
+                writeTextFile(target, content);
+            } catch (Exception error) {
+                Log.w(TAG, "Unable to seed endpoint template " + key + " from assets", error);
+            }
+        }
+    }
+
     private JSObject createExecutionStartEntry(String endpointName, String endpointPath, String endpointState, String scope, String trigger, String event) {
         JSObject endpoint = new JSObject();
         endpoint.put("name", endpointName);
@@ -1045,7 +1129,8 @@ public class ReactorMobilePlugin extends Plugin {
         String requestedName = call.getString("endpointName", "");
 
         try {
-            String safeTemplate = templateKey.replaceAll("[^a-zA-Z0-9_-]", "");
+            ensureEndpointTemplatesPresent();
+            String safeTemplate = normalizeEndpointTemplateKey(templateKey, "blank");
             String safeRequestedName = String.valueOf(requestedName)
                     .trim()
                     .replaceAll("[^a-zA-Z0-9._-]", "-")
@@ -1056,32 +1141,41 @@ public class ReactorMobilePlugin extends Plugin {
                     ? "endpoint-" + safeTemplate + "-" + System.currentTimeMillis()
                     : safeRequestedName;
             File projectDir = new File(getEndpointsDir(), projectName);
-            if (!projectDir.exists() && !projectDir.mkdirs()) {
+            if (projectDir.exists()) {
+                throw new IOException("endpoint project already exists");
+            }
+            if (!projectDir.mkdirs()) {
                 throw new IOException("unable to create project directory");
             }
 
             File uuidFile = new File(projectDir, "uuid");
             File bootFile = new File(projectDir, "boot.ts");
-            String source;
-            switch (templateKey) {
-                case "schedule":
-                    source = "// @enabled FALSE\n// @mutex FALSE\n// @schedule EVERY 30 SECOND\n\nimport { log } from 'core';\nimport type { Context } from 'core';\n\nexport async function run(ctx: Context) {\n\tawait log('scheduled endpoint tick');\n}\n";
-                    break;
-                case "event":
-                    source = "// @enabled FALSE\n// @mutex TRUE\n// @on MESSAGE\n\nimport { log } from 'core';\nimport type { Context } from 'core';\n\nexport async function run(ctx: Context) {\n\tawait log('event received');\n}\n";
-                    break;
-                case "watch":
-                    source = "// @enabled FALSE\n// @mutex TRUE\n// @watch ./inbox [file:created, file:moved]\n\nimport { log } from 'core';\nimport type { Context } from 'core';\n\nexport async function run(ctx: Context) {\n\tawait log('watch event: ' + (ctx.watchPath || ''));\n}\n";
-                    break;
-                default:
-                    source = "// @enabled FALSE\n// @mutex FALSE\n\nimport { log } from 'core';\nimport type { Context } from 'core';\n\nexport async function run(ctx: Context) {\n\tawait log('new blank endpoint');\n}\n";
-                    break;
+            File contextFile = new File(projectDir, "context.ts");
+            File packageJsonFile = new File(projectDir, "package.json");
+            File eventLogFile = new File(projectDir, "activity.log");
+            String source = readEndpointTemplateFromStorage(safeTemplate);
+
+            String npmSafeName = projectName
+                    .toLowerCase()
+                    .replaceAll("[^a-z0-9._-]", "-")
+                    .replaceAll("^[._-]+", "");
+            if (npmSafeName.isEmpty()) {
+                npmSafeName = "reactor-endpoint";
             }
 
-                        writeTextFile(uuidFile, UUID.randomUUID().toString().toLowerCase() + "\n");
+            JSONObject packageJson = new JSONObject();
+            packageJson.put("name", npmSafeName);
+            packageJson.put("version", "1.0.0");
+            packageJson.put("private", true);
+            packageJson.put("type", "commonjs");
+            packageJson.put("main", "boot.ts");
+            packageJson.put("description", "Reactor endpoint project: " + projectName);
+
+            writeTextFile(uuidFile, UUID.randomUUID().toString().toLowerCase() + "\n");
             writeTextFile(bootFile, source);
-            writeTextFile(new File(projectDir, "context.ts"), "export {};\n");
-            writeTextFile(new File(projectDir, "activity.log"), "");
+            writeTextFile(contextFile, "export type { Context } from 'core';\n");
+            writeTextFile(packageJsonFile, packageJson.toString(2) + "\n");
+            writeTextFile(eventLogFile, "");
 
             String verifyContent = readTextFile(bootFile);
             if (verifyContent.trim().isEmpty()) {
@@ -1614,6 +1708,7 @@ public class ReactorMobilePlugin extends Plugin {
     public void setReactorName(PluginCall call) {
         String name = call.getString("name", "mobile-reactor");
         setConfiguredReactorName(name);
+        ReactorHttpService.reconnectExchangeClient("reactor-name-updated");
         call.resolve(new JSObject().put("ok", true).put("name", name));
     }
 

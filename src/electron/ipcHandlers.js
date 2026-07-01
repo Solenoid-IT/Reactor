@@ -6,6 +6,71 @@ const AdmZip = require('adm-zip');
 const { parseDirectiveHeader, rebuildDirectiveHeader } = require('./directiveHeader');
 const { readUiSettings, writeUiSettings } = require('./uiSettings');
 
+const ALLOWED_ENDPOINT_TEMPLATE_KEYS = new Set(['blank', 'schedule', 'event', 'watch']);
+
+async function ensureExternalTemplatesDirectory(appRootDir) {
+	if (!appRootDir) {
+		return;
+	}
+
+	const externalTemplatesDir = path.resolve(appRootDir, 'templates');
+	try {
+		const stats = await fs.stat(externalTemplatesDir);
+		if (stats.isDirectory()) {
+			return;
+		}
+	} catch (error) {
+		if (!error || error.code !== 'ENOENT') {
+			return;
+		}
+	}
+
+	await fs.mkdir(externalTemplatesDir, { recursive: true });
+	for (const templateKey of ALLOWED_ENDPOINT_TEMPLATE_KEYS) {
+		const template = await readEndpointTemplate(templateKey, templateKey, appRootDir);
+		const targetPath = path.join(externalTemplatesDir, template.key);
+		await fs.writeFile(targetPath, template.content, { encoding: 'utf8' });
+	}
+}
+
+function resolveEndpointTemplateCandidates(appRootDir, templateKey) {
+	const candidates = [
+		path.resolve(appRootDir, 'templates', templateKey),
+		path.resolve(__dirname, '..', '..', 'templates', templateKey),
+		path.resolve(process.cwd(), 'templates', templateKey),
+		path.resolve(app.getAppPath(), 'templates', templateKey),
+		path.resolve(app.getAppPath(), 'ui', 'build', 'templates', templateKey),
+	];
+
+	if (process.resourcesPath) {
+		candidates.push(path.resolve(process.resourcesPath, 'templates', templateKey));
+		candidates.push(path.resolve(process.resourcesPath, 'app.asar.unpacked', 'templates', templateKey));
+	}
+
+	return Array.from(new Set(candidates));
+}
+
+async function readEndpointTemplate(templateKey, fallbackTemplateKey, appRootDir) {
+	const requestedTemplate = String(templateKey || '').trim().toLowerCase();
+	const safeTemplateKey = ALLOWED_ENDPOINT_TEMPLATE_KEYS.has(requestedTemplate)
+		? requestedTemplate
+		: fallbackTemplateKey;
+
+	let lastReadError = '';
+	for (const candidatePath of resolveEndpointTemplateCandidates(appRootDir, safeTemplateKey)) {
+		try {
+			const content = await fs.readFile(candidatePath, 'utf8');
+			return { key: safeTemplateKey, content };
+		} catch (error) {
+			if (error && error.code !== 'ENOENT') {
+				lastReadError = error.message || String(error);
+			}
+		}
+	}
+
+	throw new Error(lastReadError || `endpoint template file not found at ./templates/${safeTemplateKey}`);
+}
+
 async function openWithConfiguredProgramOrDefault(targetPath) {
 	const settings = await readUiSettings();
 	if (!settings.defaultProgramPath) {
@@ -40,6 +105,12 @@ function setupIpcHandlers(runtime, options = {}) {
 		: () => app.exit(0);
 	const endpointsRoot = runtime ? path.resolve(runtime.endpointsDir) : '';
 	const projectRoot = runtime ? path.resolve(runtime.reactorRootDir || path.dirname(runtime.endpointsDir)) : '';
+
+	ensureExternalTemplatesDirectory(projectRoot).catch((error) => {
+		if (runtime && runtime.log) {
+			runtime.log(`Template bootstrap skipped: ${error.message}`);
+		}
+	});
 
 	function isPathInsideRoot(targetPath, rootPath) {
 		if (!targetPath || !rootPath) {
@@ -536,6 +607,8 @@ function setupIpcHandlers(runtime, options = {}) {
 			return { ok: false, error: 'project path outside endpoints directory' };
 		}
 
+		const appRootDir = path.resolve(runtime.reactorRootDir || path.dirname(runtime.endpointsDir));
+
 		const endpointFileName = 'boot.ts';
 		const endpointFilePath = path.join(projectRoot, endpointFileName);
 		const projectUuidPath = path.join(projectRoot, 'uuid');
@@ -548,83 +621,15 @@ function setupIpcHandlers(runtime, options = {}) {
 			.replace(/[^a-z0-9._-]/g, '-')
 			.replace(/^[._-]+/, '') || 'reactor-endpoint';
 
-		const templateMap = {
-			blank: [
-				'// @enabled FALSE',
-				'// @mutex FALSE',
-				'',
-				'',
-				'',
-				"import { log } from 'core';",
-				"import type { Context } from 'core';",
-				'',
-				'',
-				'',
-				'export async function run (ctx : Context)',
-				'{',
-				"\tawait log('new blank endpoint');",
-				'}',
-				'',
-			],
-			schedule: [
-				'// @enabled FALSE',
-				'// @mutex FALSE',
-				'// @on SCHEDULE "EVERY 30 SECOND"',
-				'',
-				'',
-				'',
-				"import { log } from 'core';",
-				"import type { Context } from 'core';",
-				'',
-				'',
-				'',
-				'export async function run (ctx : Context)',
-				'{',
-				"\tawait log('scheduled endpoint tick');",
-				'}',
-				'',
-			],
-			event: [
-				'// @enabled FALSE',
-				'// @mutex TRUE',
-				'// @on MESSAGE [sender_1]',
-				'',
-				'',
-				'',
-				"import { log } from 'core';",
-				"import type { Context } from 'core';",
-				'',
-				'',
-				'',
-				'export async function run (ctx : Context)',
-				'{',
-				"\tawait log('message from ' + (ctx.messageSenderName || ctx.messageSender || 'unknown') + ': ' + (ctx.messageContent || ''));",
-				'}',
-				'',
-			],
-			watch: [
-				'// @enabled FALSE',
-				'// @mutex TRUE',
-				'// @on WATCH "/Abs/Path/of/Desktop"',
-				'// @on WATCH "/Abs/Path/of/Downloads" [file:created]',
-				'',
-				'',
-				'',
-				"import { log } from 'core';",
-				"import type { Context } from 'core';",
-				'',
-				'',
-				'',
-				'export async function run (ctx : Context)',
-				'{',
-				"\tawait log('watch event: ' + ctx.watchPath + ' (' + ctx.watchType + ')');",
-				'}',
-				'',
-			],
-		};
-
-		const safeTemplateKey = templateKey && templateMap[templateKey] ? templateKey : 'schedule';
-		const initialContent = templateMap[safeTemplateKey].join('\n');
+		let safeTemplateKey = 'schedule';
+		let initialContent = '';
+		try {
+			const template = await readEndpointTemplate(templateKey, 'schedule', appRootDir);
+			safeTemplateKey = template.key;
+			initialContent = template.content;
+		} catch (error) {
+			return { ok: false, error: error.message || 'endpoint template file not found' };
+		}
 		const contextContent = [
 			"export type { Context } from 'core';",
 			'',
@@ -653,8 +658,6 @@ function setupIpcHandlers(runtime, options = {}) {
 			return { ok: false, error: error.message };
 		}
 
-		const openResult = await openWithConfiguredProgramOrDefault(endpointFilePath);
-
 		try {
 			await runtime.reloadEndpoints('ui-create-endpoint');
 		} catch (error) {
@@ -665,8 +668,6 @@ function setupIpcHandlers(runtime, options = {}) {
 			ok: true,
 			path: endpointFilePath,
 			template: safeTemplateKey,
-			opened: openResult.ok,
-			openError: openResult.ok ? null : openResult.error,
 		};
 	});
 

@@ -774,9 +774,62 @@
 			return;
 		}
 
-		status = result?.ok ? `Endpoint created (${endpointName || templateKey})` : `Error: ${result?.error || 'unknown'}`;
+		if (!result?.ok) {
+			status = `Error: ${result?.error || 'unknown'}`;
+			await refreshAll();
+			return;
+		}
+
 		await refreshAll();
-		await refreshAll();
+
+		if (result?.path) {
+			const createdIndex = endpoints.findIndex((endpoint) => endpoint?.path === result.path);
+			if (createdIndex >= 0) {
+				selectedIndex = createdIndex;
+				await editEndpoint(createdIndex);
+				return;
+			}
+
+			const openedFromPath = await openEndpointInEditorByPath(result.path, result?.name || endpointName || 'boot.ts');
+			if (openedFromPath) {
+				return;
+			}
+		}
+
+		status = `Endpoint created (${endpointName || templateKey})`;
+	}
+
+	function fileNameFromPath(filePath) {
+		const normalized = String(filePath || '').replace(/\\/g, '/');
+		const segments = normalized.split('/').filter(Boolean);
+		return segments.length > 0 ? segments[segments.length - 1] : 'boot.ts';
+	}
+
+	async function openEndpointInEditorByPath(filePath, fallbackName = '') {
+		const safePath = String(filePath || '').trim();
+		if (!safePath) {
+			return false;
+		}
+
+		status = `Loading editor: ${fileNameFromPath(safePath)}`;
+		const ready = await ensureCodeEditorComponent();
+		if (!ready) {
+			return false;
+		}
+
+		const result = await readEndpointContent(safePath);
+		if (!result?.ok) {
+			status = `Endpoint created but editor open failed: ${result?.error || 'unable to load endpoint'}`;
+			return false;
+		}
+
+		editorFilePath = safePath;
+		editorFileName = String(fallbackName || fileNameFromPath(safePath));
+		editorLanguage = 'typescript';
+		editorContent = result.content || '';
+		editorOpen = true;
+		status = `Editing: ${editorFileName}`;
+		return true;
 	}
 
 	async function editEndpoint(index) {

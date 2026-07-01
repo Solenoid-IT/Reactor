@@ -1,0 +1,13 @@
+// @enabled FALSE
+// @mutex FALSE
+
+
+
+import { Context, log } from 'core';
+
+
+
+export async function run (ctx : Context)
+{
+	await log('new blank endpoint');
+}

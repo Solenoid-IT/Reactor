@@ -649,6 +649,14 @@ class ExchangeManager {
 				}
 
 				if (name) {
+					const previousWs = this.connectedClients.get(name);
+					if (previousWs && previousWs !== ws) {
+						try {
+							previousWs.close(1000, 'replaced by new registration');
+						} catch {
+							// Ignore failures while closing stale sockets.
+						}
+					}
 					if (clientName && clientName !== name) this.connectedClients.delete(clientName);
 					clientName = name;
 					this.connectedClients.set(clientName, ws);
@@ -728,18 +736,20 @@ class ExchangeManager {
 			ws.isAlive = false;
 			this._serverPendingBinaryChunkMeta.delete(ws);
 			if (clientName) {
-				this.connectedClients.delete(clientName);
-				this._connectedClientDetails.delete(clientName);
-				this._broadcastClientPeerList();
+				if (this.connectedClients.get(clientName) === ws) {
+					this.connectedClients.delete(clientName);
+					this._connectedClientDetails.delete(clientName);
+					this._broadcastClientPeerList();
 					this._emitConnectionStatus('exchange-server-client-close');
-				void this._writeActiveConnectionsSnapshot();
-				this._appendConnectionLog('CLIENT_DISCONNECTED', {
-					name: clientName,
-					address,
-					ip,
-					port,
-				});
-				this.runtime.log(`[Exchange] Client disconnected: ${clientName}`);
+					void this._writeActiveConnectionsSnapshot();
+					this._appendConnectionLog('CLIENT_DISCONNECTED', {
+						name: clientName,
+						address,
+						ip,
+						port,
+					});
+					this.runtime.log(`[Exchange] Client disconnected: ${clientName}`);
+				}
 			}
 		});
 
@@ -932,21 +942,9 @@ class ExchangeManager {
 			this._emitConnectionStatus('exchange-open');
 			this._startClientHeartbeat(ws);
 			try {
-				const name = await this.runtime.getReactorName();
-				const safeName = String(name || '').trim() || 'unnamed';
-				const token = String(this.runtime.exchangeAuthToken || '').trim();
-				const endpoints = typeof this.runtime.getDiscoveryEndpointEntries === 'function'
-					? this.runtime.getDiscoveryEndpointEntries()
-					: [];
-				ws.send(JSON.stringify({
-					type: 'register',
-					name: safeName,
-					token,
-					endpoints,
-					httpPort: Number(this.runtime.httpServerPort) || 7070,
-					httpTls: Boolean(this.runtime.tlsEnabled),
-				}));
-				this.runtime.log(`[Exchange] Connected as: ${safeName}`);
+				const packet = await this._buildClientRegisterPacket();
+				ws.send(JSON.stringify(packet));
+				this.runtime.log(`[Exchange] Connected as: ${packet.name}`);
 			} catch (err) {
 				this.runtime.log(`[Exchange] Registration error: ${err.message}`);
 			}
@@ -998,26 +996,32 @@ class ExchangeManager {
 		});
 
 		ws.on('close', (code, reason) => {
+			const isCurrentSocket = this.wsClient === ws;
 			this._stopClientHeartbeat();
-			if (this.wsClient === ws) this.wsClient = null;
+			if (isCurrentSocket) this.wsClient = null;
 			this._knownRemotePeers.clear();
 			this._clientConnectedAt = 0;
 			this._clientRegistered = false;
 			this._clientLastCloseCode = Number(code) || 0;
 			this._clientLastCloseReason = String(reason || '').trim();
-			this.runtime.log('[Exchange] Connection closed, reconnecting...');
+			this.runtime.log(isCurrentSocket ? '[Exchange] Connection closed, reconnecting...' : '[Exchange] Stale client connection closed');
 			this._emitConnectionStatus('exchange-close');
-			this._scheduleReconnect();
+			if (isCurrentSocket) {
+				this._scheduleReconnect();
+			}
 		});
 
 		ws.on('error', (err) => {
+			const isCurrentSocket = this.wsClient === ws;
 			this._stopClientHeartbeat();
 			this._knownRemotePeers.clear();
 			this._clientLastError = String(err?.message || 'unknown error');
 			this._clientRegistered = false;
 			this.runtime.log(`[Exchange] Error: ${err.message}`);
 			this._emitConnectionStatus('exchange-error');
-			this._scheduleReconnect();
+			if (isCurrentSocket) {
+				this._scheduleReconnect();
+			}
 		});
 	}
 
@@ -1464,6 +1468,66 @@ class ExchangeManager {
 		} catch {
 			// Ignore profile update failures: endpoints will be re-sent on reconnect.
 		}
+	}
+
+	async _buildClientRegisterPacket() {
+		const name = await this.runtime.getReactorName();
+		const safeName = String(name || '').trim() || 'unnamed';
+		const token = String(this.runtime.exchangeAuthToken || '').trim();
+		const endpoints = typeof this.runtime.getDiscoveryEndpointEntries === 'function'
+			? this.runtime.getDiscoveryEndpointEntries()
+			: [];
+
+		return {
+			type: 'register',
+			name: safeName,
+			token,
+			endpoints,
+			httpPort: Number(this.runtime.httpServerPort) || 7070,
+			httpTls: Boolean(this.runtime.tlsEnabled),
+		};
+	}
+
+	async refreshClientRegistration(reason = 'runtime-update') {
+		if (this.mode !== 'client' || !this.wsClient || this.wsClient.readyState !== WebSocket.OPEN) {
+			return { ok: false, reason: 'exchange client not connected' };
+		}
+
+		const packet = await this._buildClientRegisterPacket();
+		this.wsClient.send(JSON.stringify(packet));
+		this.runtime.log(`[Exchange] Client registration refreshed (${String(reason || 'runtime-update')}): ${packet.name}`);
+		return { ok: true, name: packet.name };
+	}
+
+	async reconnectClient(reason = 'runtime-update') {
+		if (this.mode !== 'client') {
+			return { ok: false, reason: 'exchange mode is not client' };
+		}
+		if (!this.host) {
+			return { ok: false, reason: 'exchange host is empty' };
+		}
+
+		if (this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = null;
+		}
+
+		const currentWs = this.wsClient;
+		this.wsClient = null;
+		this._clientRegistered = false;
+		this._knownRemotePeers.clear();
+
+		if (currentWs) {
+			try {
+				currentWs.terminate();
+			} catch {
+				// Ignore close errors while forcing reconnect.
+			}
+		}
+
+		this.runtime.log(`[Exchange] Reconnecting client (${String(reason || 'runtime-update')})`);
+		this._startClient();
+		return { ok: true };
 	}
 }
 

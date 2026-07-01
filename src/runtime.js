@@ -1105,11 +1105,21 @@ class ReactorRuntime {
 		if (!sanitized) {
 			await fs.writeFile(this.reactorNamePath, '', 'utf8');
 			this.cachedReactorName = '';
+			if (this.exchangeManager && typeof this.exchangeManager.reconnectClient === 'function') {
+				await this.exchangeManager.reconnectClient('reactor-name-updated').catch((error) => {
+					this.log(`[Exchange] Unable to reconnect client after name update: ${error.message}`);
+				});
+			}
 			return '';
 		}
 
 		await fs.writeFile(this.reactorNamePath, `${sanitized}\n`, 'utf8');
 		this.cachedReactorName = sanitized;
+		if (this.exchangeManager && typeof this.exchangeManager.reconnectClient === 'function') {
+			await this.exchangeManager.reconnectClient('reactor-name-updated').catch((error) => {
+				this.log(`[Exchange] Unable to reconnect client after name update: ${error.message}`);
+			});
+		}
 		return sanitized;
 	}
 
