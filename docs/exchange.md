@@ -23,8 +23,22 @@ Result:
 
 ## Runtime Behavior In Reactor
 
-- with both `STUN` and `TURN` configured, `Node.sendMessage(target, content, enqueueOnFail)` and `Node.stream()` prefer WebRTC DataChannel P2P;
-- if `TURN` is not configured (or P2P is unavailable), Reactor uses `Exchange` as relay.
+- in `node` mode, for logical node targets (`node_name` and `node_name/endpoint_id`), Reactor first checks whether a connected P2P route already exists;
+- if a connected P2P route exists, `Node.sendMessage(...)` and `Node.stream(...)` use DataChannel;
+- otherwise, Reactor routes through `Exchange` relay.
+
+For Network View remote endpoint discovery (clicking a non-current node), Reactor follows the same desktop/mobile strategy:
+
+- first try `requestRemoteEndpointsP2P(...)` over DataChannel;
+- if P2P fails or times out, fallback to Exchange discovery endpoint (`/nodes`).
+
+Discovery responses expose `source` as `p2p-datachannel` or `exchange-discovery`.
+
+Delivery results expose `deliveredVia`:
+
+- `P2P_DIRECT`
+- `P2P_RELAY`
+- `EXCHANGE`
 
 For `Node.sendMessage(...)`, queue fallback is opt-in:
 

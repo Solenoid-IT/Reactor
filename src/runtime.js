@@ -1206,9 +1206,17 @@ class ReactorRuntime {
 			}))
 			.sort((a, b) => String(a.target).localeCompare(String(b.target)));
 
+		const activeSessionTargets = sessions
+			.filter((session) => {
+				const state = String(session.state || '').trim().toLowerCase();
+				return state === 'connecting' || state === 'signaling' || state === 'connected-p2p' || state === 'connected-turn';
+			})
+			.map((session) => String(session.target || '').trim().toLowerCase())
+			.filter(Boolean);
+
 		const remotePeers = Array.from(new Set([
 			...knownRemotePeers,
-			...sessions.map((session) => String(session.target || '').trim().toLowerCase()).filter(Boolean),
+			...activeSessionTargets,
 		])).sort((a, b) => a.localeCompare(b));
 
 		return {
@@ -1257,6 +1265,12 @@ class ReactorRuntime {
 		for (const rawPeer of normalizedPeers) {
 			const target = String(rawPeer || '').trim().toLowerCase();
 			if (!target) {
+				continue;
+			}
+
+			const shouldInitiate = await this.shouldInitiateP2PWithPeer(target);
+			if (!shouldInitiate) {
+				this.logGlobalEvent('EXCHANGE/P2P_AUTODIAL_SKIPPED', `reason=deterministic-responder target=${target}`).catch(() => {});
 				continue;
 			}
 
@@ -1318,6 +1332,24 @@ class ReactorRuntime {
 		}
 	}
 
+	async shouldInitiateP2PWithPeer(target) {
+		const safeTarget = String(target || '').trim().toLowerCase();
+		if (!safeTarget) {
+			return false;
+		}
+
+		const localNodeName = String(await this.getReactorName() || '').trim().toLowerCase();
+		if (!localNodeName) {
+			return true;
+		}
+
+		if (localNodeName === safeTarget) {
+			return false;
+		}
+
+		return localNodeName.localeCompare(safeTarget) < 0;
+	}
+
 	getP2PRoutingEligibility() {
 		if (this.exchangeMode !== 'node') {
 			return { ok: false, reason: 'exchange-mode-not-node' };
@@ -1348,6 +1380,41 @@ class ReactorRuntime {
 
 	shouldPreferP2PForNodeRouting() {
 		return this.getP2PRoutingEligibility().ok;
+	}
+
+	hasConnectedP2PRoute(targetNodeName) {
+		const safeTarget = String(targetNodeName || '').trim().toLowerCase();
+		if (!safeTarget) {
+			return false;
+		}
+
+		if (!this.shouldPreferP2PForNodeRouting()) {
+			return false;
+		}
+
+		const trackedSession = this.p2pSessions.get(safeTarget);
+		const trackedState = String(trackedSession?.state || '').trim().toLowerCase();
+		const stateConnected = trackedState === 'connected-p2p' || trackedState === 'connected-turn';
+
+		const transportSession = this.p2pTransportManager && this.p2pTransportManager.getSession
+			? this.p2pTransportManager.getSession(safeTarget)
+			: null;
+
+		const dataChannelOpen = Boolean(
+			transportSession
+			&& transportSession.dataChannel
+			&& transportSession.dataChannel.readyState === 'open'
+			&& transportSession.isOpen,
+		);
+
+		return stateConnected && dataChannelOpen;
+	}
+
+	resolveP2PDeliveredVia(targetNodeName) {
+		const safeTarget = String(targetNodeName || '').trim().toLowerCase();
+		const trackedSession = this.p2pSessions.get(safeTarget);
+		const trackedState = String(trackedSession?.state || '').trim().toLowerCase();
+		return trackedState === 'connected-turn' ? 'P2P_RELAY' : 'P2P_DIRECT';
 	}
 
 	upsertP2PSession(target, updates = {}) {
@@ -2782,6 +2849,7 @@ class ReactorRuntime {
 			...result,
 			target: safeTarget,
 			mode: 'p2p',
+			deliveredVia: this.resolveP2PDeliveredVia(safeTarget),
 		};
 	}
 
@@ -2803,7 +2871,7 @@ class ReactorRuntime {
 				'Reactor-Target-Endpoint-Id': endpointScopedTarget.endpointId,
 			};
 
-			if (this.shouldPreferP2PForNodeRouting()) {
+			if (this.hasConnectedP2PRoute(endpointScopedTarget.baseTarget)) {
 				try {
 					return await this.sendP2PMessage(endpointScopedTarget.baseTarget, content, scopedHeaders);
 				} catch (p2pError) {
@@ -2832,7 +2900,7 @@ class ReactorRuntime {
 
 		const logicalTarget = parseLogicalNodeTarget(targetId);
 		if (logicalTarget) {
-			if (this.shouldPreferP2PForNodeRouting()) {
+			if (this.hasConnectedP2PRoute(logicalTarget.nodeName)) {
 				try {
 					return await this.sendP2PMessage(logicalTarget.nodeName, content, extraHeaders || {});
 				} catch (p2pError) {
@@ -2984,7 +3052,11 @@ class ReactorRuntime {
 
 	async sendExchangeMessage(target, content, options = {}) {
 		try {
-			return await this.exchangeManager.sendViaExchange(target, content);
+			const result = await this.exchangeManager.sendViaExchange(target, content);
+			return {
+				...result,
+				deliveredVia: 'EXCHANGE',
+			};
 		} catch (error) {
 			const shouldEnqueueOnFail = options && options.noEnqueue
 				? false
@@ -3006,6 +3078,7 @@ class ReactorRuntime {
 			return {
 				target: String(target || '').trim().toLowerCase(),
 				via: 'exchange',
+				deliveredVia: 'EXCHANGE',
 				queued: true,
 				reason: String(error?.message || 'exchange send failed'),
 				...queueResult,
@@ -3022,7 +3095,15 @@ class ReactorRuntime {
 		const headers = safeOptions.headers && typeof safeOptions.headers === 'object' ? safeOptions.headers : {};
 		const totalBytesHint = Number.isFinite(Number(safeOptions.totalBytes)) ? Math.max(0, Number(safeOptions.totalBytes)) : null;
 
-		await this.sendNodeMessage(target, {
+		const deliveredViaSeen = new Set();
+		const trackDeliveredVia = (result) => {
+			const safe = String(result?.deliveredVia || '').trim().toUpperCase();
+			if (safe === 'P2P_DIRECT' || safe === 'P2P_RELAY' || safe === 'EXCHANGE') {
+				deliveredViaSeen.add(safe);
+			}
+		};
+
+		const startResult = await this.sendNodeMessage(target, {
 			__reactorStream: true,
 			phase: 'start',
 			streamId,
@@ -3031,6 +3112,7 @@ class ReactorRuntime {
 			totalBytes: totalBytesHint,
 			metadata,
 		}, headers);
+		trackDeliveredVia(startResult);
 
 		let totalBytes = 0;
 		let chunks = 0;
@@ -3039,7 +3121,7 @@ class ReactorRuntime {
 		for await (const chunk of iterateStreamSourceChunks(source, safeChunkSize)) {
 			digest.update(chunk);
 			totalBytes += chunk.length;
-			await this.sendNodeMessage(target, {
+			const chunkResult = await this.sendNodeMessage(target, {
 				__reactorStream: true,
 				phase: 'chunk',
 				streamId,
@@ -3048,11 +3130,12 @@ class ReactorRuntime {
 				size: chunk.length,
 				data: chunk.toString('base64'),
 			}, headers);
+			trackDeliveredVia(chunkResult);
 			chunks += 1;
 		}
 
 		const digestSha256 = digest.digest('hex');
-		await this.sendNodeMessage(target, {
+		const endResult = await this.sendNodeMessage(target, {
 			__reactorStream: true,
 			phase: 'end',
 			streamId,
@@ -3060,10 +3143,21 @@ class ReactorRuntime {
 			totalBytes,
 			digestSha256,
 		}, headers);
+		trackDeliveredVia(endResult);
+
+		let deliveredVia = null;
+		if (deliveredViaSeen.has('EXCHANGE')) {
+			deliveredVia = 'EXCHANGE';
+		} else if (deliveredViaSeen.has('P2P_RELAY')) {
+			deliveredVia = 'P2P_RELAY';
+		} else if (deliveredViaSeen.has('P2P_DIRECT')) {
+			deliveredVia = 'P2P_DIRECT';
+		}
 
 		return {
 			target: String(target || '').trim(),
 			via: 'direct',
+			deliveredVia,
 			streamId,
 			chunks,
 			totalBytes,
@@ -3117,6 +3211,7 @@ class ReactorRuntime {
 		return {
 			target: String(target || '').trim().toLowerCase(),
 			via: 'exchange',
+			deliveredVia: 'EXCHANGE',
 			streamId,
 			chunks,
 			totalBytes,

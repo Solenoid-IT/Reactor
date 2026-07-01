@@ -491,6 +491,41 @@ export async function getP2PStatus() {
 	return { ok: false, error: 'bridge unavailable', p2p: { enabled: false, sessions: [], remotePeers: [] } };
 }
 
+export function subscribeP2PStatus(handler) {
+	const mobile = getMobilePlugin();
+	if (!mobile || typeof mobile.addListener !== 'function' || typeof handler !== 'function') {
+		return () => {};
+	}
+
+	let subscription = null;
+	try {
+		subscription = mobile.addListener('p2pStatus', (payload) => {
+			handler(payload || null);
+		});
+	} catch {
+		return () => {};
+	}
+
+	return () => {
+		try {
+			if (subscription && typeof subscription.then === 'function') {
+				subscription.then((resolved) => {
+					if (resolved && typeof resolved.remove === 'function') {
+						resolved.remove();
+					}
+				}).catch(() => {});
+				return;
+			}
+
+			if (subscription && typeof subscription.remove === 'function') {
+				subscription.remove();
+			}
+		} catch {
+			// ignore
+		}
+	};
+}
+
 export async function sendP2PSignal(target, signalType, payload = null, sessionId = null) {
 	const bridge = getBridge();
 	if (bridge && bridge.sendP2PSignal) {

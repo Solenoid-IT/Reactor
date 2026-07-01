@@ -5,13 +5,44 @@ This document explains how Reactor nodes communicate with each other.
 There are two communication primitives:
 
 - `Node.sendMessage(target, content, enqueueOnFail = false)` for discrete messages
-- `Node.sendMessage(target, content, enqueueOnFail = false)` for discrete messages
 - `Node.stream(target, source, options)` for chunked streaming
 
 There are also two network paths:
 
 - Direct node-to-node (HTTP) in LAN or reachable private networks
 - Triangulated node-to-node via Exchange (WebSocket routing)
+- WebRTC DataChannel peer path (direct or TURN relay)
+
+## Delivery Strategy (`node` mode)
+
+For logical node targets (`node_name` and `node_name/endpoint_id`), Reactor uses this strategy:
+
+1. If an already-connected P2P route exists, send via DataChannel.
+2. Otherwise, route via Exchange relay.
+
+The same strategy applies to `Node.stream(...)` (start/chunk/end frames).
+
+## Remote Endpoint Discovery (Network View)
+
+When you open Network View and click a remote node (not the current node), Reactor loads that node endpoint list with the same transport strategy on both desktop and mobile:
+
+1. Try `requestRemoteEndpointsP2P(target)` over WebRTC DataChannel.
+2. If P2P is unavailable, times out, or fails, fallback to Exchange discovery (`/nodes`).
+
+Result metadata includes `source`:
+
+- `p2p-datachannel` when fetched through DataChannel
+- `exchange-discovery` when fetched through Exchange fallback
+
+When fallback is used, the response can also include `p2pError` with the original P2P failure reason.
+
+### Delivery Metadata
+
+Successful results now include `deliveredVia`:
+
+- `P2P_DIRECT`
+- `P2P_RELAY`
+- `EXCHANGE`
 
 ## 1. `sendMessage()`
 
@@ -39,11 +70,13 @@ When `endpoint_id` is present, Reactor delivers the message only to the project 
 import { Node } from 'core';
 
 export async function run() {
-	await Node.sendMessage('192.168.1.20:7070', {
+	const directResult = await Node.sendMessage('192.168.1.20:7070', {
 		type: 'status-update',
 		value: 42,
 		ts: Date.now(),
 	}, false);
+
+	await log(`deliveredVia=${directResult.deliveredVia || 'n/a'}`);
 
 	await Node.sendMessage('192.168.1.20:7070/550e8400-e29b-41d4-a716-446655440000', {
 		type: 'status-update',
@@ -62,6 +95,15 @@ export async function run() {
 		value: 42,
 		ts: Date.now(),
 	});
+}
+```
+
+Example result (shape):
+
+```json
+{
+  "target": "target-node",
+  "deliveredVia": "P2P_DIRECT"
 }
 ```
 
@@ -115,11 +157,13 @@ export async function run() {
 		Buffer.from('world'),
 	];
 
-	await Node.stream('192.168.1.20:7070', chunks, {
+	const streamResult = await Node.stream('192.168.1.20:7070', chunks, {
 		chunkSize: 64 * 1024,
 		contentType: 'application/octet-stream',
 		metadata: { fileName: 'demo.bin' },
 	});
+
+	await log(`stream deliveredVia=${streamResult.deliveredVia || 'n/a'}`);
 
 	await Node.stream('192.168.1.20:7070/550e8400-e29b-41d4-a716-446655440000', chunks, {
 		chunkSize: 64 * 1024,
@@ -132,6 +176,19 @@ export async function run() {
 		contentType: 'application/octet-stream',
 		metadata: { fileName: 'demo-targeted-exchange.bin' },
 	});
+}
+```
+
+Example stream result (shape):
+
+```json
+{
+	"target": "target-node",
+	"streamId": "...",
+	"chunks": 3,
+	"totalBytes": 12345,
+	"digestSha256": "...",
+	"deliveredVia": "P2P_RELAY"
 }
 ```
 

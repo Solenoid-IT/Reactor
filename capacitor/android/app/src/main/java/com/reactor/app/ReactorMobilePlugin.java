@@ -39,6 +39,7 @@ import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.stream.Stream;
 import java.util.ArrayList;
@@ -82,8 +83,20 @@ public class ReactorMobilePlugin extends Plugin {
         super.load();
         nativeP2PManager = AndroidP2PWebRtcManager.getInstance(getContext());
         nativeP2PManager.initialize();
+        ReactorHttpService.setP2PStatusListener((p2pStatus) -> {
+            JSObject payload = new JSObject();
+            payload.put("ok", true);
+            payload.put("p2p", p2pStatus != null ? p2pStatus : new JSObject());
+            notifyListeners("p2pStatus", payload);
+        });
         ensureEndpointTemplatesPresent();
         ensureHttpServerRunning();
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        ReactorHttpService.setP2PStatusListener(null);
+        super.handleOnDestroy();
     }
 
     private SharedPreferences getPrefs() {
@@ -1826,8 +1839,7 @@ public class ReactorMobilePlugin extends Plugin {
         call.resolve(result);
     }
 
-    @PluginMethod
-    public void getExchangeLinkedNodes(PluginCall call) {
+    private JSObject fetchExchangeLinkedNodesSnapshot() {
         JSObject workingMode = readWorkingModeConfig();
         String mode = workingMode.getString("mode", "node");
         String host = workingMode.getString("host", "").trim();
@@ -1836,18 +1848,15 @@ public class ReactorMobilePlugin extends Plugin {
         String token = workingMode.getString("token", "").trim();
 
         if (!"node".equals(mode)) {
-            call.resolve(new JSObject().put("ok", false).put("error", "available only in node mode").put("nodes", new JSArray()).put("total", 0));
-            return;
+            return new JSObject().put("ok", false).put("error", "available only in node mode").put("nodes", new JSArray()).put("total", 0);
         }
 
         if (host.isEmpty()) {
-            call.resolve(new JSObject().put("ok", false).put("error", "exchange host is not configured").put("nodes", new JSArray()).put("total", 0));
-            return;
+            return new JSObject().put("ok", false).put("error", "exchange host is not configured").put("nodes", new JSArray()).put("total", 0);
         }
 
         if (token.isEmpty()) {
-            call.resolve(new JSObject().put("ok", false).put("error", "exchange token is not configured").put("nodes", new JSArray()).put("total", 0));
-            return;
+            return new JSObject().put("ok", false).put("error", "exchange token is not configured").put("nodes", new JSArray()).put("total", 0);
         }
 
         if (port < 1 || port > 65535) {
@@ -1884,8 +1893,7 @@ public class ReactorMobilePlugin extends Plugin {
                 if (error == null || error.trim().isEmpty()) {
                     error = "exchange discovery request failed (" + status + ")";
                 }
-                call.resolve(new JSObject().put("ok", false).put("error", error).put("nodes", new JSArray()).put("total", 0));
-                return;
+                return new JSObject().put("ok", false).put("error", error).put("nodes", new JSArray()).put("total", 0);
             }
 
             JSONArray parsedNodes = parsed.optJSONArray("nodes");
@@ -1911,14 +1919,19 @@ public class ReactorMobilePlugin extends Plugin {
             result.put("generatedAt", parsed.optString("generatedAt", Instant.now().toString()));
             result.put("total", total);
             result.put("nodes", filteredNodes);
-            call.resolve(result);
+            return result;
         } catch (Exception error) {
-            call.resolve(new JSObject().put("ok", false).put("error", error.getMessage()).put("nodes", new JSArray()).put("total", 0));
+            return new JSObject().put("ok", false).put("error", error.getMessage()).put("nodes", new JSArray()).put("total", 0);
         } finally {
             if (connection != null) {
                 connection.disconnect();
             }
         }
+    }
+
+    @PluginMethod
+    public void getExchangeLinkedNodes(PluginCall call) {
+        call.resolve(fetchExchangeLinkedNodesSnapshot());
     }
 
     @PluginMethod
@@ -2078,6 +2091,12 @@ public class ReactorMobilePlugin extends Plugin {
         String target = call.getString("target", "");
         long timeoutMs = call.getLong("timeoutMs", 8000L);
         JSObject workingMode = readWorkingModeConfig();
+        String safeTarget = String.valueOf(target == null ? "" : target).trim().toLowerCase(Locale.ROOT);
+
+        if (safeTarget.isEmpty()) {
+            call.resolve(new JSObject().put("ok", false).put("error", "invalid p2p target"));
+            return;
+        }
 
         if (nativeP2PManager == null) {
             nativeP2PManager = AndroidP2PWebRtcManager.getInstance(getContext());
@@ -2085,7 +2104,75 @@ public class ReactorMobilePlugin extends Plugin {
         }
 
         AndroidP2PWebRtcManager.RelayConfig relayConfig = AndroidP2PWebRtcManager.fromWorkingMode(workingMode);
-        JSObject result = nativeP2PManager.requestRemoteEndpoints(target, relayConfig, timeoutMs);
+        JSObject p2pResult = nativeP2PManager.requestRemoteEndpoints(safeTarget, relayConfig, timeoutMs);
+        if (p2pResult != null && p2pResult.optBoolean("ok", false)) {
+            p2pResult.put("source", "p2p-datachannel");
+            call.resolve(p2pResult);
+            return;
+        }
+
+        String p2pError = p2pResult != null
+                ? String.valueOf(p2pResult.optString("error", "p2p endpoints request failed"))
+                : "p2p endpoints request failed";
+
+        JSObject exchangeSnapshot = fetchExchangeLinkedNodesSnapshot();
+        if (exchangeSnapshot == null || !exchangeSnapshot.optBoolean("ok", false)) {
+            String fallbackError = exchangeSnapshot != null
+                    ? String.valueOf(exchangeSnapshot.optString("error", "exchange fallback unavailable"))
+                    : "exchange fallback unavailable";
+            call.resolve(new JSObject()
+                    .put("ok", false)
+                    .put("error", p2pError)
+                    .put("fallbackError", fallbackError));
+            return;
+        }
+
+        JSONArray nodes = exchangeSnapshot.optJSONArray("nodes");
+        JSONObject targetNode = null;
+        if (nodes != null) {
+            for (int index = 0; index < nodes.length(); index += 1) {
+                JSONObject node = nodes.optJSONObject(index);
+                if (node == null) {
+                    continue;
+                }
+
+                String nodeName = String.valueOf(node.optString("name", "")).trim().toLowerCase(Locale.ROOT);
+                if (safeTarget.equals(nodeName)) {
+                    targetNode = node;
+                    break;
+                }
+            }
+        }
+
+        if (targetNode == null) {
+            call.resolve(new JSObject()
+                    .put("ok", false)
+                    .put("error", "target node not found on exchange discovery: " + safeTarget)
+                    .put("p2pError", p2pError));
+            return;
+        }
+
+        JSONArray rawEndpoints = targetNode.optJSONArray("endpoints");
+        JSArray endpoints = new JSArray();
+        if (rawEndpoints != null) {
+            for (int index = 0; index < rawEndpoints.length(); index += 1) {
+                Object endpoint = rawEndpoints.opt(index);
+                if (endpoint == null) {
+                    continue;
+                }
+                endpoints.put(endpoint);
+            }
+        }
+
+        JSObject result = new JSObject();
+        result.put("ok", true);
+        result.put("target", safeTarget);
+        result.put("node", safeTarget);
+        result.put("source", "exchange-discovery");
+        result.put("endpoints", endpoints);
+        result.put("generatedAt", exchangeSnapshot.optString("generatedAt", Instant.now().toString()));
+        result.put("fallback", true);
+        result.put("p2pError", p2pError);
         call.resolve(result);
     }
 

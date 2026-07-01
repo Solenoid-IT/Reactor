@@ -139,6 +139,10 @@
 		background: #22c55e;
 	}
 
+	.status-gray {
+		background: #94a3b8;
+	}
+
 	.actions {
 		display: flex;
 		align-items: center;

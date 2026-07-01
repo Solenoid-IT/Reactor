@@ -15,6 +15,26 @@ function waitFor(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function decodeSdpFromPayload(payload = {}) {
+	if (!payload || typeof payload !== 'object') {
+		return '';
+	}
+
+	const rawBase64 = String(payload.sdpBase64 || '').trim();
+	if (rawBase64) {
+		try {
+			const decoded = Buffer.from(rawBase64, 'base64').toString('utf8');
+			if (decoded.trim()) {
+				return decoded;
+			}
+		} catch {
+			// Fallback to plain sdp when base64 decoding fails.
+		}
+	}
+
+	return String(payload.sdp || '');
+}
+
 class P2PDataChannelManager {
 	constructor(runtime) {
 		this.runtime = runtime;
@@ -159,6 +179,29 @@ class P2PDataChannelManager {
 		};
 	}
 
+	refreshConnectedStateIfAlreadyOpen(session) {
+		if (!session) {
+			return;
+		}
+
+		const dataChannelOpen = Boolean(
+			session.dataChannel
+			&& session.dataChannel.readyState === 'open',
+		);
+
+		const connectionState = String(session.connection?.connectionState || '').toLowerCase();
+		if (!dataChannelOpen && connectionState !== 'connected') {
+			return;
+		}
+
+		this.runtime.upsertP2PSession(session.target, {
+			sessionId: session.sessionId,
+			state: 'connected-p2p',
+			lastSignalType: 'connected',
+			usingRelay: false,
+		});
+	}
+
 	async ensureConnected(target) {
 		const safeTarget = String(target || '').trim().toLowerCase();
 		if (!safeTarget) {
@@ -183,6 +226,7 @@ class P2PDataChannelManager {
 			await this.runtime.sendP2PSignal(safeTarget, 'offer', {
 				type: offer.type,
 				sdp: offer.sdp,
+				sdpBase64: Buffer.from(String(offer.sdp || ''), 'utf8').toString('base64'),
 			}, { sessionId: session.sessionId });
 
 			let nextOfferRetryAt = Date.now() + 3000;
@@ -200,6 +244,7 @@ class P2PDataChannelManager {
 						await this.runtime.sendP2PSignal(safeTarget, 'offer', {
 							type: String(localDescription.type || 'offer'),
 							sdp: String(localDescription.sdp || ''),
+							sdpBase64: Buffer.from(String(localDescription.sdp || ''), 'utf8').toString('base64'),
 						}, { sessionId: session.sessionId }).catch(() => {});
 					}
 					nextOfferRetryAt = Date.now() + 3000;
@@ -249,9 +294,10 @@ class P2PDataChannelManager {
 
 		if (signalType === 'offer') {
 			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `remote offer received from ${from}`).catch(() => {});
+			const remoteSdp = decodeSdpFromPayload(signal?.payload || {});
 			const remoteDesc = new webrtc.RTCSessionDescription({
 				type: 'offer',
-				sdp: String(signal?.payload?.sdp || ''),
+				sdp: remoteSdp,
 			});
 			session.remoteDescriptionPending = true;
 			await new Promise((resolve, reject) => {
@@ -272,15 +318,18 @@ class P2PDataChannelManager {
 			await this.runtime.sendP2PSignal(from, 'answer', {
 				type: answer.type,
 				sdp: answer.sdp,
+				sdpBase64: Buffer.from(String(answer.sdp || ''), 'utf8').toString('base64'),
 			}, { sessionId: session.sessionId });
+			this.refreshConnectedStateIfAlreadyOpen(session);
 			return;
 		}
 
 		if (signalType === 'answer') {
 			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `remote answer received from ${from}`).catch(() => {});
+			const remoteSdp = decodeSdpFromPayload(signal?.payload || {});
 			const remoteDesc = new webrtc.RTCSessionDescription({
 				type: 'answer',
-				sdp: String(signal?.payload?.sdp || ''),
+				sdp: remoteSdp,
 			});
 			session.remoteDescriptionPending = true;
 			await new Promise((resolve, reject) => {
@@ -292,6 +341,7 @@ class P2PDataChannelManager {
 			session.remoteDescriptionPending = false;
 			session.remoteDescriptionSet = true;
 			await this.flushQueuedCandidates(session);
+			this.refreshConnectedStateIfAlreadyOpen(session);
 			return;
 		}
 

@@ -158,6 +158,7 @@ declare module 'core' {
 	export interface NodeStreamResponse {
 		target: string;
 		via: 'direct' | 'exchange';
+		deliveredVia?: 'P2P_DIRECT' | 'P2P_RELAY' | 'EXCHANGE';
 		streamId: string;
 		chunks: number;
 		totalBytes: number;
@@ -198,6 +199,7 @@ declare module 'core' {
 		headers?: HeadersMap;
 		body?: string;
 		via?: 'direct' | 'exchange';
+		deliveredVia?: 'P2P_DIRECT' | 'P2P_RELAY' | 'EXCHANGE';
 		queued?: boolean;
 		reason?: string;
 	}

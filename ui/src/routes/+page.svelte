@@ -43,6 +43,7 @@
 		flushMessageQueue,
 		clearMessageQueue,
 		requestRemoteEndpointsP2P,
+		subscribeP2PStatus,
 	} from '$lib/reactorApi';
 
 	let endpoints = [];
@@ -272,24 +273,50 @@
 
 	$: p2pConnectionStatus = (() => {
 		const sessions = Array.isArray(p2pStatus?.sessions) ? p2pStatus.sessions : [];
-		const connectedSession = sessions.find((session) => {
+		const remotePeers = Array.isArray(p2pStatus?.remotePeers) ? p2pStatus.remotePeers : [];
+		const remotePeerCount = remotePeers.length;
+		const connectedSessions = sessions.filter((session) => {
 			const state = String(session?.state || '').trim().toLowerCase();
 			return state === 'connected-p2p' || state === 'connected-turn';
 		});
+		const connectedSession = connectedSessions[0] || null;
+		const connectedTargets = Array.from(new Set(
+			connectedSessions
+				.map((session) => String(session?.target || '').trim().toLowerCase())
+				.filter(Boolean),
+		));
+		const relayTargets = Array.from(new Set(
+			connectedSessions
+				.filter((session) => String(session?.state || '').trim().toLowerCase() === 'connected-turn')
+				.map((session) => String(session?.target || '').trim().toLowerCase())
+				.filter(Boolean),
+		));
+		const connectedCount = connectedTargets.length;
+		const relayCount = relayTargets.length;
 		const negotiatingSession = sessions.find((session) => {
 			const state = String(session?.state || '').trim().toLowerCase();
 			return state === 'signaling' || state === 'connecting';
 		});
 
 		if (connectedSession) {
+			const countSuffix = connectedCount > 0 ? ` (${connectedCount})` : '';
+			const relaySuffix = relayCount > 0 ? `, RELAY ${relayCount}` : '';
 			return {
 				level: 'green',
-				label: 'P2P active',
-				title: `P2P connected to ${connectedSession.target || 'a peer'}`,
+				label: `P2P connected${countSuffix}${relaySuffix}`,
+				title: `P2P connected nodes: ${connectedCount || 1}${relayCount > 0 ? ` (${relayCount} RELAY)` : ''}`,
 			};
 		}
 
-		if (negotiatingSession || (Array.isArray(p2pStatus?.remotePeers) && p2pStatus.remotePeers.length > 0)) {
+		if (remotePeerCount === 0) {
+			return {
+				level: 'gray',
+				label: 'P2P unavailable',
+				title: 'No remote peers connected',
+			};
+		}
+
+		if (negotiatingSession) {
 			return {
 				level: 'yellow',
 				label: 'P2P negotiating',
@@ -1273,10 +1300,16 @@
 				applyRuntimeStatusSnapshot(snapshot);
 			})
 			: null;
+		const unsubscribeP2PStatus = subscribeP2PStatus((payload) => {
+			applyP2PStatusResult(payload);
+		});
 
 		return () => {
 			if (typeof unsubscribe === 'function') {
 				unsubscribe();
+			}
+			if (typeof unsubscribeP2PStatus === 'function') {
+				unsubscribeP2PStatus();
 			}
 		};
 	});

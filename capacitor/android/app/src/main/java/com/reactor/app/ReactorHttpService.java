@@ -57,6 +57,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -231,6 +232,31 @@ public class ReactorHttpService extends Service {
         boolean directAddress;
     }
 
+    private static class SendDeliveryResult {
+        boolean ok;
+        String target;
+        String deliveredVia;
+        boolean queued;
+        String reason;
+
+        static SendDeliveryResult success(String target, String deliveredVia) {
+            SendDeliveryResult result = new SendDeliveryResult();
+            result.ok = true;
+            result.target = String.valueOf(target);
+            result.deliveredVia = String.valueOf(deliveredVia == null ? "" : deliveredVia).trim().toUpperCase(Locale.ROOT);
+            result.queued = false;
+            result.reason = "";
+            return result;
+        }
+
+        static SendDeliveryResult queued(String target, String deliveredVia, String reason) {
+            SendDeliveryResult result = success(target, deliveredVia);
+            result.queued = true;
+            result.reason = String.valueOf(reason == null ? "" : reason);
+            return result;
+        }
+    }
+
     public static boolean isRunning() {
         return running;
     }
@@ -262,8 +288,31 @@ public class ReactorHttpService extends Service {
         void onSignal(String from, String sessionId, String signalType, JSONObject payload);
     }
 
+    public interface P2PStatusListener {
+        void onStatus(JSObject p2pStatus);
+    }
+
     public static void setP2PSignalListener(P2PSignalListener listener) {
         p2pSignalListener = listener;
+    }
+
+    private static volatile P2PStatusListener p2pStatusListener = null;
+
+    public static void setP2PStatusListener(P2PStatusListener listener) {
+        p2pStatusListener = listener;
+    }
+
+    private static void emitP2PStatusUpdate() {
+        P2PStatusListener listener = p2pStatusListener;
+        if (listener == null) {
+            return;
+        }
+
+        try {
+            listener.onStatus(getP2PStatus());
+        } catch (Exception ignored) {
+            // Status notifications are best-effort only.
+        }
     }
 
     private static String normalizeP2PTarget(String rawTarget) {
@@ -295,6 +344,11 @@ public class ReactorHttpService extends Service {
         }
 
         JSONObject existing = p2pSessions.get(safeTarget);
+        String previousSessionId = existing != null ? existing.optString("sessionId", "") : "";
+        String previousState = existing != null ? existing.optString("state", "") : "";
+        String previousSignalType = existing != null ? existing.optString("lastSignalType", "") : "";
+        boolean previousUsingRelay = existing != null && existing.optBoolean("usingRelay", false);
+        String previousReason = existing != null ? existing.optString("reason", "") : "";
         JSONObject session = existing != null ? existing : new JSONObject();
 
         try {
@@ -316,6 +370,22 @@ public class ReactorHttpService extends Service {
         }
 
         p2pSessions.put(safeTarget, session);
+
+        String nextSessionId = session.optString("sessionId", "");
+        String nextState = session.optString("state", "");
+        String nextSignalType = session.optString("lastSignalType", "");
+        boolean nextUsingRelay = session.optBoolean("usingRelay", false);
+        String nextReason = session.optString("reason", "");
+        boolean changed = existing == null
+                || !String.valueOf(previousSessionId).equals(String.valueOf(nextSessionId))
+                || !String.valueOf(previousState).equals(String.valueOf(nextState))
+                || !String.valueOf(previousSignalType).equals(String.valueOf(nextSignalType))
+                || previousUsingRelay != nextUsingRelay
+                || !String.valueOf(previousReason).equals(String.valueOf(nextReason));
+        if (changed) {
+            emitP2PStatusUpdate();
+        }
+
         return session;
     }
 
@@ -475,7 +545,7 @@ public class ReactorHttpService extends Service {
             JSONObject session = upsertP2PSession(
                     safeTarget,
                     sessionId,
-                    "close".equals(safeSignalType) ? "idle" : "signaling",
+                    stateForSignalType(safeSignalType),
                     safeSignalType,
                     "relay".equals(safeSignalType) || "failed".equals(safeSignalType),
                     "failed".equals(safeSignalType) ? "p2p failed" : ""
@@ -508,6 +578,7 @@ public class ReactorHttpService extends Service {
         }
 
         p2pSessions.remove(safeTarget);
+        emitP2PStatusUpdate();
         return new JSObject().put("ok", true).put("target", safeTarget).put("signal", signalResult != null ? signalResult : JSONObject.NULL);
     }
 
@@ -1823,6 +1894,284 @@ public class ReactorHttpService extends Service {
         return parsed;
     }
 
+    private static class ParsedIncomingEnvelope {
+        String bodyText;
+        String contentType;
+        Map<String, String> messageHeaders;
+    }
+
+    public static void handleIncomingP2PEnvelope(String fromNode, String rawPayload) {
+        ReactorHttpService current = instance;
+        if (current == null) {
+            return;
+        }
+
+        current.handleIncomingP2PEnvelopeInternal(fromNode, rawPayload);
+    }
+
+    private void handleIncomingP2PEnvelopeInternal(String fromNode, String rawPayload) {
+        String safeFromNode = normalizeP2PTarget(fromNode);
+        if (safeFromNode.isEmpty()) {
+            return;
+        }
+
+        ParsedIncomingEnvelope parsedEnvelope = parseIncomingP2PEnvelope(rawPayload);
+        Map<String, String> headers = new HashMap<>();
+        headers.putAll(parsedEnvelope.messageHeaders);
+        headers.put("x-p2p-from", safeFromNode);
+        headers.put("reactor-name", safeFromNode);
+        headers.put("reactor-sender", safeFromNode);
+
+        List<MessageEndpoint> listeners = collectMessageEndpoints();
+        Set<String> senderCandidates = resolveSenderCandidates(safeFromNode, safeFromNode, "");
+        JSONObject streamPayload = tryParseJsonObject(parsedEnvelope.bodyText);
+        boolean streamEnvelope = isStreamEnvelope(streamPayload);
+        String streamPhase = streamEnvelope
+                ? streamPayload.optString("phase", "").trim().toLowerCase(Locale.ROOT)
+                : "";
+        String primaryEvent = streamEnvelope ? "STREAM" : "MESSAGE";
+        Map<String, String> effectiveHeaders = streamEnvelope
+                ? withStreamHeaders(headers, streamPayload, primaryEvent)
+                : new HashMap<>(headers);
+        String targetEndpointId = effectiveHeaders.getOrDefault("reactor-target-endpoint-id", "").trim().toLowerCase(Locale.ROOT);
+
+        for (MessageEndpoint endpoint : listeners) {
+            if (!matchesEventSender(endpoint, senderCandidates, primaryEvent)) {
+                continue;
+            }
+            if (!matchesTargetEndpoint(endpoint, targetEndpointId)) {
+                continue;
+            }
+
+            try {
+                writeExecutionStart(endpoint, primaryEvent, primaryEvent);
+                executeEndpointActions(endpoint, parsedEnvelope.bodyText, effectiveHeaders);
+            } catch (Exception executionError) {
+                writeExecutionError(endpoint, primaryEvent, primaryEvent, executionError.getMessage());
+            }
+        }
+
+        if (streamEnvelope && "end".equals(streamPhase)) {
+            Map<String, String> streamEndHeaders = withStreamHeaders(headers, streamPayload, "STREAMEND");
+            String streamEndTargetEndpointId = streamEndHeaders.getOrDefault("reactor-target-endpoint-id", "").trim().toLowerCase(Locale.ROOT);
+            for (MessageEndpoint endpoint : listeners) {
+                if (!matchesEventSender(endpoint, senderCandidates, "STREAMEND")) {
+                    continue;
+                }
+                if (!matchesTargetEndpoint(endpoint, streamEndTargetEndpointId)) {
+                    continue;
+                }
+
+                try {
+                    writeExecutionStart(endpoint, "STREAMEND", "STREAMEND");
+                    executeEndpointActions(endpoint, parsedEnvelope.bodyText, streamEndHeaders);
+                } catch (Exception executionError) {
+                    writeExecutionError(endpoint, "STREAMEND", "STREAMEND", executionError.getMessage());
+                }
+            }
+        }
+    }
+
+    private ParsedIncomingEnvelope parseIncomingP2PEnvelope(String rawPayload) {
+        ParsedIncomingEnvelope parsed = new ParsedIncomingEnvelope();
+        parsed.bodyText = String.valueOf(rawPayload == null ? "" : rawPayload);
+        parsed.contentType = "text/plain; charset=utf-8";
+        parsed.messageHeaders = new HashMap<>();
+
+        JSONObject envelope = tryParseJsonObject(parsed.bodyText);
+        if (envelope == null) {
+            return parsed;
+        }
+
+        String payloadType = String.valueOf(envelope.optString("payloadType", "string")).trim().toLowerCase(Locale.ROOT);
+        String contentType = String.valueOf(envelope.optString("contentType", "")).trim();
+        if (!contentType.isEmpty()) {
+            parsed.contentType = contentType;
+        }
+
+        JSONObject messageHeaders = envelope.optJSONObject("messageHeaders");
+        if (messageHeaders != null) {
+            Iterator<String> keys = messageHeaders.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                String safeKey = String.valueOf(key == null ? "" : key).trim().toLowerCase(Locale.ROOT);
+                if (safeKey.isEmpty()) {
+                    continue;
+                }
+                parsed.messageHeaders.put(safeKey, String.valueOf(messageHeaders.opt(key)));
+            }
+        }
+
+        Object rawEnvelopePayload = envelope.opt("payload");
+        if ("base64".equals(payloadType)) {
+            try {
+                byte[] decoded = Base64.decode(String.valueOf(rawEnvelopePayload == null ? "" : rawEnvelopePayload), Base64.DEFAULT);
+                parsed.bodyText = new String(decoded, StandardCharsets.UTF_8);
+            } catch (Exception ignored) {
+                parsed.bodyText = "";
+            }
+            return parsed;
+        }
+
+        if ("json".equals(payloadType)) {
+            if (rawEnvelopePayload instanceof JSONObject || rawEnvelopePayload instanceof JSONArray) {
+                parsed.bodyText = String.valueOf(rawEnvelopePayload);
+            } else {
+                parsed.bodyText = String.valueOf(rawEnvelopePayload == null ? "" : rawEnvelopePayload);
+            }
+            if (parsed.contentType.trim().isEmpty()) {
+                parsed.contentType = "application/json; charset=utf-8";
+            }
+            return parsed;
+        }
+
+        if ("null".equals(payloadType)) {
+            parsed.bodyText = "";
+            return parsed;
+        }
+
+        if (rawEnvelopePayload instanceof JSONObject || rawEnvelopePayload instanceof JSONArray) {
+            parsed.bodyText = String.valueOf(rawEnvelopePayload);
+        } else {
+            parsed.bodyText = String.valueOf(rawEnvelopePayload == null ? "" : rawEnvelopePayload);
+        }
+        return parsed;
+    }
+
+    private boolean getP2PRoutingEligibility() {
+        if (!"node".equals(currentExchangeMode)) {
+            return false;
+        }
+
+        JSObject workingMode = readWorkingModeConfigFromFile();
+        JSONObject stunConfig = workingMode != null ? workingMode.optJSONObject("stun") : null;
+        JSONObject turnConfig = workingMode != null ? workingMode.optJSONObject("turn") : null;
+        String stunHost = String.valueOf(stunConfig != null ? stunConfig.optString("host", "") : "").trim();
+        String turnHost = String.valueOf(turnConfig != null ? turnConfig.optString("host", "") : "").trim();
+        if (stunHost.isEmpty() || turnHost.isEmpty()) {
+            return false;
+        }
+
+        try {
+            AndroidP2PWebRtcManager manager = AndroidP2PWebRtcManager.getInstance(getApplicationContext());
+            JSObject nativeStatus = manager.getNativeStatus();
+            return nativeStatus != null && nativeStatus.optBoolean("ok", false);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean hasConnectedP2PRoute(String targetNodeName) {
+        String safeTarget = normalizeP2PTarget(targetNodeName);
+        if (safeTarget.isEmpty()) {
+            return false;
+        }
+
+        if (!getP2PRoutingEligibility()) {
+            return false;
+        }
+
+        JSONObject trackedSession = p2pSessions.get(safeTarget);
+        String trackedState = String.valueOf(trackedSession != null ? trackedSession.optString("state", "") : "")
+                .trim()
+                .toLowerCase(Locale.ROOT);
+        boolean stateConnected = "connected-p2p".equals(trackedState) || "connected-turn".equals(trackedState);
+        if (!stateConnected) {
+            return false;
+        }
+
+        try {
+            AndroidP2PWebRtcManager manager = AndroidP2PWebRtcManager.getInstance(getApplicationContext());
+            JSObject nativeStatus = manager.getNativeStatus();
+            JSONArray sessions = nativeStatus != null ? nativeStatus.optJSONArray("sessions") : null;
+            if (sessions == null) {
+                return false;
+            }
+
+            for (int index = 0; index < sessions.length(); index += 1) {
+                JSONObject session = sessions.optJSONObject(index);
+                if (session == null) {
+                    continue;
+                }
+
+                String target = normalizeP2PTarget(session.optString("target", ""));
+                String dataChannelState = String.valueOf(session.optString("dataChannel", "")).trim().toLowerCase(Locale.ROOT);
+                if (safeTarget.equals(target) && "open".equals(dataChannelState)) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
+            return false;
+        }
+
+        return false;
+    }
+
+    private String resolveP2PDeliveredVia(String targetNodeName) {
+        String safeTarget = normalizeP2PTarget(targetNodeName);
+        JSONObject trackedSession = p2pSessions.get(safeTarget);
+        String trackedState = String.valueOf(trackedSession != null ? trackedSession.optString("state", "") : "")
+                .trim()
+                .toLowerCase(Locale.ROOT);
+        return "connected-turn".equals(trackedState) ? "P2P_RELAY" : "P2P_DIRECT";
+    }
+
+    private String buildP2PEnvelope(String content, String contentType, Map<String, String> extraHeaders) {
+        JSONObject envelope = new JSONObject();
+        JSONObject headers = new JSONObject();
+        try {
+            envelope.put("kind", "message");
+            String safeContentType = String.valueOf(contentType == null ? "" : contentType).trim();
+            String safeContent = String.valueOf(content == null ? "" : content);
+            if (safeContentType.toLowerCase(Locale.ROOT).contains("application/json")) {
+                envelope.put("payloadType", "json");
+                envelope.put("payload", safeContent);
+            } else {
+                envelope.put("payloadType", "string");
+                envelope.put("payload", safeContent);
+            }
+            envelope.put("contentType", safeContentType.isEmpty() ? "text/plain; charset=utf-8" : safeContentType);
+
+            if (extraHeaders != null) {
+                for (Map.Entry<String, String> entry : extraHeaders.entrySet()) {
+                    String key = String.valueOf(entry.getKey() == null ? "" : entry.getKey()).trim().toLowerCase(Locale.ROOT);
+                    if (key.isEmpty()) {
+                        continue;
+                    }
+                    headers.put(key, String.valueOf(entry.getValue() == null ? "" : entry.getValue()));
+                }
+            }
+
+            envelope.put("messageHeaders", headers);
+        } catch (Exception error) {
+            throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "unable to build p2p envelope");
+        }
+
+        return envelope.toString();
+    }
+
+    private SendDeliveryResult sendP2PMessage(String targetNodeName, String content, String contentType, Map<String, String> extraHeaders) {
+        String safeTarget = normalizeP2PTarget(targetNodeName);
+        if (safeTarget.isEmpty()) {
+            throw new RuntimeException("invalid p2p target");
+        }
+
+        try {
+            AndroidP2PWebRtcManager manager = AndroidP2PWebRtcManager.getInstance(getApplicationContext());
+            String envelope = buildP2PEnvelope(content, contentType, extraHeaders);
+            JSObject result = manager.sendData(safeTarget, envelope);
+            boolean ok = result != null && result.optBoolean("ok", false);
+            if (!ok) {
+                String error = result != null ? String.valueOf(result.optString("error", "p2p send failed")) : "p2p send failed";
+                throw new RuntimeException(error);
+            }
+
+            return SendDeliveryResult.success(safeTarget, resolveP2PDeliveredVia(safeTarget));
+        } catch (Exception error) {
+            throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "p2p send failed");
+        }
+    }
+
     private MessageEndpoint parseMessageEndpoint(File endpointFile, String projectName) {
         try {
             String source = readTextFile(endpointFile);
@@ -2400,7 +2749,14 @@ public class ReactorHttpService extends Service {
                 extraHeaders.put("X-Reactor-Message-Body", messageBody);
             }
 
-            sendNodeMessage(target, content, extraHeaders);
+                SendDeliveryResult result = sendNodeMessage(target, content, extraHeaders);
+                appendGlobalLog(buildExchangeLog(
+                    "NODE_SEND_RESULT",
+                    "target=" + target
+                        + " deliveredVia=" + String.valueOf(result.deliveredVia)
+                        + " queued=" + result.queued
+                        + (result.reason != null && !result.reason.isEmpty() ? " reason=" + result.reason : "")
+                ));
         }
 
         Matcher exchangeMatcher = EXCHANGE_SEND_MESSAGE_CALL_PATTERN.matcher(endpoint.source);
@@ -2411,7 +2767,14 @@ public class ReactorHttpService extends Service {
                 continue;
             }
 
-            sendExchangeMessage(target, content);
+                SendDeliveryResult result = sendExchangeMessage(target, content);
+                appendGlobalLog(buildExchangeLog(
+                    "NODE_SEND_RESULT",
+                    "target=" + target
+                        + " deliveredVia=" + String.valueOf(result.deliveredVia)
+                        + " queued=" + result.queued
+                        + (result.reason != null && !result.reason.isEmpty() ? " reason=" + result.reason : "")
+                ));
         }
 
         Map<String, String> stringVariables = extractStringVariables(endpoint.source);
@@ -2597,11 +2960,6 @@ public class ReactorHttpService extends Service {
             throw new RuntimeException("invalid target");
         }
 
-        if (!parsedTarget.directAddress) {
-            streamFileToExchange(target, filePath);
-            return;
-        }
-
         Map<String, String> effectiveHeaders = new HashMap<>();
         if (extraHeaders != null) {
             effectiveHeaders.putAll(extraHeaders);
@@ -2610,6 +2968,8 @@ public class ReactorHttpService extends Service {
             effectiveHeaders.put("Reactor-Target-Node", String.valueOf(parsedTarget.baseTarget).trim().toLowerCase(Locale.ROOT));
             effectiveHeaders.put("Reactor-Target-Endpoint-Id", parsedTarget.endpointId);
         }
+
+        String streamTarget = parsedTarget.directAddress ? parsedTarget.baseTarget : parsedTarget.originalTarget;
 
         String streamId = UUID.randomUUID().toString();
         String contentType = "application/octet-stream";
@@ -2627,7 +2987,9 @@ public class ReactorHttpService extends Service {
         } catch (Exception error) {
             throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "unable to build stream start packet");
         }
-        sendNodeMessageWithContentType(parsedTarget.baseTarget, start.toString(), "application/json; charset=utf-8", effectiveHeaders);
+        Set<String> deliveredViaSeen = new HashSet<>();
+        SendDeliveryResult startDelivery = sendNodeMessageWithContentType(streamTarget, start.toString(), "application/json; charset=utf-8", effectiveHeaders);
+        deliveredViaSeen.add(String.valueOf(startDelivery.deliveredVia).trim().toUpperCase(Locale.ROOT));
 
         MessageDigest digest;
         try {
@@ -2660,7 +3022,8 @@ public class ReactorHttpService extends Service {
                     throw new RuntimeException(jsonError.getMessage() != null ? jsonError.getMessage() : "unable to build stream chunk packet");
                 }
 
-                sendNodeMessageWithContentType(parsedTarget.baseTarget, packet.toString(), "application/json; charset=utf-8", effectiveHeaders);
+                SendDeliveryResult chunkDelivery = sendNodeMessageWithContentType(streamTarget, packet.toString(), "application/json; charset=utf-8", effectiveHeaders);
+                deliveredViaSeen.add(String.valueOf(chunkDelivery.deliveredVia).trim().toUpperCase(Locale.ROOT));
                 index += 1;
             }
         } catch (IOException error) {
@@ -2679,7 +3042,20 @@ public class ReactorHttpService extends Service {
         } catch (Exception error) {
             throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "unable to build stream end packet");
         }
-        sendNodeMessageWithContentType(parsedTarget.baseTarget, end.toString(), "application/json; charset=utf-8", effectiveHeaders);
+        SendDeliveryResult endDelivery = sendNodeMessageWithContentType(streamTarget, end.toString(), "application/json; charset=utf-8", effectiveHeaders);
+        deliveredViaSeen.add(String.valueOf(endDelivery.deliveredVia).trim().toUpperCase(Locale.ROOT));
+
+        String streamDeliveredVia = "";
+        if (deliveredViaSeen.contains("EXCHANGE")) {
+            streamDeliveredVia = "EXCHANGE";
+        } else if (deliveredViaSeen.contains("P2P_RELAY")) {
+            streamDeliveredVia = "P2P_RELAY";
+        } else if (deliveredViaSeen.contains("P2P_DIRECT")) {
+            streamDeliveredVia = "P2P_DIRECT";
+        }
+        if (!streamDeliveredVia.isEmpty()) {
+            appendGlobalLog(buildExchangeLog("STREAM_DELIVERED", "target=" + streamTarget + " deliveredVia=" + streamDeliveredVia));
+        }
     }
 
     private void streamFileToExchange(String target, String filePath) {
@@ -2761,6 +3137,7 @@ public class ReactorHttpService extends Service {
             throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "unable to build exchange stream end packet");
         }
         sendExchangeMessageNow(parsedTarget.originalTarget, end.toString(), "application/json");
+        appendGlobalLog(buildExchangeLog("STREAM_DELIVERED", "target=" + parsedTarget.originalTarget + " deliveredVia=EXCHANGE"));
     }
 
     private String bytesToHex(byte[] bytes) {
@@ -2771,15 +3148,48 @@ public class ReactorHttpService extends Service {
         return builder.toString();
     }
 
-    private void sendNodeMessageWithContentType(String target, String content, String contentType, Map<String, String> extraHeaders) {
+    private SendDeliveryResult sendNodeMessageWithContentType(String target, String content, String contentType, Map<String, String> extraHeaders) {
         String targetValue = String.valueOf(target).trim();
         if (targetValue.isEmpty()) {
-            return;
+            throw new RuntimeException("invalid target");
+        }
+
+        ParsedTarget parsedTarget = parseTarget(targetValue);
+        if (parsedTarget == null || parsedTarget.baseTarget == null || parsedTarget.baseTarget.trim().isEmpty()) {
+            throw new RuntimeException("invalid target");
+        }
+
+        Map<String, String> effectiveHeaders = new HashMap<>();
+        if (extraHeaders != null) {
+            effectiveHeaders.putAll(extraHeaders);
+        }
+        if (parsedTarget.endpointId != null && !parsedTarget.endpointId.isEmpty()) {
+            effectiveHeaders.put("Reactor-Target-Node", String.valueOf(parsedTarget.baseTarget).trim().toLowerCase(Locale.ROOT));
+            effectiveHeaders.put("Reactor-Target-Endpoint-Id", parsedTarget.endpointId);
+        }
+
+        if (!parsedTarget.directAddress) {
+            String logicalTarget = String.valueOf(parsedTarget.baseTarget).trim().toLowerCase(Locale.ROOT);
+            if (hasConnectedP2PRoute(logicalTarget)) {
+                try {
+                    return sendP2PMessage(logicalTarget, String.valueOf(content), String.valueOf(contentType), effectiveHeaders);
+                } catch (Exception p2pError) {
+                    appendGlobalLog(buildExchangeLog("P2P_FALLBACK", "target=" + logicalTarget + " reason=" + (p2pError.getMessage() != null ? p2pError.getMessage() : "p2p send failed")));
+                }
+            }
+
+            try {
+                sendExchangeMessageNow(parsedTarget.originalTarget, String.valueOf(content), String.valueOf(contentType));
+                return SendDeliveryResult.success(parsedTarget.originalTarget, "EXCHANGE");
+            } catch (Exception exchangeError) {
+                enqueueOutgoingMessage("exchange", String.valueOf(parsedTarget.originalTarget).trim().toLowerCase(Locale.ROOT), String.valueOf(content), String.valueOf(contentType), new HashMap<>());
+                return SendDeliveryResult.queued(parsedTarget.originalTarget, "EXCHANGE", exchangeError.getMessage());
+            }
         }
 
         List<String> normalizedTargets = buildTargetCandidates(targetValue);
         if (normalizedTargets.isEmpty()) {
-            return;
+            throw new RuntimeException("invalid target");
         }
 
         String reactorName = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -2789,8 +3199,8 @@ public class ReactorHttpService extends Service {
         RuntimeException lastError = null;
         for (String normalizedTarget : normalizedTargets) {
             try {
-                sendDirectMessageNow(normalizedTarget, content, String.valueOf(contentType), reactorName, senderId, extraHeaders);
-                return;
+                sendDirectMessageNow(normalizedTarget, content, String.valueOf(contentType), reactorName, senderId, effectiveHeaders);
+                return SendDeliveryResult.success(targetValue, "P2P_DIRECT");
             } catch (Exception error) {
                 lastError = new RuntimeException(error.getMessage());
             }
@@ -2799,65 +3209,33 @@ public class ReactorHttpService extends Service {
         if (lastError != null) {
             try {
                 sendExchangeMessageNow(targetValue.toLowerCase(Locale.ROOT), String.valueOf(content), String.valueOf(contentType));
-                return;
+                return SendDeliveryResult.success(targetValue, "EXCHANGE");
             } catch (Exception ignored) {
-                enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), String.valueOf(contentType), extraHeaders);
-                return;
+                enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), String.valueOf(contentType), effectiveHeaders);
+                return SendDeliveryResult.queued(targetValue, "EXCHANGE", lastError.getMessage());
             }
         }
 
-        enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), String.valueOf(contentType), extraHeaders);
+        enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), String.valueOf(contentType), effectiveHeaders);
+        return SendDeliveryResult.queued(targetValue, "EXCHANGE", "no direct route found");
     }
 
-    private void sendNodeMessage(String target, String content, Map<String, String> extraHeaders) {
-        String targetValue = String.valueOf(target).trim();
-        if (targetValue.isEmpty()) {
-            return;
-        }
-
-        List<String> normalizedTargets = buildTargetCandidates(targetValue);
-        if (normalizedTargets.isEmpty()) {
-            return;
-        }
-
-        String reactorName = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .getString(PREF_REACTOR_NAME, "mobile-reactor");
-        String senderId = String.valueOf(reactorName) + ":" + currentPort;
-
-        RuntimeException lastError = null;
-        for (String normalizedTarget : normalizedTargets) {
-            try {
-                sendDirectMessageNow(normalizedTarget, content, "text/plain; charset=utf-8", reactorName, senderId, extraHeaders);
-                return;
-            } catch (Exception error) {
-                lastError = new RuntimeException(error.getMessage());
-            }
-        }
-
-        if (lastError != null) {
-            // Fallback via Exchange se siamo in modalità node/client.
-            try {
-                sendExchangeMessageNow(targetValue.toLowerCase(Locale.ROOT), String.valueOf(content), "text/plain");
-                return;
-            } catch (Exception ignored) {
-                enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), "text/plain", extraHeaders);
-                return;
-            }
-        }
-
-        enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), "text/plain", extraHeaders);
+    private SendDeliveryResult sendNodeMessage(String target, String content, Map<String, String> extraHeaders) {
+        return sendNodeMessageWithContentType(target, content, "text/plain; charset=utf-8", extraHeaders);
     }
 
-    private void sendExchangeMessage(String target, String content) {
+    private SendDeliveryResult sendExchangeMessage(String target, String content) {
         String normalizedTarget = String.valueOf(target).trim().toLowerCase(Locale.ROOT);
         if (normalizedTarget.isEmpty()) {
-            return;
+            throw new RuntimeException("invalid target");
         }
 
         try {
             sendExchangeMessageNow(normalizedTarget, String.valueOf(content), "text/plain");
+            return SendDeliveryResult.success(normalizedTarget, "EXCHANGE");
         } catch (Exception error) {
             enqueueOutgoingMessage("exchange", normalizedTarget, String.valueOf(content), "text/plain", new HashMap<>());
+            return SendDeliveryResult.queued(normalizedTarget, "EXCHANGE", error.getMessage());
         }
     }
 
@@ -4125,11 +4503,13 @@ public class ReactorHttpService extends Service {
     private void handleIncomingExchangePeerList(JSONObject packet) {
         exchangeRemotePeers.clear();
         if (packet == null) {
+            emitP2PStatusUpdate();
             return;
         }
 
         JSONArray peers = packet.optJSONArray("peers");
         if (peers == null) {
+            emitP2PStatusUpdate();
             return;
         }
 
@@ -4148,6 +4528,8 @@ public class ReactorHttpService extends Service {
             appendGlobalLog(buildExchangeLog("P2P_PEER_DISCOVERED", "peer on exchange: " + safePeer));
             maybeAutoStartNativeP2PSession(safePeer);
         }
+
+        emitP2PStatusUpdate();
     }
 
     private JSObject readWorkingModeConfigFromFile() {
@@ -4193,6 +4575,11 @@ public class ReactorHttpService extends Service {
             return;
         }
 
+        if (!shouldInitiateP2PWithPeer(safeTarget)) {
+            appendGlobalLog(buildExchangeLog("P2P_AUTODIAL_SKIPPED", "reason=deterministic-responder target=" + safeTarget));
+            return;
+        }
+
         JSONObject existing = p2pSessions.get(safeTarget);
         if (existing != null) {
             String state = String.valueOf(existing.optString("state", "")).trim().toLowerCase(Locale.ROOT);
@@ -4235,6 +4622,25 @@ public class ReactorHttpService extends Service {
         }
     }
 
+    private boolean shouldInitiateP2PWithPeer(String target) {
+        String safeTarget = normalizeP2PTarget(target);
+        if (safeTarget.isEmpty()) {
+            return false;
+        }
+
+        String localName = String.valueOf(getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(PREF_REACTOR_NAME, "mobile-reactor")).trim().toLowerCase(Locale.ROOT);
+        if (localName.isEmpty()) {
+            return true;
+        }
+
+        if (localName.equals(safeTarget)) {
+            return false;
+        }
+
+        return localName.compareTo(safeTarget) < 0;
+    }
+
     private void handleIncomingExchangeSignal(JSONObject packet) {
         if (packet == null) {
             return;
@@ -4246,7 +4652,7 @@ public class ReactorHttpService extends Service {
             return;
         }
 
-        JSONObject payload = packet.optJSONObject("payload");
+        JSONObject payload = extractSignalPayload(packet);
         String reason = "failed".equals(signalType)
                 ? (payload != null ? payload.optString("reason", "p2p failed") : "p2p failed")
                 : "";
@@ -4298,6 +4704,28 @@ public class ReactorHttpService extends Service {
         }
 
         appendGlobalLog(buildExchangeLog("SIGNAL_RECEIVED", signalType + " from " + from));
+    }
+
+    private JSONObject extractSignalPayload(JSONObject packet) {
+        if (packet == null) {
+            return null;
+        }
+
+        JSONObject payloadObject = packet.optJSONObject("payload");
+        if (payloadObject != null) {
+            return payloadObject;
+        }
+
+        String payloadRaw = String.valueOf(packet.optString("payload", "")).trim();
+        if (payloadRaw.isEmpty()) {
+            return null;
+        }
+
+        try {
+            return new JSONObject(payloadRaw);
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     // =========================================================================

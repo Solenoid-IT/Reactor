@@ -2,6 +2,7 @@ package com.reactor.app;
 
 import android.content.Context;
 import android.util.Log;
+import android.util.Base64;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -44,6 +45,7 @@ public final class AndroidP2PWebRtcManager {
     private final Map<String, PendingEndpointsRequest> pendingEndpointRequests;
     private volatile PeerConnectionFactory peerConnectionFactory;
     private volatile boolean initialized;
+    private volatile int preferredSdpVariantIndex;
 
     private AndroidP2PWebRtcManager(Context context) {
         this.appContext = context.getApplicationContext();
@@ -51,6 +53,7 @@ public final class AndroidP2PWebRtcManager {
         this.sessions = new ConcurrentHashMap<>();
         this.pendingEndpointRequests = new ConcurrentHashMap<>();
         this.initialized = false;
+        this.preferredSdpVariantIndex = -1;
     }
 
     public static AndroidP2PWebRtcManager getInstance(Context context) {
@@ -414,6 +417,15 @@ public final class AndroidP2PWebRtcManager {
 
             RelayConfig relayConfig = fromWorkingMode(ReactorHttpService.getWorkingModeConfigForP2P());
             SessionState session = sessions.get(safeTarget);
+
+            if ("offer".equals(safeSignalType) && shouldRecreateSessionForIncomingOffer(session)) {
+                if (session != null) {
+                    closeSessionInternal(session, true);
+                    sessions.remove(safeTarget);
+                }
+                session = ensureSession(safeTarget, false, relayConfig);
+            }
+
             if (session == null && ("offer".equals(safeSignalType) || "candidate".equals(safeSignalType))) {
                 session = ensureSession(safeTarget, false, relayConfig);
             }
@@ -447,6 +459,26 @@ public final class AndroidP2PWebRtcManager {
                 ReactorHttpService.sendP2PSignal(safeTarget, "failed", new JSObject().put("reason", "native webrtc error"), session.sessionId);
             }
         });
+    }
+
+    private boolean shouldRecreateSessionForIncomingOffer(SessionState session) {
+        if (session == null) {
+            return true;
+        }
+        if (session.peerConnection == null) {
+            return true;
+        }
+
+        if (session.initiator) {
+            return true;
+        }
+
+        try {
+            PeerConnection.SignalingState signalingState = session.peerConnection.signalingState();
+            return signalingState != PeerConnection.SignalingState.STABLE;
+        } catch (Exception ignored) {
+            return true;
+        }
     }
 
     private void createOffer(SessionState session) {
@@ -487,6 +519,7 @@ public final class AndroidP2PWebRtcManager {
                     JSObject payload = new JSObject();
                     payload.put("type", sdp.type.canonicalForm());
                     payload.put("sdp", sdp.description);
+                    payload.put("sdpBase64", Base64.encodeToString(String.valueOf(sdp.description == null ? "" : sdp.description).getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP));
                     ReactorHttpService.sendP2PSignal(session.target, "offer", payload, session.sessionId);
                 },
                 error -> {
@@ -538,7 +571,9 @@ public final class AndroidP2PWebRtcManager {
                     JSObject answerPayload = new JSObject();
                     answerPayload.put("type", sdp.type.canonicalForm());
                     answerPayload.put("sdp", sdp.description);
+                    answerPayload.put("sdpBase64", Base64.encodeToString(String.valueOf(sdp.description == null ? "" : sdp.description).getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP));
                     ReactorHttpService.sendP2PSignal(session.target, "answer", answerPayload, session.sessionId);
+                    refreshConnectedStateIfAlreadyOpen(session);
                 },
                 error -> {
                     ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "answer failed for " + session.target + ": " + error);
@@ -553,16 +588,89 @@ public final class AndroidP2PWebRtcManager {
             return false;
         }
 
-        String sdp = String.valueOf(payload.optString("sdp", "")).trim();
-        if (sdp.isEmpty()) {
+        payload = normalizeSignalPayload(payload);
+        if (payload == null) {
+            ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "remote SDP payload normalize failed for " + (session != null ? session.target : "unknown"));
+            return false;
+        }
+
+        Object rawSdpPayload = extractRawSdpPayload(payload);
+        List<String> sdpCandidates = buildSdpCandidates(rawSdpPayload);
+        if (sdpCandidates.isEmpty()) {
             ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "remote SDP empty for " + session.target);
             return false;
         }
 
         String typeRaw = String.valueOf(payload.optString("type", defaultType.canonicalForm())).trim().toLowerCase(Locale.ROOT);
         SessionDescription.Type sdpType = "answer".equals(typeRaw) ? SessionDescription.Type.ANSWER : SessionDescription.Type.OFFER;
+        String lastReason = "setRemoteDescription failed";
+        boolean applied = false;
+        List<Integer> attemptOrder = buildSdpVariantAttemptOrder(sdpCandidates.size());
+        for (int attempt = 0; attempt < attemptOrder.size(); attempt += 1) {
+            int variantIndex = attemptOrder.get(attempt);
+            String sdp = sdpCandidates.get(variantIndex);
+            boolean hasDataChannelMLine = sdp.contains("\nm=application") || sdp.startsWith("m=application");
+            ReactorHttpService.logGlobalEvent(
+                    "P2P_NEGOTIATION",
+                    "remote SDP normalized for " + session.target + " type=" + sdpType.canonicalForm() + " len=" + sdp.length() + " variant=" + (variantIndex + 1) + "/" + sdpCandidates.size() + " attempt=" + (attempt + 1) + "/" + attemptOrder.size() + " datachannel=" + hasDataChannelMLine
+            );
+
+            String attemptError = applyRemoteDescriptionAttempt(session, sdpType, sdp);
+            if (attemptError == null) {
+                preferredSdpVariantIndex = variantIndex;
+                applied = true;
+                break;
+            }
+            lastReason = attemptError;
+        }
+
+        if (!applied) {
+            ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "remote SDP failed for " + session.target + " type=" + sdpType.canonicalForm() + " reason=" + lastReason);
+            return false;
+        }
+
+        ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "remote SDP applied for " + session.target + " type=" + sdpType.canonicalForm());
+
+        if (sdpType == SessionDescription.Type.ANSWER) {
+            session.state = "connected-p2p";
+        }
+
+        refreshConnectedStateIfAlreadyOpen(session);
+
+        flushQueuedCandidates(session);
+        return true;
+    }
+
+    private void refreshConnectedStateIfAlreadyOpen(SessionState session) {
+        if (session == null) {
+            return;
+        }
+
+        boolean dataChannelOpen = session.dataChannel != null && session.dataChannel.state() == DataChannel.State.OPEN;
+        boolean peerConnected = false;
+        try {
+            peerConnected = session.peerConnection != null && session.peerConnection.connectionState() == PeerConnection.PeerConnectionState.CONNECTED;
+        } catch (Exception ignored) {
+            peerConnected = false;
+        }
+
+        if (!dataChannelOpen && !peerConnected) {
+            return;
+        }
+
+        session.state = "connected-p2p";
+        ReactorHttpService.sendP2PSignal(session.target, "connected", null, session.sessionId);
+    }
+
+    private String applyRemoteDescriptionAttempt(SessionState session, SessionDescription.Type sdpType, String sdp) {
+        if (session == null || session.peerConnection == null) {
+            return "peer connection unavailable";
+        }
+
         SessionDescription description = new SessionDescription(sdpType, sdp);
         CountDownLatch remoteDescriptionLatch = new CountDownLatch(1);
+        final boolean[] remoteDescriptionApplied = {false};
+        final String[] remoteDescriptionError = {""};
         session.remoteDescriptionSet = false;
         session.peerConnection.setRemoteDescription(new SdpObserver() {
             @Override
@@ -573,39 +681,270 @@ public final class AndroidP2PWebRtcManager {
             @Override
             public void onSetSuccess() {
                 session.remoteDescriptionSet = true;
+                remoteDescriptionApplied[0] = true;
                 remoteDescriptionLatch.countDown();
             }
 
             @Override
             public void onCreateFailure(String s) {
+                remoteDescriptionError[0] = String.valueOf(s == null ? "unknown" : s);
                 remoteDescriptionLatch.countDown();
             }
 
             @Override
             public void onSetFailure(String s) {
+                remoteDescriptionError[0] = String.valueOf(s == null ? "unknown" : s);
                 remoteDescriptionLatch.countDown();
             }
         }, description);
 
         try {
             if (!remoteDescriptionLatch.await(3L, TimeUnit.SECONDS)) {
-                ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "remote SDP timeout for " + session.target + " type=" + sdpType.canonicalForm());
-                return false;
+                return "remote SDP timeout";
             }
         } catch (InterruptedException interruptedException) {
             Thread.currentThread().interrupt();
-            ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "remote SDP interrupted for " + session.target + " type=" + sdpType.canonicalForm());
-            return false;
+            return "remote SDP interrupted";
         }
 
-        ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "remote SDP applied for " + session.target + " type=" + sdpType.canonicalForm());
-
-        if (sdpType == SessionDescription.Type.ANSWER) {
-            session.state = "connected-p2p";
+        if (remoteDescriptionApplied[0] && session.remoteDescriptionSet) {
+            return null;
         }
 
-        flushQueuedCandidates(session);
-        return true;
+        String reason = String.valueOf(remoteDescriptionError[0] == null ? "unknown" : remoteDescriptionError[0]).trim();
+        return reason.isEmpty() ? "setRemoteDescription failed" : reason;
+    }
+
+    private List<String> buildSdpCandidates(Object rawSdpPayload) {
+        List<String> candidates = new ArrayList<>();
+
+        String decodedRaw = decodeLooseSdpString(rawSdpPayload);
+        addSdpCandidate(candidates, decodedRaw);
+
+        String normalized = normalizeSdpString(rawSdpPayload);
+        addSdpCandidate(candidates, normalized);
+
+        String compat = stripPotentiallyUnsupportedSdpLines(normalized);
+        addSdpCandidate(candidates, compat);
+
+        return candidates;
+    }
+
+    private List<Integer> buildSdpVariantAttemptOrder(int size) {
+        List<Integer> order = new ArrayList<>();
+        if (size <= 0) {
+            return order;
+        }
+
+        int preferredIndex = preferredSdpVariantIndex;
+        if (preferredIndex >= 0 && preferredIndex < size) {
+            order.add(preferredIndex);
+        }
+
+        for (int i = 0; i < size; i += 1) {
+            if (i == preferredIndex) {
+                continue;
+            }
+            order.add(i);
+        }
+
+        return order;
+    }
+
+    private void addSdpCandidate(List<String> candidates, String value) {
+        String safeValue = String.valueOf(value == null ? "" : value);
+        if (safeValue.isEmpty()) {
+            return;
+        }
+        if (!safeValue.startsWith("v=0")) {
+            return;
+        }
+        if (candidates.contains(safeValue)) {
+            return;
+        }
+        candidates.add(safeValue);
+    }
+
+    private String decodeLooseSdpString(Object rawSdp) {
+        if (rawSdp == null) {
+            return "";
+        }
+
+        String current = String.valueOf(rawSdp).trim();
+        if (current.isEmpty()) {
+            return "";
+        }
+
+        for (int i = 0; i < 2; i += 1) {
+            if (!(current.startsWith("\"") && current.endsWith("\""))) {
+                break;
+            }
+            try {
+                Object parsed = new org.json.JSONTokener(current).nextValue();
+                if (parsed instanceof String) {
+                    current = String.valueOf(parsed).trim();
+                    continue;
+                }
+            } catch (Exception ignored) {
+                break;
+            }
+            break;
+        }
+
+        current = current
+                .replace("\\u000d\\u000a", "\r\n")
+                .replace("\\u000a", "\n")
+                .replace("\\u000d", "\r")
+                .replace("\\r\\n", "\r\n")
+                .replace("\\n", "\n")
+                .replace("\\r", "\r");
+
+        return current;
+    }
+
+    private String stripPotentiallyUnsupportedSdpLines(String sdp) {
+        String safeSdp = String.valueOf(sdp == null ? "" : sdp);
+        if (safeSdp.isEmpty()) {
+            return "";
+        }
+
+        String normalized = safeSdp.replace("\r\n", "\n").replace('\r', '\n');
+        String[] lines = normalized.split("\n");
+        StringBuilder builder = new StringBuilder();
+        for (String line : lines) {
+            String safeLine = String.valueOf(line == null ? "" : line).trim();
+            if (safeLine.isEmpty()) {
+                continue;
+            }
+            if (safeLine.startsWith("a=extmap:")) {
+                continue;
+            }
+            if ("a=extmap-allow-mixed".equalsIgnoreCase(safeLine)) {
+                continue;
+            }
+            builder.append(safeLine).append("\r\n");
+        }
+
+        return builder.toString();
+    }
+
+    private String normalizeSdpString(Object rawSdp) {
+        if (rawSdp == null) {
+            return "";
+        }
+
+        String current = String.valueOf(rawSdp).trim();
+        if (current.isEmpty()) {
+            return "";
+        }
+
+        // Unwrap JSON-string encoded values up to a small bounded depth.
+        for (int i = 0; i < 2; i += 1) {
+            if (!(current.startsWith("\"") && current.endsWith("\""))) {
+                break;
+            }
+            try {
+                Object parsed = new org.json.JSONTokener(current).nextValue();
+                if (parsed instanceof String) {
+                    current = String.valueOf(parsed).trim();
+                    continue;
+                }
+            } catch (Exception ignored) {
+                break;
+            }
+            break;
+        }
+
+        // Handle accidental nested JSON payloads where SDP is embedded again.
+        for (int i = 0; i < 2; i += 1) {
+            if (!(current.startsWith("{") && current.endsWith("}"))) {
+                break;
+            }
+            try {
+                JSONObject nested = new JSONObject(current);
+                Object nestedSdp = nested.opt("sdp");
+                if (nestedSdp != null) {
+                    current = String.valueOf(nestedSdp).trim();
+                    continue;
+                }
+            } catch (Exception ignored) {
+                break;
+            }
+            break;
+        }
+
+        // Convert escaped line breaks into SDP-compatible separators.
+        current = current
+                .replace("\\u000d\\u000a", "\r\n")
+                .replace("\\u000a", "\n")
+                .replace("\\u000d", "\r")
+                .replace("\\r\\n", "\r\n")
+                .replace("\\n", "\n")
+                .replace("\\r", "\r");
+
+        // Canonicalize all line endings to CRLF for stricter SDP parsers.
+        current = current.replace("\r\n", "\n").replace('\r', '\n');
+        String[] lines = current.split("\n");
+        StringBuilder builder = new StringBuilder();
+        for (String line : lines) {
+            String safeLine = String.valueOf(line == null ? "" : line).trim();
+            if (safeLine.isEmpty()) {
+                continue;
+            }
+            // Some native parser builds reject this line; safe to omit for datachannel-only SDP.
+            if ("a=extmap-allow-mixed".equalsIgnoreCase(safeLine)) {
+                continue;
+            }
+            builder.append(safeLine).append("\r\n");
+        }
+
+        current = builder.toString();
+
+        if (!current.startsWith("v=0")) {
+            return "";
+        }
+
+        return current.trim();
+    }
+
+    private Object extractRawSdpPayload(JSONObject payload) {
+        if (payload == null) {
+            return null;
+        }
+
+        String sdpBase64 = String.valueOf(payload.optString("sdpBase64", "")).trim();
+        if (!sdpBase64.isEmpty()) {
+            try {
+                byte[] decoded = Base64.decode(sdpBase64, Base64.DEFAULT);
+                return new String(decoded, StandardCharsets.UTF_8);
+            } catch (Exception ignored) {
+                // Fallback to raw sdp below.
+            }
+        }
+
+        return payload.opt("sdp");
+    }
+
+    private JSONObject normalizeSignalPayload(JSONObject payload) {
+        if (payload == null) {
+            return null;
+        }
+
+        if (payload.has("sdp") || payload.has("candidate")) {
+            return payload;
+        }
+
+        String nestedPayload = String.valueOf(payload.optString("payload", "")).trim();
+        if (nestedPayload.isEmpty()) {
+            return payload;
+        }
+
+        try {
+            JSONObject parsed = new JSONObject(nestedPayload);
+            return parsed;
+        } catch (Exception ignored) {
+            return payload;
+        }
     }
 
     private void applyRemoteCandidate(SessionState session, JSONObject payload) {
@@ -687,9 +1026,12 @@ public final class AndroidP2PWebRtcManager {
                     JSONObject payload = extractControlPayloadFromEnvelope(text);
                     if (payload != null && payload.optBoolean("__reactorP2PControl", false)) {
                         handleControlPayload(session, payload);
+                        return;
                     }
+
+                    ReactorHttpService.handleIncomingP2PEnvelope(session != null ? session.target : "", text);
                 } catch (Exception ignored) {
-                    // Ignore malformed or unsupported P2P control payloads.
+                    // Ignore malformed envelopes and keep session alive.
                 }
             }
         });
