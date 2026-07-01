@@ -1,6 +1,6 @@
 // @state ENABLED
 // @mutex ON
-// @schedule EVERY 30 SECOND
+// @on SCHEDULE "EVERY 30 SECOND"
 
 
 

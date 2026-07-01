@@ -8,7 +8,7 @@ const { createMainWindow } = require('./src/electron/window');
 const { setupIpcHandlers } = require('./src/electron/ipcHandlers');
 
 // Constants
-const EXTERNAL_SCRIPTS_DIR = path.join(app.getPath('userData'), 'projects');
+const EXTERNAL_ENDPOINTS_DIR = path.join(app.getPath('userData'), 'endpoints');
 const EVENT_LOG_PATH = path.join(app.getPath('userData'), 'activity.log');
 
 function shouldShowWindowOnLaunch() {
@@ -206,7 +206,7 @@ if (!gotSingleInstanceLock) {
 		await ensureMacLaunchAgentAutostart();
 		configureBackgroundMode();
 
-		runtime = new ReactorRuntime(EXTERNAL_SCRIPTS_DIR, EVENT_LOG_PATH);
+		runtime = new ReactorRuntime(EXTERNAL_ENDPOINTS_DIR, EVENT_LOG_PATH);
 		setupIpcHandlers(runtime, { forceQuitApp });
 		runtime.setUiStatusSink((payload) => {
 			if (mainWindow && !mainWindow.isDestroyed()) {

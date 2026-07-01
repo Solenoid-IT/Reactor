@@ -4,7 +4,8 @@ This document explains how Reactor nodes communicate with each other.
 
 There are two communication primitives:
 
-- `Node.sendMessage(target, content)` for discrete messages
+- `Node.sendMessage(target, content, enqueueOnFail = false)` for discrete messages
+- `Node.sendMessage(target, content, enqueueOnFail = false)` for discrete messages
 - `Node.stream(target, source, options)` for chunked streaming
 
 There are also two network paths:
@@ -20,12 +21,17 @@ Use `sendMessage()` when you need to send a single payload (text, JSON, binary) 
 
 - `host`
 - `host:port`
-- `host/script_id`
-- `host:port/script_id`
+- `host/endpoint_id`
+- `host:port/endpoint_id`
 - `node_name`
-- `node_name/script_id`
+- `node_name/endpoint_id`
 
-When `script_id` is present, Reactor delivers the message only to the project whose root `uuid` file contains that UUID v4.
+When `endpoint_id` is present, Reactor delivers the message only to the project whose root `uuid` file contains that UUID v4.
+
+`enqueueOnFail` controls fallback queue behavior:
+
+- `false` (default): fail immediately when delivery is not possible
+- `true`: enqueue payload and retry later when connectivity is restored
 
 ### Sender
 
@@ -37,7 +43,7 @@ export async function run() {
 		type: 'status-update',
 		value: 42,
 		ts: Date.now(),
-	});
+	}, false);
 
 	await Node.sendMessage('192.168.1.20:7070/550e8400-e29b-41d4-a716-446655440000', {
 		type: 'status-update',
@@ -49,7 +55,7 @@ export async function run() {
 		type: 'status-update',
 		value: 42,
 		ts: Date.now(),
-	});
+	}, true);
 
 	await Node.sendMessage('target-node/550e8400-e29b-41d4-a716-446655440000', {
 		type: 'status-update',
@@ -62,15 +68,15 @@ export async function run() {
 ### Receiver (`@on MESSAGE`)
 
 ```ts
-// @state ENABLED
-// @on MESSAGE(192.168.1.10:7070,node-a)
+// @enabled TRUE
+// @on MESSAGE [192.168.1.10:7070,node-a]
 
 import type { Context } from 'core';
 import { log } from 'core';
 
 export async function run(ctx: Context) {
 	await log(`MESSAGE from ${ctx.messageSender || 'unknown'}`);
-	await log(`target node=${ctx.messageTargetNode || 'n/a'} script=${ctx.messageTargetScriptId || 'broadcast'}`);
+	await log(`target node=${ctx.messageTargetNode || 'n/a'} endpoint=${ctx.messageTargetEndpointId || 'broadcast'}`);
 
 	// Text body
 	await log(`content=${ctx.messageContent || ''}`);
@@ -86,16 +92,16 @@ export async function run(ctx: Context) {
 
 Use `stream()` when you need chunked transfer (large files, long payloads, progressive delivery).
 
-`Node.stream(target, source, options)` supports the same target forms as `Node.sendMessage(target, content)`:
+`Node.stream(target, source, options)` supports the same target forms as `Node.sendMessage(target, content, enqueueOnFail)`:
 
 - `host`
 - `host:port`
-- `host/script_id`
-- `host:port/script_id`
+- `host/endpoint_id`
+- `host:port/endpoint_id`
 - `node_name`
-- `node_name/script_id`
+- `node_name/endpoint_id`
 
-When `script_id` is present, `STREAM` and the final `STREAMEND` are delivered only to the target project.
+When `endpoint_id` is present, `STREAM` and the final `STREAMEND` are delivered only to the target project.
 
 ### Direct streaming (`Node.stream`)
 
@@ -148,8 +154,8 @@ export async function run() {
 `Node.stream(...)` and `Node.exchange().stream(...)` trigger `STREAM`, not `MESSAGE`.
 
 ```ts
-// @state ENABLED
-// @on STREAM(node-a,192.168.1.10:7070)
+// @enabled TRUE
+// @on STREAM [node-a,192.168.1.10:7070]
 
 import type { Context } from 'core';
 import { log } from 'core';
@@ -161,7 +167,7 @@ export async function run(ctx: Context) {
 	if (!stream) return;
 
 	const streamId = stream.getId();
-	await log(`target node=${ctx.messageTargetNode || 'n/a'} script=${ctx.messageTargetScriptId || 'broadcast'}`);
+	await log(`target node=${ctx.messageTargetNode || 'n/a'} endpoint=${ctx.messageTargetEndpointId || 'broadcast'}`);
 
 	if (stream.isStart()) {
 		buffersByStreamId.set(streamId, []);
@@ -190,8 +196,8 @@ export async function run(ctx: Context) {
 For low-RAM transfers, let runtime spool chunks to disk and finalize on `STREAMEND`.
 
 ```ts
-// @state ENABLED
-// @on STREAMEND(node-a,192.168.1.10:7070)
+// @enabled TRUE
+// @on STREAMEND [node-a,192.168.1.10:7070]
 
 import type { Context } from 'core';
 import { log } from 'core';
@@ -200,7 +206,7 @@ export async function run(ctx: Context) {
 	const end = ctx.streamEnd;
 	if (!end) return;
 
-	await log(`target node=${ctx.messageTargetNode || 'n/a'} script=${ctx.messageTargetScriptId || 'broadcast'}`);
+	await log(`target node=${ctx.messageTargetNode || 'n/a'} endpoint=${ctx.messageTargetEndpointId || 'broadcast'}`);
 
 	if (!end.isValid()) {
 		await log(`STREAMEND invalid id=${end.getId()} error=${end.getError()}`);
@@ -213,10 +219,10 @@ export async function run(ctx: Context) {
 
 ## 3. Trigger Summary
 
-- `Node.sendMessage(...)` -> `@on MESSAGE(...)`
-- `Node.stream(...)` -> `@on STREAM(...)`
-- `Node.exchange().stream(...)` -> `@on STREAM(...)`
-- Stream completion (validated and spooled) -> `@on STREAMEND(...)`
+- `Node.sendMessage(...)` -> `@on MESSAGE` or `@on MESSAGE [sender_a,sender_b]`
+- `Node.stream(...)` -> `@on STREAM` or `@on STREAM [sender_a,sender_b]`
+- `Node.exchange().stream(...)` -> `@on STREAM` or `@on STREAM [sender_a,sender_b]`
+- Stream completion (validated and spooled) -> `@on STREAMEND` or `@on STREAMEND [sender_a,sender_b]`
 
 ## 4. Which One to Use
 

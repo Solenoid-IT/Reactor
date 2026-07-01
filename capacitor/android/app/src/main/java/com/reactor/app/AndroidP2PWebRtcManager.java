@@ -39,7 +39,7 @@ public final class AndroidP2PWebRtcManager {
     private final Context appContext;
     private final ExecutorService executor;
     private final Map<String, SessionState> sessions;
-    private final Map<String, PendingScriptsRequest> pendingScriptRequests;
+    private final Map<String, PendingEndpointsRequest> pendingEndpointRequests;
     private volatile PeerConnectionFactory peerConnectionFactory;
     private volatile boolean initialized;
 
@@ -47,7 +47,7 @@ public final class AndroidP2PWebRtcManager {
         this.appContext = context.getApplicationContext();
         this.executor = Executors.newSingleThreadExecutor();
         this.sessions = new ConcurrentHashMap<>();
-        this.pendingScriptRequests = new ConcurrentHashMap<>();
+        this.pendingEndpointRequests = new ConcurrentHashMap<>();
         this.initialized = false;
     }
 
@@ -158,7 +158,7 @@ public final class AndroidP2PWebRtcManager {
         return new JSObject().put("ok", sent).put("target", safeTarget).put("bytes", payload.length);
     }
 
-    public JSObject requestRemoteScripts(String target, RelayConfig relayConfig, long timeoutMs) {
+    public JSObject requestRemoteEndpoints(String target, RelayConfig relayConfig, long timeoutMs) {
         String safeTarget = normalizeTarget(target);
         if (safeTarget.isEmpty()) {
             return new JSObject().put("ok", false).put("error", "invalid target");
@@ -196,12 +196,12 @@ public final class AndroidP2PWebRtcManager {
             }
 
             String requestId = UUID.randomUUID().toString().toLowerCase(Locale.ROOT);
-            PendingScriptsRequest pending = new PendingScriptsRequest(requestId, safeTarget);
-            pendingScriptRequests.put(requestId, pending);
+            PendingEndpointsRequest pending = new PendingEndpointsRequest(requestId, safeTarget);
+            pendingEndpointRequests.put(requestId, pending);
 
             JSONObject payload = new JSONObject();
             payload.put("__reactorP2PControl", true);
-            payload.put("action", "scripts-request");
+            payload.put("action", "endpoints-request");
             payload.put("requestId", requestId);
             payload.put("timestamp", Instant.now().toString());
 
@@ -209,14 +209,14 @@ public final class AndroidP2PWebRtcManager {
             byte[] encoded = envelope.toString().getBytes(StandardCharsets.UTF_8);
             boolean sent = session.dataChannel.send(new DataChannel.Buffer(ByteBuffer.wrap(encoded), false));
             if (!sent) {
-                pendingScriptRequests.remove(requestId);
-                return new JSObject().put("ok", false).put("error", "unable to send p2p scripts request");
+                pendingEndpointRequests.remove(requestId);
+                return new JSObject().put("ok", false).put("error", "unable to send p2p endpoints request");
             }
 
             boolean completed = pending.latch.await(safeTimeoutMs, TimeUnit.MILLISECONDS);
-            pendingScriptRequests.remove(requestId);
+            pendingEndpointRequests.remove(requestId);
             if (!completed) {
-                return new JSObject().put("ok", false).put("error", "p2p scripts request timeout");
+                return new JSObject().put("ok", false).put("error", "p2p endpoints request timeout");
             }
 
             return new JSObject()
@@ -224,10 +224,10 @@ public final class AndroidP2PWebRtcManager {
                     .put("target", safeTarget)
                     .put("requestId", requestId)
                     .put("node", pending.node)
-                    .put("scripts", pending.scripts != null ? pending.scripts : new JSArray())
+                    .put("endpoints", pending.endpoints != null ? pending.endpoints : new JSArray())
                     .put("generatedAt", pending.generatedAt != null ? pending.generatedAt : JSONObject.NULL);
         } catch (Exception error) {
-            return new JSObject().put("ok", false).put("error", error.getMessage() != null ? error.getMessage() : "unable to request remote scripts");
+            return new JSObject().put("ok", false).put("error", error.getMessage() != null ? error.getMessage() : "unable to request remote endpoints");
         }
     }
 
@@ -694,14 +694,14 @@ public final class AndroidP2PWebRtcManager {
             return;
         }
 
-        if ("scripts-request".equals(action)) {
+        if ("endpoints-request".equals(action)) {
             try {
                 JSONObject response = new JSONObject();
                 response.put("__reactorP2PControl", true);
-                response.put("action", "scripts-response");
+                response.put("action", "endpoints-response");
                 response.put("requestId", requestId);
                 response.put("node", ReactorHttpService.getCurrentReactorNameForP2P());
-                response.put("scripts", ReactorHttpService.getDiscoveryScriptsPayloadForP2P());
+                response.put("endpoints", ReactorHttpService.getDiscoveryEndpointsPayloadForP2P());
                 response.put("generatedAt", Instant.now().toString());
                 if (session.dataChannel != null && session.dataChannel.state() == DataChannel.State.OPEN) {
                     JSONObject envelope = buildControlEnvelope(response);
@@ -714,26 +714,26 @@ public final class AndroidP2PWebRtcManager {
             return;
         }
 
-        if ("scripts-response".equals(action)) {
-            PendingScriptsRequest pending = pendingScriptRequests.get(requestId);
+        if ("endpoints-response".equals(action)) {
+            PendingEndpointsRequest pending = pendingEndpointRequests.get(requestId);
             if (pending == null) {
                 return;
             }
 
-            JSONArray scriptsRaw = payload.optJSONArray("scripts");
-            JSArray scripts = new JSArray();
-            if (scriptsRaw != null) {
-                for (int i = 0; i < scriptsRaw.length(); i += 1) {
-                    Object item = scriptsRaw.opt(i);
+            JSONArray endpointsRaw = payload.optJSONArray("endpoints");
+            JSArray endpoints = new JSArray();
+            if (endpointsRaw != null) {
+                for (int i = 0; i < endpointsRaw.length(); i += 1) {
+                    Object item = endpointsRaw.opt(i);
                     if (item == null) {
                         continue;
                     }
-                    scripts.put(item);
+                    endpoints.put(item);
                 }
             }
 
             pending.node = String.valueOf(payload.optString("node", session.target)).trim();
-            pending.scripts = scripts;
+            pending.endpoints = endpoints;
             pending.generatedAt = String.valueOf(payload.optString("generatedAt", "")).trim();
             pending.latch.countDown();
         }
@@ -807,20 +807,20 @@ public final class AndroidP2PWebRtcManager {
         List<IceCandidate> queuedCandidates = new ArrayList<>();
     }
 
-    private static final class PendingScriptsRequest {
+    private static final class PendingEndpointsRequest {
         final String requestId;
         final String target;
         final CountDownLatch latch;
         volatile String node;
-        volatile JSArray scripts;
+        volatile JSArray endpoints;
         volatile String generatedAt;
 
-        PendingScriptsRequest(String requestId, String target) {
+        PendingEndpointsRequest(String requestId, String target) {
             this.requestId = requestId;
             this.target = target;
             this.latch = new CountDownLatch(1);
             this.node = target;
-            this.scripts = new JSArray();
+            this.endpoints = new JSArray();
             this.generatedAt = null;
         }
     }

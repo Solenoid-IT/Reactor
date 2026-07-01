@@ -8,6 +8,8 @@ declare module 'core' {
 	export interface NodeSendMessageOptions {
 		/** Custom HTTP headers sent to the target node. */
 		headers?: HeadersMap;
+		/** Queue the message on delivery failure. Defaults to false. */
+		enqueueOnFail?: boolean;
 	}
 
 	/**
@@ -83,9 +85,9 @@ declare module 'core' {
 		 *
 		 * @param target Supported formats:
 		 * - node_name
-		 * - node_name/script_uuid
+		 * - node_name/endpoint_uuid
 		 * - host_or_ip:port
-		 * - host_or_ip:port/script_uuid
+		 * - host_or_ip:port/endpoint_uuid
 		 */
 		sendMessage: (
 			target: string,
@@ -97,9 +99,9 @@ declare module 'core' {
 		 *
 		 * @param target Supported formats:
 		 * - node_name
-		 * - node_name/script_uuid
+		 * - node_name/endpoint_uuid
 		 * - host_or_ip:port
-		 * - host_or_ip:port/script_uuid
+		 * - host_or_ip:port/endpoint_uuid
 		 */
 		stream: (
 			target: string,
@@ -114,14 +116,20 @@ declare module 'core' {
 		 *
 		 * @param target Supported formats:
 		 * - node_name
-		 * - node_name/script_uuid
+		 * - node_name/endpoint_uuid
 		 * - host_or_ip
 		 * - host_or_ip:port
-		 * - host_or_ip/script_uuid
-		 * - host_or_ip:port/script_uuid
+		 * - host_or_ip/endpoint_uuid
+		 * - host_or_ip:port/endpoint_uuid
 		 *
-		 * If /script_uuid is provided, the message is routed only to that target project.
+		 * If /endpoint_uuid is provided, the message is routed only to that target endpoint.
 		 */
+		sendMessage: (
+			target: string,
+			content: string | Uint8Array | Buffer | Record<string, unknown>,
+			enqueueOnFail?: boolean,
+		) => Promise<NodeSendMessageResponse>;
+
 		sendMessage: (
 			target: string,
 			content: string | Uint8Array | Buffer | Record<string, unknown>,
@@ -133,11 +141,11 @@ declare module 'core' {
 		 *
 		 * @param target Supported formats:
 		 * - node_name
-		 * - node_name/script_uuid
+		 * - node_name/endpoint_uuid
 		 * - host_or_ip
 		 * - host_or_ip:port
-		 * - host_or_ip/script_uuid
-		 * - host_or_ip:port/script_uuid
+		 * - host_or_ip/endpoint_uuid
+		 * - host_or_ip:port/endpoint_uuid
 		 */
 		stream: (
 			target: string,
@@ -154,7 +162,7 @@ declare module 'core' {
 	export type LogLevel = 'E' | 'W' | 'I' | 'D';
 	/** Writes to activity.log of the current runtime. */
 	export function log(message: string, type?: LogLevel): Promise<void> | void;
-	/** Node API globally available in Reactor scripts. */
+	/** Node API globally available in Reactor endpoints. */
 	export const Node: NodeApi;
 }
 

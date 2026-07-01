@@ -22,10 +22,10 @@ function usage() {
 	console.log('Usage:');
 	console.log('  node daemonctl.js list');
 	console.log('  node daemonctl.js status');
-	console.log('  node daemonctl.js run <script-name>');
-	console.log('  node daemonctl.js test <script-name>');
-	console.log('  node daemonctl.js script-id <script-name>');
-	console.log('  node daemonctl.js delete <script-name>');
+	console.log('  node daemonctl.js run <endpoint-name>');
+	console.log('  node daemonctl.js test <endpoint-name>');
+	console.log('  node daemonctl.js endpoint-id <endpoint-name>');
+	console.log('  node daemonctl.js delete <endpoint-name>');
 	console.log('  node daemonctl.js set-name <reactor-name>');
 	console.log('  node daemonctl.js set-port <1-65535>');
 	console.log('  node daemonctl.js set-exchange exchange [port] [--tls] [--token <token>] [--discovery|--no-discovery]');
@@ -216,8 +216,8 @@ async function main() {
 			process.exit(1);
 		}
 
-		for (const script of response.scripts || []) {
-			console.log(`${script.name}\t${script.state}\t${script.scriptId || '-'}\t${script.path}`);
+		for (const endpoint of response.endpoints || []) {
+			console.log(`${endpoint.name}\t${endpoint.state}\t${endpoint.uuid || '-'}\t${endpoint.path}`);
 		}
 		return;
 	}
@@ -231,7 +231,7 @@ async function main() {
 
 		console.log(`PID: ${response.pid}`);
 		console.log(`Uptime(s): ${response.uptimeSec}`);
-		console.log(`Loaded scripts: ${response.scriptsCount}`);
+		console.log(`Loaded endpoints: ${response.endpointsCount}`);
 		return;
 	}
 
@@ -247,23 +247,23 @@ async function main() {
 			process.exit(1);
 		}
 
-		console.log(`Executed: ${response.script} (${response.path})`);
+		console.log(`Executed: ${response.endpoint} (${response.path})`);
 		return;
 	}
 
-	if (command === 'script-id') {
+	if (command === 'endpoint-id') {
 		const name = rest.join(' ').trim();
 		if (!name) {
 			usage();
 		}
 
-		const response = await sendCommand({ command: 'script-id', name });
+		const response = await sendCommand({ command: 'endpoint-id', name });
 		if (!response.ok) {
-			console.error(`[daemonctl] ${response.error || 'script-id failed'}`);
+			console.error(`[daemonctl] ${response.error || 'endpoint-id failed'}`);
 			process.exit(1);
 		}
 
-		console.log(response.scriptId || '');
+		console.log(response.uuid || '');
 		return;
 	}
 
@@ -279,7 +279,7 @@ async function main() {
 			process.exit(1);
 		}
 
-		console.log(`Deleted: ${response.script} (${response.path})`);
+		console.log(`Deleted: ${response.endpoint} (${response.path})`);
 		return;
 	}
 

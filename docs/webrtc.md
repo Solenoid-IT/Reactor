@@ -19,7 +19,7 @@ The expected flow is:
 5. The other side receives the offer and creates an answer.
 6. ICE candidates are exchanged through Exchange.
 7. When ICE succeeds, the DataChannel opens.
-8. Messages and script requests can then move over the direct P2P channel.
+8. Messages and endpoint requests can then move over the direct P2P channel.
 
 ```mermaid
 sequenceDiagram
@@ -44,7 +44,7 @@ sequenceDiagram
 
 	A-->>B: DataChannel open
 	B-->>A: DataChannel open
-	A-->>B: P2P messages / script requests
+	A-->>B: P2P messages / endpoint requests
 	B-->>A: P2P responses
 ```
 
@@ -114,16 +114,16 @@ The UI network view shows a merged peer list built from:
 
 This is why a peer may appear in the UI before the DataChannel is fully open.
 
-## Script Requests Over DataChannel
+## Endpoint Requests Over DataChannel
 
-Once the DataChannel is open, Reactor can ask a remote node for its scripts directly.
+Once the DataChannel is open, Reactor can ask a remote node for its endpoints directly.
 
 The flow is:
 
 1. UI selects a remote node.
-2. Desktop or Android sends a `scripts-request` control payload over DataChannel.
-3. The remote node responds with `scripts-response`.
-4. The UI renders the returned scripts in the network view.
+2. Desktop or Android sends a `endpoints-request` control payload over DataChannel.
+3. The remote node responds with `endpoints-response`.
+4. The UI renders the returned endpoints in the network view.
 
 This is implemented in:
 

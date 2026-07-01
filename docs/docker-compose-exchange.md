@@ -142,7 +142,7 @@ Runtime data is stored in dedicated Docker volumes mounted at `/data`:
 Important persisted files:
 - `/data/working-mode.json`
 - `/data/name`
-- `/data/projects/`
+- `/data/endpoints/`
 - `/data/activity.log`
 - `/data/tls/cert.pem`
 - `/data/tls/key.pem`

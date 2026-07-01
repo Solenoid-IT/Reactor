@@ -1,7 +1,7 @@
 // @state ENABLED
 // @mutex ON
-// @watch /Abs/Path/of/Desktop
-// @watch /Abs/Path/of/Downloads [file:created]
+// @on WATCH "/Abs/Path/of/Desktop"
+// @on WATCH "/Abs/Path/of/Downloads" [file:created]
 
 
 

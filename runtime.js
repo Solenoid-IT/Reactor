@@ -73,14 +73,14 @@ function parseLogicalNodeTarget(rawTarget) {
 
 		return {
 			nodeName: trimmed.toLowerCase(),
-			endpointId: null,
+			uuid: null,
 			rawTarget: trimmed,
 		};
 	}
 
 	const nodeName = trimmed.slice(0, slashIndex).trim().toLowerCase();
-	const endpointId = trimmed.slice(slashIndex + 1).trim().toLowerCase();
-	if (!nodeName || !endpointId || !isUuidV4(endpointId)) {
+	const uuid = trimmed.slice(slashIndex + 1).trim().toLowerCase();
+	if (!nodeName || !uuid || !isUuidV4(uuid)) {
 		return null;
 	}
 
@@ -90,7 +90,7 @@ function parseLogicalNodeTarget(rawTarget) {
 
 	return {
 		nodeName,
-		endpointId,
+		uuid,
 		rawTarget: trimmed,
 	};
 }
@@ -107,15 +107,15 @@ function parseEndpointScopedTarget(rawTarget) {
 	}
 
 	const baseTarget = trimmed.slice(0, slashIndex).trim();
-	const endpointId = trimmed.slice(slashIndex + 1).trim().toLowerCase();
-	if (!baseTarget || !isUuidV4(endpointId)) {
+	const uuid = trimmed.slice(slashIndex + 1).trim().toLowerCase();
+	if (!baseTarget || !isUuidV4(uuid)) {
 		return null;
 	}
 
 	const isDirectAddress = baseTarget.includes(':') || /^\d+\.\d+\.\d+\.\d+$/.test(baseTarget) || baseTarget.includes('.');
 	return {
 		baseTarget,
-		endpointId,
+		uuid,
 		isDirectAddress,
 		rawTarget: trimmed,
 	};
@@ -1734,11 +1734,11 @@ class ReactorRuntime {
 		const byUuid = new Map();
 
 		for (const endpoint of Array.isArray(this.endpoints) ? this.endpoints : []) {
-			if (!endpoint || !endpoint.endpointId) {
+			if (!endpoint || !endpoint.uuid) {
 				continue;
 			}
 
-			const uuid = String(endpoint.endpointId || '').trim().toLowerCase();
+			const uuid = String(endpoint.uuid || '').trim().toLowerCase();
 			if (!uuid) {
 				continue;
 			}
@@ -1975,7 +1975,7 @@ class ReactorRuntime {
 		}
 
 		return (Array.isArray(listeners) ? listeners : [])
-			.filter((endpoint) => String(endpoint?.endpointId || '').trim().toLowerCase() === targetEndpointId);
+			.filter((endpoint) => String(endpoint?.uuid || '').trim().toLowerCase() === targetEndpointId);
 	}
 
 	filterStreamListenersByTarget(listeners, targetEndpointId = null) {
@@ -1984,7 +1984,7 @@ class ReactorRuntime {
 		}
 
 		return (Array.isArray(listeners) ? listeners : [])
-			.filter((endpoint) => String(endpoint?.endpointId || '').trim().toLowerCase() === targetEndpointId);
+			.filter((endpoint) => String(endpoint?.uuid || '').trim().toLowerCase() === targetEndpointId);
 	}
 
 	filterStreamEndListenersByTarget(listeners, targetEndpointId = null) {
@@ -1993,7 +1993,7 @@ class ReactorRuntime {
 		}
 
 		return (Array.isArray(listeners) ? listeners : [])
-			.filter((endpoint) => String(endpoint?.endpointId || '').trim().toLowerCase() === targetEndpointId);
+			.filter((endpoint) => String(endpoint?.uuid || '').trim().toLowerCase() === targetEndpointId);
 	}
 
 	registerEndpointStreamListeners(endpoint) {
@@ -2240,7 +2240,7 @@ class ReactorRuntime {
 		const messageTarget = this.resolveMessageTarget(messageHeaders || {});
 		const listeners = this.filterStreamEndListenersByTarget(
 			this.findStreamEndListeners(senderMeta?.candidates || streamEndData.senderCandidates || []),
-			messageTarget.endpointId,
+			messageTarget.uuid,
 		);
 		if (listeners.length === 0) {
 			return [];
@@ -2256,7 +2256,7 @@ class ReactorRuntime {
 					messageSenderName: senderMeta?.rawName || null,
 					messageTarget: messageTarget.nodeName || null,
 					messageTargetNode: messageTarget.nodeName || null,
-					messageTargetEndpointId: messageTarget.endpointId || null,
+					messageTargetEndpointId: messageTarget.uuid || null,
 					messageHeaders,
 					stream: null,
 					streamEnd: streamEndInfo,
@@ -2322,7 +2322,7 @@ class ReactorRuntime {
 
 		return {
 			nodeName: rawNode || null,
-			endpointId: isUuidV4(rawEndpointId) ? rawEndpointId : null,
+			uuid: isUuidV4(rawEndpointId) ? rawEndpointId : null,
 		};
 	}
 
@@ -2346,7 +2346,7 @@ class ReactorRuntime {
 		return Boolean(providedToken) && providedToken === expectedToken;
 	}
 
-	async ensureProjectEndpointId(projectDir) {
+	async ensureProjectUuid(projectDir) {
 		const uuidPath = path.join(projectDir, PROJECT_UUID_FILE);
 		try {
 			const raw = await fs.readFile(uuidPath, 'utf8');
@@ -2480,8 +2480,8 @@ class ReactorRuntime {
 		const messageTarget = this.resolveMessageTarget(messageHeaders || {});
 		const isStreamEnvelope = Boolean(body.json && typeof body.json === 'object' && body.json.__reactorStream === true);
 		const listeners = isStreamEnvelope
-			? this.filterStreamListenersByTarget(this.findStreamListeners(senderMeta.candidates), messageTarget.endpointId)
-			: this.filterMessageListenersByTarget(this.findMessageListeners(senderMeta.candidates), messageTarget.endpointId);
+			? this.filterStreamListenersByTarget(this.findStreamListeners(senderMeta.candidates), messageTarget.uuid)
+			: this.filterMessageListenersByTarget(this.findMessageListeners(senderMeta.candidates), messageTarget.uuid);
 
 		const streamPacket = isStreamEnvelope ? this.createIncomingStreamPacket(body.json) : null;
 		const streamEndData = isStreamEnvelope ? await this.processIncomingStreamPacket(streamPacket, senderMeta) : null;
@@ -2510,7 +2510,7 @@ class ReactorRuntime {
 					messageSenderName: senderMeta.rawName || null,
 					messageTarget: messageTarget.nodeName || null,
 					messageTargetNode: messageTarget.nodeName || null,
-					messageTargetEndpointId: messageTarget.endpointId || null,
+					messageTargetEndpointId: messageTarget.uuid || null,
 					messageContent: body.text,
 					messageContentType: body.contentType,
 					messageBodyBase64: body.base64,
@@ -2719,7 +2719,7 @@ class ReactorRuntime {
 			const scopedHeaders = {
 				...(extraHeaders || {}),
 				'Reactor-Target-Node': String(endpointScopedTarget.baseTarget || '').trim().toLowerCase(),
-				'Reactor-Target-Endpoint-Id': endpointScopedTarget.endpointId,
+				'Reactor-Target-Endpoint-Id': endpointScopedTarget.uuid,
 			};
 
 			if (this.shouldPreferP2PForNodeRouting()) {
@@ -2744,7 +2744,7 @@ class ReactorRuntime {
 			...(endpointScopedTarget && endpointScopedTarget.isDirectAddress
 				? {
 					'Reactor-Target-Node': String(endpointScopedTarget.baseTarget || '').trim().toLowerCase(),
-					'Reactor-Target-Endpoint-Id': endpointScopedTarget.endpointId,
+					'Reactor-Target-Endpoint-Id': endpointScopedTarget.uuid,
 				}
 				: {}),
 		};
@@ -3404,21 +3404,16 @@ class ReactorRuntime {
 	}
 
 	async recordExecutionEvent({ endpoint, context, scope = 'PROJECT', phase, durationMs = null, output = null, error = null }) {
-		const effectiveEndpoint = endpoint;
-		if (!effectiveEndpoint) {
-			return;
-		}
-
-		const logPath = effectiveEndpoint.eventLogPath || this.eventLogPath;
+		const logPath = endpoint.eventLogPath || this.eventLogPath;
 		await this.writeEventLog(logPath, {
 			timestamp: new Date().toISOString(),
 			type: 'ENDPOINT_EXECUTION',
 			scope,
 			phase,
 			endpoint: {
-				name: effectiveEndpoint.name,
-				path: effectiveEndpoint.path,
-				state: effectiveEndpoint.state,
+				name: endpoint.name,
+				path: endpoint.path,
+				state: endpoint.state,
 			},
 			trigger: context.trigger,
 			event: context.event || null,
@@ -3591,7 +3586,7 @@ class ReactorRuntime {
 				const isProjectBootEndpoint = endpointBaseName === 'boot.ts' && isProjectEndpoint;
 				const displayName = isProjectBootEndpoint ? path.basename(endpointDir) : path.basename(endpointPath);
 				const projectDir = isProjectEndpoint ? endpointDir : null;
-				const endpointId = projectDir ? await this.ensureProjectEndpointId(projectDir) : null;
+				const uuid = projectDir ? await this.ensureProjectUuid(projectDir) : null;
 				const coreApi = this.createEndpointCoreApi(displayName);
 				const moduleExports = loadEndpointModule(endpointPath, source, {
 					virtualModules: {
@@ -3609,8 +3604,7 @@ class ReactorRuntime {
 					path: endpointPath,
 					name: displayName,
 					projectDir,
-					uuid: endpointId,
-					endpointId: endpointId,
+					uuid,
 					eventLogPath: path.join(path.dirname(normalizedEndpointPath), 'activity.log'),
 					run: runner,
 					schedule: metadata.schedule,

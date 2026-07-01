@@ -35,7 +35,7 @@ function printHelp() {
 	console.log('  reactor-cli exchange discovery <on|off>');
 	console.log('  reactor-cli exchange token get');
 	console.log('  reactor-cli exchange token generate');
-	console.log('  reactor-cli script id <script-name>');
+	console.log('  reactor-cli endpoint id <endpoint-name>');
 }
 
 async function build(target) {
@@ -113,14 +113,14 @@ async function main() {
 		return;
 	}
 
-	if (command === 'script' && subcommand === 'id') {
-		const scriptName = [arg, ...rest].filter(Boolean).join(' ').trim();
-		if (!scriptName) {
+	if (command === 'endpoint' && subcommand === 'id') {
+		const endpointName = [arg, ...rest].filter(Boolean).join(' ').trim();
+		if (!endpointName) {
 			printHelp();
-			throw new Error('script name is required');
+			throw new Error('endpoint name is required');
 		}
 
-		await runDaemonCtl(['script-id', scriptName]);
+		await runDaemonCtl(['endpoint-id', endpointName]);
 		return;
 	}
 

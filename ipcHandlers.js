@@ -569,6 +569,7 @@ function setupIpcHandlers(runtime, options = {}) {
 			schedule: [
 				'// @enabled FALSE',
 				'// @mutex FALSE',
+				'',
 				'// @on SCHEDULE "EVERY 30 SECOND"',
 				'',
 				'',
@@ -587,6 +588,7 @@ function setupIpcHandlers(runtime, options = {}) {
 			event: [
 				'// @enabled FALSE',
 				'// @mutex TRUE',
+				'',
 				'// @on MESSAGE [sender_1]',
 				'',
 				'',
@@ -605,6 +607,7 @@ function setupIpcHandlers(runtime, options = {}) {
 			watch: [
 				'// @enabled FALSE',
 				'// @mutex TRUE',
+				'',
 				'// @on WATCH "/Abs/Path/of/Desktop"',
 				'// @on WATCH "/Abs/Path/of/Downloads" [file:created]',
 				'',
@@ -1210,7 +1213,7 @@ function setupIpcHandlers(runtime, options = {}) {
 			const endpoints = runtime.endpoints.map((endpoint) => ({
 				name: endpoint.name,
 				path: endpoint.path,
-				endpointId: endpoint.endpointId || null,
+				uuid: endpoint.uuid || null,
 				eventLogPath: endpoint.eventLogPath,
 				state: endpoint.state,
 				enabled: endpoint.enabled,

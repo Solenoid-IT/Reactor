@@ -12,8 +12,8 @@ Reactor/
 ├── preload.js                 # IPC bridge renderer ↔ main process
 ├── reactor.service            # Systemd unit file per Linux
 ├── src/
-│   ├── scheduleParser.js      # Parsing espressioni @schedule
-│   ├── metadata.js            # Parsing metadati script (@state, @on, @schedule, …)
+│   ├── scheduleParser.js      # Parsing espressioni @on SCHEDULE
+│   ├── metadata.js            # Parsing metadati endpoint (@enabled, @on TYPE PARAMS, …)
 │   ├── scriptLoader.js        # Transpilazione TypeScript → CommonJS
 │   ├── networkMonitor.js      # Monitoraggio connettività
 │   ├── runtime.js             # Classe principale ReactorRuntime
@@ -43,43 +43,45 @@ Reactor/
 
 ### `metadata.js`
 - Extracts metadata from TypeScript comments
-- Supports: `@state`, `@schedule`, `@on` (including `@on MESSAGE(...)`), `@watch`, `@mutex`
+- Supports: `@enabled`, `@on TYPE PARAMS`, `@mutex`
 
-### Available Script Directives
+### Available Endpoint Directives
 
-#### `@state ENABLED|DISABLED`
-Controls script execution. Default: `DISABLED`
+#### `@enabled TRUE|FALSE`
+Controls endpoint execution. Default: `FALSE`
 ```typescript
-// @state ENABLED
+// @enabled TRUE
 ```
 
-#### `@schedule EXPRESSION`
+#### `@on SCHEDULE "EXPRESSION"`
 Periodic execution. Supports: `EVERY N SECOND|MINUTE|HOUR`
 ```typescript
-// @schedule EVERY 30 SECOND
+// @on SCHEDULE "EVERY 30 SECOND"
 ```
 
-#### `@on EVENT_NAME[,EVENT2,...]`
-Event-driven execution. Built-in events: BOOT, WIFI_ON/OFF, NET_UP/DOWN
+#### `@on EVENT_NAME`
+Event-driven execution. Built-in events: BOOT, WIFI_ON/OFF, NET_UP/DOWN, NET_CHANGE
 ```typescript
-// @on BOOT, NET_UP, CUSTOM_EVENT
+// @on BOOT
+// @on NET_UP
+// @on CUSTOM_EVENT
 ```
 
 Node message trigger:
 ```typescript
 // @on MESSAGE
-// @on MESSAGE(sender_1)
-// @on MESSAGE(10.20.43.20:7070,sender_2)
+// @on MESSAGE [sender_1]
+// @on MESSAGE [10.20.43.20:7070,sender_2]
 ```
-`import { Node } from 'core'` and `Node.sendMessage(target, content)` dispatch POST `/message` and trigger matching MESSAGE listeners.
-- `target` can be a direct host, `node_name`, or `node_name/script_id`.
-- For project scripts, the root file `uuid` stores the UUID v4 used as `script_id`.
+`import { Node } from 'core'` and `Node.sendMessage(target, content, enqueueOnFail)` dispatch POST `/message` and trigger matching MESSAGE listeners.
+- `target` can be a direct host, `node_name`, or `node_name/endpoint_id`.
+- For endpoint projects, the root file `uuid` stores the UUID v4 used as `endpoint_id`.
 
 Node stream trigger:
 ```typescript
 // @on STREAM
-// @on STREAM(sender_1)
-// @on STREAM(10.20.43.20:7070,sender_2)
+// @on STREAM [sender_1]
+// @on STREAM [10.20.43.20:7070,sender_2]
 ```
 `Node.stream(...)` and `Node.exchange().stream(...)` trigger matching STREAM listeners.
 Inside `run(ctx)` you can read stream packets with `ctx.stream` methods:
@@ -90,30 +92,30 @@ Inside `run(ctx)` you can read stream packets with `ctx.stream` methods:
 Stream finalization trigger:
 ```typescript
 // @on STREAMEND
-// @on STREAMEND(sender_1)
-// @on STREAMEND(10.20.43.20:7070,sender_2)
+// @on STREAMEND [sender_1]
+// @on STREAMEND [10.20.43.20:7070,sender_2]
 ```
 Runtime reassembles stream chunks on disk and triggers `STREAMEND` when transfer is finalized.
 Inside `run(ctx)` use `ctx.streamEnd` methods:
 - `ctx.streamEnd.getId()`, `getPath()`, `getBytes()`, `getChunks()`
 - `ctx.streamEnd.getDigestSha256()`, `isValid()`, `getError()`, `getMetadata()`
 
-#### `@watch /path/to/folder` (multiple supported)
-File system monitoring. Paths can be absolute or relative to the script directory.
+#### `@on WATCH "/path/to/folder"` (multiple supported)
+File system monitoring. Paths can be absolute or relative to the endpoint directory.
 Triggers `run()` on file/directory changes with `ctx.watchPath` and `ctx.watchType`.
 ```typescript
-// @watch ~/Desktop/monitor
-// @watch ./relative/path
+// @on WATCH "~/Desktop/monitor"
+// @on WATCH "./relative/path"
 ```
 
 **watchType values:**
 - `file:created` | `file:deleted` | `file:moved` | `file:changed`
 - `dir:created` | `dir:deleted` | `dir:moved`
 
-#### `@mutex ON|OFF`
-Prevents concurrent executions. Default: `OFF`
+#### `@mutex TRUE|FALSE`
+Prevents concurrent executions. Default: `FALSE`
 ```typescript
-// @mutex ON
+// @mutex TRUE
 ```
 
 **Context example:**
@@ -142,15 +144,15 @@ export async function run(ctx: Context) {
 ### `runtime.js`
 - Main `ReactorRuntime` class
 - Responsibilities:
-  - Script discovery
+  - Endpoint discovery
   - Schedule setup
   - Event emission
   - HTTP server health/message handling (`POST /message`)
-  - Script execution
+  - Endpoint execution
   - Event logging
   - Exchange integration (delegate to `ExchangeManager`)
 - Supports platform service injection (filesystem/http/permissions)
-- Exposes mapped runtime APIs (FileSystem, HttpClient, Device, System) in script context
+- Exposes mapped runtime APIs (FileSystem, HttpClient, Device, System) in endpoint context
 - Uses all the other modules
 
 **Exchange-related methods:**
@@ -161,7 +163,7 @@ export async function run(ctx: Context) {
 **`Node.sendMessage` routing logic:**
 1. Tenta HTTP POST diretto a `http://<target>/message` (LAN)
 2. Se il target non è raggiungibile AND mode è `client` → invia via WebSocket all'Exchange
-3. Se `target` è `node_name` o `node_name/script_id`, instrada direttamente via Exchange e, in caso di `script_id`, il receiver esegue solo il progetto target.
+3. Se `target` è `node_name` o `node_name/endpoint_id`, instrada direttamente via Exchange e, in caso di `endpoint_id`, il receiver esegue solo il progetto target.
 
 **Streaming API (chunked):**
 - `Node.stream(target, source, options)` → stream diretto HTTP verso un altro nodo
@@ -284,7 +286,7 @@ REACTOR_WORKING_MODE=node REACTOR_EXCHANGE_HOST=10.0.0.1 node daemon.js
 | Variabile | Default | Descrizione |
 |-----------|---------|-------------|
 | `REACTOR_DATA_DIR` | `~/.config/Reactor` | Cartella dati principale |
-| `REACTOR_SCRIPTS_DIR` | `$DATA_DIR/projects` | Cartella script |
+| `REACTOR_ENDPOINTS_DIR` | `$DATA_DIR/endpoints` | Cartella endpoint |
 | `REACTOR_EVENT_LOG_PATH` | `$DATA_DIR/activity.log` | Log attività globale |
 | `REACTOR_HTTP_PORT` | `7070` | Porta HTTP server |
 | `REACTOR_WORKING_MODE` | `node` | Modalità di lavoro (`node` oppure `exchange`) |
@@ -294,9 +296,9 @@ REACTOR_WORKING_MODE=node REACTOR_EXCHANGE_HOST=10.0.0.1 node daemon.js
 ### Comandi `daemonctl.js`
 
 ```bash
-node daemonctl.js list                          # Elenca script caricati
-node daemonctl.js status                        # PID, uptime, script count
-node daemonctl.js run <script-name>             # Esegue uno script
+node daemonctl.js list                          # Elenca endpoint caricati
+node daemonctl.js status                        # PID, uptime, endpoint count
+node daemonctl.js run <endpoint-name>           # Esegue un endpoint
 node daemonctl.js set-name <name>              # Imposta nome reactor
 node daemonctl.js set-port <port>              # Cambia porta HTTP
 node daemonctl.js get-exchange                 # Mostra config exchange corrente
@@ -343,7 +345,7 @@ node /opt/reactor/daemonctl.js set-exchange client 10.0.0.1:7070
 
 ```
 $REACTOR_DATA_DIR/
-├── projects/           # Script e progetti
+├── endpoints/          # Endpoint e progetti
 ├── activity.log        # Log attività globale
 ├── name                # Nome del nodo reactor
 ├── exchange-config.json # Config exchange (se impostata via daemonctl)
@@ -378,16 +380,16 @@ Defined in `src/electron/ipcHandlers.js`, exposed via `preload.js`:
 | `set-reactor-name` | renderer→main | Write reactor identity name |
 | `get-exchange-config` | renderer→main | Exchange mode/host/port/status |
 | `set-exchange-config` | renderer→main | Apply new exchange configuration |
-| `get-scripts-info` | renderer→main | Script list + metadata |
-| `open-scripts-folder` | renderer→main | Open scripts dir in Finder/Explorer |
-| `open-script-file` | renderer→main | Open script with default/configured editor |
-| `read-script-content` | renderer→main | Read script file text |
-| `save-script-content` | renderer→main | Write script file text |
-| `run-script-now` | renderer→main | Manual trigger of a script |
-| `create-script-file` | renderer→main | Create script from template |
-| `rename-script-file` | renderer→main | Rename script file |
-| `delete-script-file` | renderer→main | Delete script file |
-| `toggle-script-directive` | renderer→main | Toggle `@state` or `@mutex` |
+| `get-endpoints-info` | renderer→main | Endpoint list + metadata |
+| `open-endpoints-folder` | renderer→main | Open endpoints dir in Finder/Explorer |
+| `open-endpoint-file` | renderer→main | Open endpoint with default/configured editor |
+| `read-endpoint-content` | renderer→main | Read endpoint file text |
+| `save-endpoint-content` | renderer→main | Write endpoint file text |
+| `run-endpoint-now` | renderer→main | Manual trigger of an endpoint |
+| `create-endpoint-file` | renderer→main | Create endpoint from template |
+| `rename-endpoint-file` | renderer→main | Rename endpoint file |
+| `delete-endpoint-file` | renderer→main | Delete endpoint file |
+| `toggle-endpoint-directive` | renderer→main | Toggle `@enabled` or `@mutex` |
 | `open-event-log` | renderer→main | Resolve activity.log path |
 | `clear-event-log` | renderer→main | Truncate activity.log |
 | `get-workflow` | renderer→main | Read workflow.json |

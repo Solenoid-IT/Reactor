@@ -4,12 +4,12 @@
 
 Same code everywhere.
 
-Reactor is designed as an agnostic platform runtime where script logic remains portable and platform-specific behavior is isolated behind adapters.
+Reactor is designed as an agnostic platform runtime where endpoint logic remains portable and platform-specific behavior is isolated behind adapters.
 
 ## Runtime Layers
 
-1. Script layer (portable): user TypeScript scripts and trigger metadata (@schedule, @on, @watch).
-2. Reactor core layer (portable): parsing, scheduling, trigger dispatch, script lifecycle.
+1. Endpoint layer (portable): user TypeScript endpoints and trigger metadata based on `@on TYPE PARAMS`.
+2. Reactor core layer (portable): parsing, scheduling, trigger dispatch, endpoint lifecycle.
 3. Platform adapter layer (platform-specific): filesystem, http, permissions, background execution.
 4. Host layer:
    - Desktop: Electron
@@ -28,16 +28,16 @@ The UI communicates with Reactor through platform-specific bridges:
 - Capacitor plugin bridge
 - HTTP/WS API bridge for daemon
 
-## Mobile Script Execution Strategy
+## Mobile Endpoint Execution Strategy
 
-Mobile script execution should not rely on WebView eval.
+Mobile endpoint execution should not rely on WebView eval.
 Use a native execution plugin (for example capacitor-quickjs) and keep the same trigger semantics used by desktop/server.
 
 ## Permission Strategy
 
 Support both:
 - one-time bootstrap request on first install
-- on-enable script validation (script-aware permissions)
+- on-enable endpoint validation (endpoint-aware permissions)
 
 Use permission inference from metadata (see src/platform/permissionPlanner.js), then expose a global permissions panel in Settings.
 
@@ -45,7 +45,7 @@ Use permission inference from metadata (see src/platform/permissionPlanner.js), 
 
 - Desktop and server can derive network events from host runtime facilities.
 - Android uses `ConnectivityManager.NetworkCallback` as the primary trigger for `@on NET_CHANGE`.
-- Android applies a short debounce before recomputing the network snapshot so transient handoffs do not flood scripts.
+- Android applies a short debounce before recomputing the network snapshot so transient handoffs do not flood endpoints.
 - Android keeps a lightweight fallback poll only when the system callback cannot be registered.
 - `NET_CHANGE` payload is best-effort across platforms and should be treated as a normalized runtime snapshot, not as a strict OS-level contract.
 
@@ -68,4 +68,4 @@ Plugins should declare:
 - capabilities (filesystem/network/location/background)
 - mobile native bindings where needed
 
-This allows scripts to keep a consistent API while runtime selects the proper platform implementation.
+This allows endpoints to keep a consistent API while runtime selects the proper platform implementation.

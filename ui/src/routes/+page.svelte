@@ -1,24 +1,24 @@
 <script>
 	import { onMount, tick } from 'svelte';
 	import HeaderActions from '$lib/components/HeaderActions.svelte';
-	import ScriptList from '$lib/components/ScriptList.svelte';
+	import EndpointList from '$lib/components/EndpointList.svelte';
 	import DetailPane from '$lib/components/DetailPane.svelte';
 	import SettingsPane from '$lib/components/SettingsPane.svelte';
 	import Modal from '$lib/components/Modal.svelte';
 	import {
-		getScriptsInfo,
+		getEndpointsInfo,
 		getUiSettings,
 		copyTextToClipboard,
 		stopBackgroundProcess,
-		openScriptsFolder,
-		readScriptContent,
-		saveScriptContent,
-		runScriptNow,
-		createScriptFile,
-		renameScriptFile,
-		confirmDeleteScript,
-		deleteScriptFile,
-		toggleScriptDirective,
+		openEndpointsFolder,
+		readEndpointContent,
+		saveEndpointContent,
+		runEndpointNow,
+		createEndpointFile,
+		renameEndpointFile,
+		confirmDeleteEndpoint,
+		deleteEndpointFile,
+		toggleEndpointDirective,
 		openEventLog,
 		clearEventLog,
 		getHttpServerConfig,
@@ -42,11 +42,11 @@
 		setMessageQueueTtlDays,
 		flushMessageQueue,
 		clearMessageQueue,
-		requestRemoteScriptsP2P,
+		requestRemoteEndpointsP2P,
 	} from '$lib/reactorApi';
 
-	let scripts = [];
-	let scriptsPath = '';
+	let endpoints = [];
+	let endpointsPath = '';
 	let selectedIndex = -1;
 	let reactorName = '';
 	let httpPort = 7070;
@@ -88,9 +88,10 @@
 	};
 	let networkViewOpen = false;
 	let networkSelectedNode = '';
-	let networkNodeScripts = {};
+	let networkNodeEndpoints = {};
 	let networkRequestInFlight = '';
 	let networkRequestError = '';
+	let networkRuntimeStartedAt = '';
 	let tlsEnabled = false;
 	let tlsSubject = '';
 	let tlsNotAfter = '';
@@ -102,8 +103,8 @@
 	let status = 'Ready';
 	let settingsOpen = false;
 	let renameOpen = false;
-	let renameScriptPath = '';
-	let renameOriginalName = '';
+	let renameEndpointPath = '';
+	let renameOriginalEndpointName = '';
 	let renameValue = '';
 	let renameInput;
 	let editorOpen = false;
@@ -138,15 +139,30 @@
 		await ensureCodeEditorComponent(true);
 	}
 
-	$: selectedScript = selectedIndex >= 0 ? scripts[selectedIndex] : null;
+	$: selectedEndpoint = selectedIndex >= 0 ? endpoints[selectedIndex] : null;
 
-	$: networkPeerNames = (() => {
+	$: localDiscoveryEndpoints = (Array.isArray(endpoints) ? endpoints : [])
+		.filter((endpoint) => endpoint && endpoint.endpointId)
+		.map((endpoint) => ({
+			uuid: String(endpoint.endpointId || '').trim().toLowerCase(),
+			name: String(endpoint.name || '').trim() || 'unknown',
+			triggers: Array.isArray(endpoint.events) ? endpoint.events.map((trigger) => String(trigger || '').trim()).filter(Boolean) : [],
+			enabled: Boolean(endpoint.enabled),
+			mutex: Boolean(endpoint.mutex),
+		}))
+		.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+
+	$: networkNodeNames = (() => {
 		const localName = String(reactorName || '').trim().toLowerCase();
 		const peers = new Set();
 
+		if (localName) {
+			peers.add(localName);
+		}
+
 		for (const node of Array.isArray(exchangeLinkedNodes) ? exchangeLinkedNodes : []) {
 			const name = String(node?.name || '').trim().toLowerCase();
-			if (!name || (localName && name === localName)) {
+			if (!name) {
 				continue;
 			}
 			peers.add(name);
@@ -154,7 +170,7 @@
 
 		for (const peer of Array.isArray(p2pStatus?.remotePeers) ? p2pStatus.remotePeers : []) {
 			const name = String(peer || '').trim().toLowerCase();
-			if (!name || (localName && name === localName)) {
+			if (!name) {
 				continue;
 			}
 			peers.add(name);
@@ -162,7 +178,7 @@
 
 		for (const session of Array.isArray(p2pStatus?.sessions) ? p2pStatus.sessions : []) {
 			const name = String(session?.target || '').trim().toLowerCase();
-			if (!name || (localName && name === localName)) {
+			if (!name) {
 				continue;
 			}
 			peers.add(name);
@@ -171,22 +187,29 @@
 		return Array.from(peers.values()).sort((a, b) => a.localeCompare(b));
 	})();
 
-	$: networkNodes = networkPeerNames.map((peerName) => {
+	$: networkNodes = networkNodeNames.map((peerName) => {
 		const linkedNode = Array.isArray(exchangeLinkedNodes)
 			? exchangeLinkedNodes.find((node) => String(node?.name || '').trim().toLowerCase() === peerName)
 			: null;
 		const session = Array.isArray(p2pStatus?.sessions)
 			? p2pStatus.sessions.find((item) => String(item?.target || '').trim().toLowerCase() === peerName)
 			: null;
-		const scriptsEntry = networkNodeScripts[peerName] || null;
-		const stateInfo = buildNetworkStateInfo(session);
+		const endpointsEntry = networkNodeEndpoints[peerName] || null;
+		const isCurrent = String(reactorName || '').trim().toLowerCase() === peerName;
+		const stateInfo = isCurrent ? { key: 'connected', label: 'Current Node', reason: '' } : buildNetworkStateInfo(session);
+		const geoValue = linkedNode?.geo || linkedNode?.location || linkedNode?.geoLocation || null;
 
 		return {
 			name: peerName,
+			isCurrent,
 			linkedNode,
 			session,
-			scriptsEntry,
+			endpointsEntry,
 			stateInfo,
+			connectedAt: linkedNode?.connectedAt || (isCurrent ? networkRuntimeStartedAt : null),
+			ip: linkedNode?.ip || null,
+			port: Number.isFinite(Number(linkedNode?.port)) ? Number(linkedNode?.port) : Number.isFinite(Number(linkedNode?.httpPort)) ? Number(linkedNode?.httpPort) : null,
+			geo: geoValue ? String(geoValue) : null,
 		};
 	});
 
@@ -194,11 +217,25 @@
 		? networkNodes.find((node) => node.name === networkSelectedNode) || null
 		: null;
 
-	$: selectedNetworkScripts = selectedNetworkNodeData?.scriptsEntry?.scripts && Array.isArray(selectedNetworkNodeData.scriptsEntry.scripts)
-		? selectedNetworkNodeData.scriptsEntry.scripts
-		: networkNodeScriptsFallback(networkSelectedNode);
+	$: selectedNetworkEndpoints = (
+		selectedNetworkNodeData?.endpointsEntry?.endpoints && Array.isArray(selectedNetworkNodeData.endpointsEntry.endpoints)
+			? selectedNetworkNodeData.endpointsEntry.endpoints
+			: networkNodeEndpointsFallback(networkSelectedNode, Boolean(selectedNetworkNodeData?.isCurrent))
+	)
+		.slice()
+		.sort((a, b) => {
+			const enabledA = Boolean(a?.enabled);
+			const enabledB = Boolean(b?.enabled);
+			if (enabledA !== enabledB) {
+				return enabledA ? -1 : 1;
+			}
 
-	$: selectedNetworkScriptsSource = selectedNetworkNodeData?.scriptsEntry?.source || (selectedNetworkScripts.length > 0 ? 'discovery' : 'none');
+			return String(a?.name || '').localeCompare(String(b?.name || ''));
+		});
+
+	$: selectedNetworkEndpointsSource = selectedNetworkNodeData?.endpointsEntry?.source || (selectedNetworkNodeData?.isCurrent ? 'local' : selectedNetworkEndpoints.length > 0 ? 'exchange-discovery' : 'none');
+
+	$: networkCurrentNodeIndex = networkNodes.findIndex((node) => Boolean(node?.isCurrent));
 
 	$: exchangeIndicator = (() => {
 		const state = String(exchangeStatus?.state || '').trim().toLowerCase();
@@ -347,7 +384,39 @@
 		return String(value || '').trim().toLowerCase();
 	}
 
-	function networkNodeScriptsFallback(nodeName) {
+	function formatNetworkDateTime(value) {
+		const safeValue = String(value || '').trim();
+		if (!safeValue) {
+			return '-';
+		}
+
+		const parsed = Date.parse(safeValue);
+		if (!Number.isFinite(parsed)) {
+			return safeValue;
+		}
+
+		return new Date(parsed).toLocaleString();
+	}
+
+	function networkSourceLabel(source) {
+		const key = String(source || '').trim().toLowerCase();
+		if (key === 'p2p' || key === 'p2p-datachannel') {
+			return 'P2P realtime';
+		}
+		if (key === 'exchange' || key === 'exchange-discovery' || key === 'discovery') {
+			return 'Exchange fallback';
+		}
+		if (key === 'local') {
+			return 'Local snapshot';
+		}
+		return '-';
+	}
+
+	function networkNodeEndpointsFallback(nodeName, isCurrentNode = false) {
+		if (isCurrentNode) {
+			return Array.isArray(localDiscoveryEndpoints) ? localDiscoveryEndpoints : [];
+		}
+
 		const safeName = normalizeNodeName(nodeName);
 		if (!safeName) {
 			return [];
@@ -356,7 +425,7 @@
 		const linkedNode = Array.isArray(exchangeLinkedNodes)
 			? exchangeLinkedNodes.find((node) => normalizeNodeName(node?.name) === safeName)
 			: null;
-		return Array.isArray(linkedNode?.scripts) ? linkedNode.scripts : [];
+		return Array.isArray(linkedNode?.endpoints) ? linkedNode.endpoints : [];
 	}
 
 	function networkStateKeyFromSessionState(rawState) {
@@ -392,6 +461,17 @@
 		return 'Discovered';
 	}
 
+	function networkPeerLinkLabel(node) {
+		const key = String(node?.stateInfo?.key || '').trim().toLowerCase();
+		if (key === 'connected') {
+			return 'P2P';
+		}
+		if (key === 'relay') {
+			return 'TURN';
+		}
+		return '';
+	}
+
 	function buildNetworkStateInfo(session) {
 		const key = networkStateKeyFromSessionState(session?.state || '');
 		return {
@@ -401,20 +481,64 @@
 		};
 	}
 
-	function networkNodeAngleStyle(index, total) {
+	function networkHasDirectPeering(node) {
+		const key = String(node?.stateInfo?.key || '').trim().toLowerCase();
+		return key === 'connected' || key === 'relay';
+	}
+
+	function networkHasActiveLinkToCurrentNode(node) {
+		if (!node || node.isCurrent || networkCurrentNodeIndex < 0) {
+			return false;
+		}
+		return networkHasDirectPeering(node);
+	}
+
+	function networkPeerEdgeStyle(localIndex, remoteIndex, total) {
+		const safeTotal = Math.max(1, Number(total || 1));
+		const local = networkNodeAnglePoint(localIndex, safeTotal);
+		const remote = networkNodeAnglePoint(remoteIndex, safeTotal);
+		const dx = remote.x - local.x;
+		const dy = remote.y - local.y;
+		const length = Math.sqrt((dx * dx) + (dy * dy));
+		const angle = Math.atan2(dy, dx);
+		const centerX = local.x + (dx / 2);
+		const centerY = local.y + (dy / 2);
+		return `transform: translate(${centerX}px, ${centerY}px) rotate(${angle}rad); width: ${length}px;`;
+	}
+
+	function networkPeerEdgeLabelStyle(localIndex, remoteIndex, total) {
+		const safeTotal = Math.max(1, Number(total || 1));
+		const local = networkNodeAnglePoint(localIndex, safeTotal);
+		const remote = networkNodeAnglePoint(remoteIndex, safeTotal);
+		const dx = remote.x - local.x;
+		const dy = remote.y - local.y;
+		const angle = Math.atan2(dy, dx);
+		const labelRatio = 0.62;
+		const labelX = local.x + (dx * labelRatio);
+		const labelY = local.y + (dy * labelRatio);
+		return `transform: translate(${labelX}px, ${labelY}px) rotate(${angle}rad);`;
+	}
+
+	function networkNodeAnglePoint(index, total) {
 		const safeTotal = Math.max(1, Number(total || 1));
 		const radius = safeTotal <= 1 ? 0 : safeTotal <= 4 ? 130 : 170;
 		const angle = ((2 * Math.PI) / safeTotal) * index - Math.PI / 2;
-		const x = Math.cos(angle) * radius;
-		const y = Math.sin(angle) * radius;
+		return {
+			x: Math.cos(angle) * radius,
+			y: Math.sin(angle) * radius,
+		};
+	}
+
+	function networkNodeAngleStyle(index, total) {
+		const { x, y } = networkNodeAnglePoint(index, total);
 		return `transform: translate(${x}px, ${y}px);`;
 	}
 
 	function openNetworkView() {
 		networkRequestError = '';
 		networkViewOpen = true;
-		if (!networkSelectedNode && networkPeerNames.length > 0) {
-			networkSelectedNode = networkPeerNames[0];
+		if (!networkSelectedNode && networkNodeNames.length > 0) {
+			networkSelectedNode = networkNodeNames[0];
 		}
 
 		refreshExchangeLinkedNodes(true).catch(() => {});
@@ -427,45 +551,64 @@
 		networkRequestError = '';
 	}
 
-	async function requestNetworkNodeScripts(nodeName, silent = false) {
+	async function requestNetworkNodeEndpoints(nodeName, silent = false) {
 		const safeName = normalizeNodeName(nodeName);
 		if (!safeName) {
+			return;
+		}
+
+		if (safeName === normalizeNodeName(reactorName)) {
+			networkNodeEndpoints = {
+				...networkNodeEndpoints,
+				[safeName]: {
+					endpoints: Array.isArray(localDiscoveryEndpoints) ? localDiscoveryEndpoints : [],
+					updatedAt: new Date().toISOString(),
+					error: '',
+					source: 'local',
+				},
+			};
 			return;
 		}
 
 		networkRequestError = '';
 		networkRequestInFlight = safeName;
 		try {
-			const result = await requestRemoteScriptsP2P(safeName, 10000);
+			const result = await requestRemoteEndpointsP2P(safeName, 10000);
 			if (!result?.ok) {
-				throw new Error(result?.error || 'p2p scripts request failed');
+				throw new Error(result?.error || 'p2p endpoints request failed');
 			}
 
-			networkNodeScripts = {
-				...networkNodeScripts,
+			const endpointsPayload = Array.isArray(result.endpoints) ? result.endpoints : [];
+			const source = String(result.source || result.via || '').trim().toLowerCase();
+			const normalizedSource = source.includes('exchange') ? 'exchange-discovery' : 'p2p-datachannel';
+
+			networkNodeEndpoints = {
+				...networkNodeEndpoints,
 				[safeName]: {
-					scripts: Array.isArray(result.scripts) ? result.scripts : [],
+					endpoints: endpointsPayload,
 					updatedAt: new Date().toISOString(),
 					error: '',
-					source: 'p2p',
+					source: normalizedSource,
 				},
 			};
 
 			await refreshP2PStatusOnly();
 			if (!silent) {
-				status = `P2P scripts loaded from ${safeName}`;
+				status = normalizedSource === 'exchange-discovery'
+					? `Exchange fallback endpoints loaded from ${safeName}`
+					: `P2P endpoints loaded from ${safeName}`;
 			}
 		} catch (error) {
-			networkNodeScripts = {
-				...networkNodeScripts,
+			networkNodeEndpoints = {
+				...networkNodeEndpoints,
 				[safeName]: {
-					scripts: [],
+					endpoints: [],
 					updatedAt: new Date().toISOString(),
-					error: String(error?.message || 'unable to load scripts via p2p'),
+					error: String(error?.message || 'unable to load endpoints via p2p'),
 					source: 'p2p',
 				},
 			};
-			networkRequestError = String(error?.message || 'unable to load scripts via p2p');
+			networkRequestError = String(error?.message || 'unable to load endpoints via p2p');
 			if (!silent) {
 				status = `Error: ${networkRequestError}`;
 			}
@@ -480,12 +623,16 @@
 			return;
 		}
 		networkSelectedNode = safeName;
-		requestNetworkNodeScripts(safeName, true).catch(() => {});
+		if (safeName === normalizeNodeName(reactorName)) {
+			requestNetworkNodeEndpoints(safeName, true).catch(() => {});
+			return;
+		}
+		requestNetworkNodeEndpoints(safeName, true).catch(() => {});
 	}
 
 	async function refreshAll() {
 		const [info, settings, serverConfig, currentReactorName, exchangeConfigResult, p2pStatusResult, exchangeTokenResult, tlsConfigResult, queueStatusResult] = await Promise.all([
-			getScriptsInfo(),
+			getEndpointsInfo(),
 			getUiSettings(),
 			getHttpServerConfig(),
 			getReactorName(),
@@ -497,11 +644,11 @@
 		]);
 
 		if (info?.ok === false) {
-			status = `Error scripts list: ${info?.error || 'unknown'}`;
+			status = `Error endpoints list: ${info?.error || 'unknown'}`;
 		}
 
-		scripts = Array.isArray(info?.scripts) ? info.scripts : [];
-		scriptsPath = info?.path || '';
+		endpoints = Array.isArray(info?.endpoints) ? info.endpoints : [];
+		endpointsPath = info?.path || '';
 		httpPort = Number(serverConfig?.config?.port || settings?.httpServerPort || 7070);
 		reactorName = String(currentReactorName?.name || '');
 
@@ -545,7 +692,7 @@
 			messageQueueTtlDays = Number(queue.ttlDays || 7);
 		}
 
-		if (selectedIndex >= scripts.length) {
+		if (selectedIndex >= endpoints.length) {
 			selectedIndex = -1;
 		}
 
@@ -583,6 +730,7 @@
 
 			exchangeLinkedNodes = Array.isArray(result.nodes) ? result.nodes : [];
 			exchangeLinkedNodesTotal = Number(result.total || exchangeLinkedNodes.length || 0);
+			networkRuntimeStartedAt = String(result.runtimeStartedAt || networkRuntimeStartedAt || '').trim();
 			if (!silent) {
 				status = `Linked nodes refreshed (${exchangeLinkedNodesTotal})`;
 			}
@@ -591,8 +739,8 @@
 		}
 	}
 
-	async function createScript(templateKey) {
-		let scriptName = '';
+	async function createEndpoint(templateKey) {
+		let endpointName = '';
 		const isMobileRuntime =
 			typeof window !== 'undefined' &&
 			Boolean(window.Capacitor) &&
@@ -600,61 +748,61 @@
 
 		if (isMobileRuntime) {
 			try {
-				const suggestedName = `new-${templateKey}-script`;
-				const enteredName = window.prompt('Script name', suggestedName);
+				const suggestedName = `new-${templateKey}-endpoint`;
+				const enteredName = window.prompt('Endpoint name', suggestedName);
 				if (enteredName === null) {
-					status = 'Create script cancelled';
+					status = 'Create endpoint cancelled';
 					return;
 				}
-				scriptName = String(enteredName || '').trim();
-				if (!scriptName) {
-					status = 'Error: invalid script name';
+				endpointName = String(enteredName || '').trim();
+				if (!endpointName) {
+					status = 'Error: invalid endpoint name';
 					return;
 				}
 			} catch {
 				// Defensive fallback for environments where prompt exists but is blocked.
-				scriptName = '';
+				endpointName = '';
 			}
 		}
 
-		const result = await createScriptFile(templateKey, scriptName);
+		const result = await createEndpointFile(templateKey, endpointName);
 		if (isBridgeUnavailable(result)) {
-			status = 'Create script non disponibile su mobile: bridge nativo non disponibile';
+			status = 'Create endpoint unavailable on mobile: native bridge unavailable';
 			if (typeof window !== 'undefined' && typeof window.alert === 'function') {
-				window.alert('Create script non disponibile su mobile: bridge nativo Capacitor non disponibile per createScriptFile.');
+				window.alert('Create endpoint unavailable on mobile: Capacitor native bridge is unavailable for createEndpointFile.');
 			}
 			return;
 		}
 
-		status = result?.ok ? `Script created (${scriptName || templateKey})` : `Error: ${result?.error || 'unknown'}`;
+		status = result?.ok ? `Endpoint created (${endpointName || templateKey})` : `Error: ${result?.error || 'unknown'}`;
 		await refreshAll();
 		await refreshAll();
 	}
 
-	async function editScript(index) {
-		const script = scripts[index];
-		if (!script) {
+	async function editEndpoint(index) {
+		const endpoint = endpoints[index];
+		if (!endpoint) {
 			return;
 		}
 
-		status = `Loading editor: ${script.name}`;
+		status = `Loading editor: ${endpoint.name}`;
 		const ready = await ensureCodeEditorComponent();
 		if (!ready) {
 			return;
 		}
 
-		const result = await readScriptContent(script.path);
+		const result = await readEndpointContent(endpoint.path);
 		if (!result?.ok) {
-			status = `Error: ${result?.error || 'unable to load script'}`;
+			status = `Error: ${result?.error || 'unable to load endpoint'}`;
 			return;
 		}
 
-		editorFilePath = script.path;
-		editorFileName = script.name;
+		editorFilePath = endpoint.path;
+		editorFileName = endpoint.name;
 		editorLanguage = 'typescript';
 		editorContent = result.content || '';
 		editorOpen = true;
-		status = `Editing: ${script.name}`;
+		status = `Editing: ${endpoint.name}`;
 	}
 
 	function closeCodeEditor() {
@@ -662,9 +810,9 @@
 	}
 
 	async function saveCodeEditor(nextContent) {
-		const result = await saveScriptContent(editorFilePath, nextContent);
+		const result = await saveEndpointContent(editorFilePath, nextContent);
 		if (!result?.ok) {
-			status = `Error: ${result?.error || 'unable to save script'}`;
+			status = `Error: ${result?.error || 'unable to save endpoint'}`;
 			return;
 		}
 
@@ -673,15 +821,15 @@
 		await refreshAll();
 	}
 
-	async function renameScript(index) {
-		const script = scripts[index];
-		if (!script) {
+	async function renameEndpoint(index) {
+		const endpoint = endpoints[index];
+		if (!endpoint) {
 			return;
 		}
 
-		renameScriptPath = script.path;
-		renameOriginalName = script.name;
-		renameValue = script.name.replace(/\.(ts|js)$/i, '');
+		renameEndpointPath = endpoint.path;
+		renameOriginalEndpointName = endpoint.name;
+		renameValue = endpoint.name.replace(/\.(ts|js)$/i, '');
 		renameOpen = true;
 
 		await tick();
@@ -693,57 +841,57 @@
 
 	function closeRenameDialog() {
 		renameOpen = false;
-		renameScriptPath = '';
-		renameOriginalName = '';
+		renameEndpointPath = '';
+		renameOriginalEndpointName = '';
 		renameValue = '';
 	}
 
 	async function confirmRenameDialog() {
 		const nextName = String(renameValue || '').trim();
 		if (!nextName) {
-			status = 'Error: invalid script name';
+			status = 'Error: invalid endpoint name';
 			return;
 		}
 
-		const result = await renameScriptFile(renameScriptPath, nextName);
-		status = result?.ok ? `Script renamed: ${nextName}` : `Error: ${result?.error || 'unknown'}`;
+		const result = await renameEndpointFile(renameEndpointPath, nextName);
+		status = result?.ok ? `Endpoint renamed: ${nextName}` : `Error: ${result?.error || 'unknown'}`;
 		if (result?.ok) {
 			closeRenameDialog();
 			await refreshAll();
 		}
 	}
 
-	async function deleteScript(index) {
-		const script = scripts[index];
-		if (!script) {
+	async function deleteEndpoint(index) {
+		const endpoint = endpoints[index];
+		if (!endpoint) {
 			return;
 		}
-		const confirmResult = await confirmDeleteScript(script.name);
+		const confirmResult = await confirmDeleteEndpoint(endpoint.name);
 		if (!confirmResult?.confirmed) {
 			return;
 		}
-		const result = await deleteScriptFile(script.path);
-		status = result?.ok ? `Script deleted: ${script.name}` : `Error: ${result?.error || 'unknown'}`;
+		const result = await deleteEndpointFile(endpoint.path);
+		status = result?.ok ? `Endpoint deleted: ${endpoint.name}` : `Error: ${result?.error || 'unknown'}`;
 		await refreshAll();
 	}
 
 	async function toggleDirective(index, directive) {
-		const script = scripts[index];
-		if (!script) {
+		const endpoint = endpoints[index];
+		if (!endpoint) {
 			return;
 		}
-		const result = await toggleScriptDirective(script.path, directive);
-		status = result?.ok ? `Updated ${directive} on ${script.name}` : `Error: ${result?.error || 'unknown'}`;
+		const result = await toggleEndpointDirective(endpoint.path, directive);
+		status = result?.ok ? `Updated ${directive} on ${endpoint.name}` : `Error: ${result?.error || 'unknown'}`;
 		await refreshAll();
 	}
 
 	async function runNow(index) {
-		const script = scripts[index];
-		if (!script) {
+		const endpoint = endpoints[index];
+		if (!endpoint) {
 			return;
 		}
-		const result = await runScriptNow(script.path);
-		status = result?.ok ? `Test started: ${script.name}` : `Error: ${result?.error || 'unknown'}`;
+		const result = await runEndpointNow(endpoint.path);
+		status = result?.ok ? `Test started: ${endpoint.name}` : `Error: ${result?.error || 'unknown'}`;
 	}
 
 	async function saveReactorNameValue(nextName) {
@@ -930,7 +1078,7 @@
 	}
 
 	async function importBackupHandler() {
-		const confirm = window.confirm('Import backup and overwrite current projects/configuration?');
+		const confirm = window.confirm('Import backup and overwrite current endpoints/configuration?');
 		if (!confirm) {
 			status = 'Backup import cancelled';
 			return;
@@ -980,37 +1128,37 @@
 		await refreshAll();
 	}
 
-	async function copyScriptId(index) {
-		const script = scripts[index];
-		const scriptId = String(script?.scriptId || '').trim();
-		if (!script || !scriptId) {
-			status = 'Error: script ID unavailable';
+	async function copyEndpointId(index) {
+		const endpoint = endpoints[index];
+		const endpointId = String(endpoint?.endpointId || '').trim();
+		if (!endpoint || !endpointId) {
+			status = 'Error: endpoint ID unavailable';
 			return;
 		}
 
 		try {
 			if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-				await navigator.clipboard.writeText(scriptId);
-				status = `Copied ID: ${script.name}`;
+				await navigator.clipboard.writeText(endpointId);
+				status = `Copied ID: ${endpoint.name}`;
 				return;
 			}
 		} catch {
 			// Fallback below.
 		}
 
-		const nativeCopyResult = await copyTextToClipboard(scriptId);
+		const nativeCopyResult = await copyTextToClipboard(endpointId);
 		if (nativeCopyResult?.ok) {
-			status = `Copied ID: ${script.name}`;
+			status = `Copied ID: ${endpoint.name}`;
 			return;
 		}
 
 		if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
-			window.prompt(`Copy script ID for ${script.name}`, scriptId);
-			status = `Script ID ready to copy: ${script.name}`;
+			window.prompt(`Copy endpoint ID for ${endpoint.name}`, endpointId);
+			status = `Endpoint ID ready to copy: ${endpoint.name}`;
 			return;
 		}
 
-		status = `Script ID: ${scriptId}`;
+		status = `Endpoint ID: ${endpointId}`;
 	}
 
 	async function stopBackgroundProcessHandler() {
@@ -1025,44 +1173,44 @@
 	}
 
 	async function openLog(index) {
-		const script = scripts[index];
-		if (!script) {
+		const endpoint = endpoints[index];
+		if (!endpoint) {
 			return;
 		}
 
-		status = `Loading log: ${script.name}`;
+		status = `Loading log: ${endpoint.name}`;
 		const ready = await ensureCodeEditorComponent();
 		if (!ready) {
 			return;
 		}
 
-		const logPathResult = await openEventLog(script.path);
+		const logPathResult = await openEventLog(endpoint.path);
 		if (!logPathResult?.ok || !logPathResult?.path) {
 			status = `Error: ${logPathResult?.error || 'activity.log path unavailable'}`;
 			return;
 		}
 
-		const result = await readScriptContent(logPathResult.path);
+		const result = await readEndpointContent(logPathResult.path);
 		if (!result?.ok) {
 			status = `Error: ${result?.error || 'unable to load activity.log'}`;
 			return;
 		}
 
 		editorFilePath = logPathResult.path;
-		editorFileName = `${script.name} / activity.log`;
+		editorFileName = `${endpoint.name} / activity.log`;
 		editorLanguage = 'log';
 		editorContent = result.content || '';
 		editorOpen = true;
-		status = `Editing log: ${script.name}`;
+		status = `Editing log: ${endpoint.name}`;
 	}
 
 	async function clearLog(index) {
-		const script = scripts[index];
-		if (!script) {
+		const endpoint = endpoints[index];
+		if (!endpoint) {
 			return;
 		}
-		const result = await clearEventLog(script.path);
-		status = result?.ok ? `Cleared activity.log for ${script.name}` : `Error: ${result?.error || 'unknown'}`;
+		const result = await clearEventLog(endpoint.path);
+		status = result?.ok ? `Cleared activity.log for ${endpoint.name}` : `Error: ${result?.error || 'unknown'}`;
 	}
 
 	onMount(() => {
@@ -1093,7 +1241,7 @@
 			return;
 		}
 
-		const result = await readScriptContent(logPathResult.path);
+		const result = await readEndpointContent(logPathResult.path);
 		if (!result?.ok) {
 			status = `Error: ${result?.error || 'unable to load activity.log'}`;
 			return;
@@ -1128,40 +1276,40 @@
 <div class="app-shell">
 	<HeaderActions
 		onRefresh={refreshAll}
-		onOpenFolder={openScriptsFolder}
+		onOpenFolder={openEndpointsFolder}
 		onOpenSettings={openSettings}
 		onOpenNetworkView={openNetworkView}
 		onOpenGlobalLog={openGlobalLog}
 		onClearGlobalLog={clearGlobalLog}
-		onCreateBlank={() => createScript('blank')}
-		onCreateSchedule={() => createScript('schedule')}
-		onCreateEvent={() => createScript('event')}
-		onCreateWatch={() => createScript('watch')}
+		onCreateBlank={() => createEndpoint('blank')}
+		onCreateSchedule={() => createEndpoint('schedule')}
+		onCreateEvent={() => createEndpoint('event')}
+		onCreateWatch={() => createEndpoint('watch')}
 		exchangeStatus={exchangeIndicator}
 		p2pStatus={p2pConnectionStatus}
 	/>
 	<main class="content">
 		<section class="list-pane">
-			<div class="path-box">{scriptsPath || 'Loading path...'}</div>
-			<ScriptList
-				scripts={scripts}
+			<div class="path-box">{endpointsPath || 'Loading path...'}</div>
+			<EndpointList
+				endpoints={endpoints}
 				selectedIndex={selectedIndex}
 				onSelect={(index) => (selectedIndex = index)}
-				onOpen={editScript}
+				onOpen={editEndpoint}
 				onQuickOpenHover={preloadCodeEditor}
-				onRename={renameScript}
-				onDelete={deleteScript}
+				onRename={renameEndpoint}
+				onDelete={deleteEndpoint}
 				onToggleState={(index) => toggleDirective(index, 'state')}
 				onToggleMutex={(index) => toggleDirective(index, 'mutex')}
 				onRun={runNow}
 				onOpenLog={openLog}
 				onClearLog={clearLog}
-				onCopyId={copyScriptId}
+				onCopyId={copyEndpointId}
 			/>
 		</section>
 		<DetailPane
-			{selectedScript}
-			{scriptsPath}
+			selectedEndpoint={selectedEndpoint}
+			endpointsPath={endpointsPath}
 			{status}
 		/>
 	</main>
@@ -1232,8 +1380,8 @@
 	<Modal
 		open={networkViewOpen}
 		title="Network View"
-		subtitle="Click a node to request remote scripts over P2P DataChannel"
-		ariaLabel="Network topology and node scripts"
+		subtitle=""
+		ariaLabel="Network topology and node endpoints"
 		cardClass="modal-card network-view-modal-card"
 		onClose={closeNetworkView}
 		showActions={false}
@@ -1241,6 +1389,7 @@
 		<div class="network-view-shell">
 			<div class="network-graph-pane">
 				<div class="network-state-legend">
+					<span class="legend-item"><i class="legend-dot is-current"></i>Current node</span>
 					<span class="legend-item"><i class="legend-dot is-connected"></i>Connected P2P</span>
 					<span class="legend-item"><i class="legend-dot is-relay"></i>Connected TURN</span>
 					<span class="legend-item"><i class="legend-dot is-dialing"></i>Dialing</span>
@@ -1249,21 +1398,37 @@
 				</div>
 				<div class="network-graph-canvas">
 					{#if networkNodes.length === 0}
-						<div class="network-empty">No remote nodes available</div>
+						<div class="network-empty">No nodes available</div>
 					{:else}
 						<div class="network-hub">
 							<div class="network-hub-icon"><i class="fa-solid fa-server"></i></div>
 							<div class="network-hub-label">Exchange</div>
 						</div>
+						{#if networkCurrentNodeIndex >= 0}
+							{#each networkNodes as node, index}
+								{#if networkHasActiveLinkToCurrentNode(node)}
+									<div
+										class="network-peer-edge is-{node.stateInfo.key}"
+										style={networkPeerEdgeStyle(networkCurrentNodeIndex, index, networkNodes.length)}
+									></div>
+									<div
+										class="network-peer-edge-label is-{node.stateInfo.key}"
+										style={networkPeerEdgeLabelStyle(networkCurrentNodeIndex, index, networkNodes.length)}
+									>
+										{networkPeerLinkLabel(node)}
+									</div>
+								{/if}
+							{/each}
+						{/if}
 						{#each networkNodes as node, index}
 							<div class="network-edge is-{node.stateInfo.key}" style={networkNodeAngleStyle(index, networkNodes.length)}></div>
 							<button
 								type="button"
-								class="network-node is-{node.stateInfo.key} {networkSelectedNode === node.name ? 'is-selected' : ''}"
+								class="network-node is-{node.stateInfo.key} {node.isCurrent ? 'is-current' : ''} {networkSelectedNode === node.name ? 'is-selected' : ''}"
 								style={networkNodeAngleStyle(index, networkNodes.length)}
 								on:click={() => selectNetworkNode(node.name)}
 							>
-								<div class="network-node-title">{node.name}</div>
+								<div class="network-node-title">{node.isCurrent ? `${node.name} (current)` : node.name}</div>
 								<div class="network-node-state">{node.stateInfo.label}</div>
 								{#if node.stateInfo.reason}
 									<div class="network-node-reason">{node.stateInfo.reason}</div>
@@ -1276,39 +1441,53 @@
 
 			<div class="network-detail-pane">
 				{#if !networkSelectedNode}
-					<div class="network-empty">Select a node to inspect scripts</div>
+					<div class="network-empty">Select a node to inspect endpoints</div>
 				{:else}
 					<div class="network-detail-header">
 						<div>
-							<div class="network-detail-title">{networkSelectedNode}</div>
+							<div class="network-detail-title">{selectedNetworkNodeData?.isCurrent ? `${networkSelectedNode} (current)` : networkSelectedNode}</div>
 							<div class="network-detail-meta">
-								Source: {selectedNetworkScriptsSource === 'p2p' ? 'P2P realtime' : selectedNetworkScriptsSource === 'discovery' ? 'Exchange discovery' : '-'}
+								Source: {networkSourceLabel(selectedNetworkEndpointsSource)}
 							</div>
 						</div>
-						<button
-							type="button"
-							class="btn-secondary"
-							disabled={networkRequestInFlight === networkSelectedNode}
-							on:click={() => requestNetworkNodeScripts(networkSelectedNode)}
-						>
-							<i class="fa-solid fa-wifi me-1"></i>{networkRequestInFlight === networkSelectedNode ? 'Requesting...' : 'Request via P2P'}
-						</button>
+						{#if selectedNetworkNodeData?.isCurrent}
+							<button type="button" class="btn-secondary" disabled>
+								<i class="fa-solid fa-circle-dot me-1"></i>Current node
+							</button>
+						{:else}
+							<button
+								type="button"
+								class="btn-secondary"
+								disabled={networkRequestInFlight === networkSelectedNode}
+								on:click={() => requestNetworkNodeEndpoints(networkSelectedNode)}
+							>
+								<i class="fa-solid fa-wifi me-1"></i>{networkRequestInFlight === networkSelectedNode ? 'Requesting...' : 'Request endpoints'}
+							</button>
+						{/if}
+					</div>
+
+					<div class="network-node-facts">
+						<div class="network-endpoint-meta">Node name: {selectedNetworkNodeData?.name || '-'}</div>
+						<div class="network-endpoint-meta">Connection started: {formatNetworkDateTime(selectedNetworkNodeData?.connectedAt)}</div>
+						<div class="network-endpoint-meta">IP: {selectedNetworkNodeData?.ip || '-'}</div>
+						<div class="network-endpoint-meta">Port: {selectedNetworkNodeData?.port ?? '-'}</div>
+						<div class="network-endpoint-meta">Geo: {selectedNetworkNodeData?.geo || '-'}</div>
 					</div>
 
 					{#if networkRequestError}
 						<div class="network-error">{networkRequestError}</div>
 					{/if}
 
-					{#if selectedNetworkScripts.length === 0}
-						<div class="network-empty">No scripts returned for this node</div>
+					{#if selectedNetworkEndpoints.length === 0}
+						<div class="network-empty">No endpoints available for this node</div>
 					{:else}
-						<div class="network-script-list">
-							{#each selectedNetworkScripts as script}
-								<div class="network-script-item">
-									<div class="network-script-name">{script.name || 'unnamed'}</div>
-									<div class="network-script-meta">UUID: {script.uuid || '-'}</div>
-									<div class="network-script-meta">Triggers: {Array.isArray(script.triggers) && script.triggers.length > 0 ? script.triggers.join(', ') : '-'}</div>
-									<div class="network-script-meta">Enabled: {script.enabled ? 'yes' : 'no'} · Mutex: {script.mutex ? 'yes' : 'no'}</div>
+						<div class="network-endpoint-list">
+							{#each selectedNetworkEndpoints as endpoint}
+								<div class="network-endpoint-item">
+									<div class="network-endpoint-name">{endpoint.name || 'unnamed endpoint'}</div>
+									<div class="network-endpoint-meta">UUID: {endpoint.uuid || '-'}</div>
+									<div class="network-endpoint-meta">Triggers: {Array.isArray(endpoint.triggers) && endpoint.triggers.length > 0 ? endpoint.triggers.join(', ') : '-'}</div>
+									<div class="network-endpoint-meta">Enabled: {endpoint.enabled ? 'yes' : 'no'} · Mutex: {endpoint.mutex ? 'yes' : 'no'}</div>
 								</div>
 							{/each}
 						</div>
@@ -1333,9 +1512,9 @@
 
 	<Modal
 		open={renameOpen}
-		title="Rename Script"
-		subtitle={renameOriginalName}
-		ariaLabel="Rename script"
+		title="Rename Endpoint"
+		subtitle={renameOriginalEndpointName}
+		ariaLabel="Rename endpoint"
 		onClose={closeRenameDialog}
 	>
 		<input
@@ -1468,6 +1647,50 @@
 		background: linear-gradient(180deg, rgba(178, 190, 204, 0.8), rgba(178, 190, 204, 0.1));
 	}
 
+	.network-peer-edge {
+		position: absolute;
+		height: 2px;
+		border-radius: 999px;
+		background: linear-gradient(90deg, rgba(120, 198, 255, 0.16), rgba(120, 198, 255, 0.72), rgba(120, 198, 255, 0.16));
+		transform-origin: center;
+		z-index: 2;
+	}
+
+	.network-peer-edge.is-connected {
+		background: linear-gradient(90deg, rgba(96, 230, 154, 0.16), rgba(96, 230, 154, 0.85), rgba(96, 230, 154, 0.16));
+	}
+
+	.network-peer-edge.is-relay {
+		background: linear-gradient(90deg, rgba(247, 196, 99, 0.16), rgba(247, 196, 99, 0.85), rgba(247, 196, 99, 0.16));
+	}
+
+	.network-peer-edge-label {
+		position: absolute;
+		padding: 2px 6px;
+		border-radius: 999px;
+		font-size: 0.64rem;
+		font-weight: 700;
+		line-height: 1;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		background: rgba(22, 30, 43, 0.96);
+		border: 1px solid rgba(120, 198, 255, 0.38);
+		color: rgba(193, 228, 255, 0.96);
+		transform-origin: center;
+		z-index: 5;
+		pointer-events: none;
+	}
+
+	.network-peer-edge-label.is-connected {
+		border-color: rgba(96, 230, 154, 0.55);
+		color: rgba(169, 247, 205, 0.98);
+	}
+
+	.network-peer-edge-label.is-relay {
+		border-color: rgba(247, 196, 99, 0.58);
+		color: rgba(255, 227, 161, 0.98);
+	}
+
 	.network-node {
 		position: absolute;
 		width: 138px;
@@ -1485,6 +1708,11 @@
 	.network-node.is-selected {
 		border-color: rgba(111, 231, 170, 0.9);
 		box-shadow: 0 0 0 2px rgba(111, 231, 170, 0.25);
+	}
+
+	.network-node.is-current {
+		border-color: rgba(120, 198, 255, 0.95);
+		box-shadow: 0 0 0 1px rgba(120, 198, 255, 0.3) inset;
 	}
 
 	.network-node.is-connected {
@@ -1532,6 +1760,10 @@
 		background: rgba(96, 230, 154, 1);
 	}
 
+	.legend-dot.is-current {
+		background: rgba(120, 198, 255, 1);
+	}
+
 	.legend-dot.is-relay {
 		background: rgba(247, 196, 99, 1);
 	}
@@ -1567,7 +1799,7 @@
 		opacity: 0.78;
 	}
 
-	.network-script-list {
+	.network-endpoint-list {
 		margin-top: 10px;
 		max-height: 340px;
 		overflow: auto;
@@ -1576,19 +1808,26 @@
 		gap: 8px;
 	}
 
-	.network-script-item {
+	.network-node-facts {
+		margin-top: 10px;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.network-endpoint-item {
 		padding: 9px;
 		border-radius: 10px;
 		border: 1px solid rgba(255, 255, 255, 0.08);
 		background: rgba(255, 255, 255, 0.02);
 	}
 
-	.network-script-name {
+	.network-endpoint-name {
 		font-weight: 600;
 		font-size: 0.83rem;
 	}
 
-	.network-script-meta {
+	.network-endpoint-meta {
 		font-size: 0.74rem;
 		opacity: 0.75;
 	}

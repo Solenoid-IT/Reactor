@@ -32,7 +32,7 @@ async function invokeNative(pluginName, methodName, options = {}) {
 			return raw;
 		}
 
-		if (Object.prototype.hasOwnProperty.call(raw, 'ok') || Object.prototype.hasOwnProperty.call(raw, 'scripts') || Object.prototype.hasOwnProperty.call(raw, 'path')) {
+		if (Object.prototype.hasOwnProperty.call(raw, 'ok') || Object.prototype.hasOwnProperty.call(raw, 'endpoints') || Object.prototype.hasOwnProperty.call(raw, 'path')) {
 			return raw;
 		}
 
@@ -54,23 +54,23 @@ async function invokeNative(pluginName, methodName, options = {}) {
 	}
 }
 
-export async function getScriptsInfo() {
+export async function getEndpointsInfo() {
 	const bridge = getBridge();
-	if (bridge && bridge.getScriptsInfo) {
-		return bridge.getScriptsInfo();
+	if (bridge && bridge.getEndpointsInfo) {
+		return bridge.getEndpointsInfo();
 	}
 
 	const mobile = getMobilePlugin();
-	if (mobile && mobile.getScriptsInfo) {
-		return mobile.getScriptsInfo();
+	if (mobile && mobile.getEndpointsInfo) {
+		return mobile.getEndpointsInfo();
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'getScriptsInfo');
+	const nativeResult = await invokeNative('ReactorMobile', 'getEndpointsInfo');
 	if (nativeResult) {
 		return nativeResult;
 	}
 
-	return { path: '', scripts: [] };
+	return { path: '', endpoints: [] };
 }
 
 export async function getUiSettings() {
@@ -126,33 +126,33 @@ export async function copyTextToClipboard(text) {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
-export async function openScriptsFolder() {
+export async function openEndpointsFolder() {
 	const bridge = getBridge();
-	if (bridge && bridge.openScriptsFolder) {
-		return bridge.openScriptsFolder();
+	if (bridge && bridge.openEndpointsFolder) {
+		return bridge.openEndpointsFolder();
 	}
 }
 
-export async function openScriptFile(filePath) {
+export async function openEndpointFile(filePath) {
 	const bridge = getBridge();
-	if (!bridge || !bridge.openScriptFile) {
+	if (!bridge || !bridge.openEndpointFile) {
 		return { ok: false, error: 'bridge unavailable' };
 	}
-	return bridge.openScriptFile(filePath);
+	return bridge.openEndpointFile(filePath);
 }
 
-export async function readScriptContent(filePath) {
+export async function readEndpointContent(filePath) {
 	const bridge = getBridge();
-	if (bridge && bridge.readScriptContent) {
-		return bridge.readScriptContent(filePath);
+	if (bridge && bridge.readEndpointContent) {
+		return bridge.readEndpointContent(filePath);
 	}
 
 	const mobile = getMobilePlugin();
-	if (mobile && mobile.readScriptContent) {
-		return mobile.readScriptContent({ filePath });
+	if (mobile && mobile.readEndpointContent) {
+		return mobile.readEndpointContent({ filePath });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'readScriptContent', { filePath });
+	const nativeResult = await invokeNative('ReactorMobile', 'readEndpointContent', { filePath });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -160,18 +160,18 @@ export async function readScriptContent(filePath) {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
-export async function saveScriptContent(filePath, content) {
+export async function saveEndpointContent(filePath, content) {
 	const bridge = getBridge();
-	if (bridge && bridge.saveScriptContent) {
-		return bridge.saveScriptContent(filePath, content);
+	if (bridge && bridge.saveEndpointContent) {
+		return bridge.saveEndpointContent(filePath, content);
 	}
 
 	const mobile = getMobilePlugin();
-	if (mobile && mobile.saveScriptContent) {
-		return mobile.saveScriptContent({ filePath, content });
+	if (mobile && mobile.saveEndpointContent) {
+		return mobile.saveEndpointContent({ filePath, content });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'saveScriptContent', { filePath, content });
+	const nativeResult = await invokeNative('ReactorMobile', 'saveEndpointContent', { filePath, content });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -179,18 +179,18 @@ export async function saveScriptContent(filePath, content) {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
-export async function resolveEventLogPath(filePath) {
+export async function resolveEndpointLogPath(filePath) {
 	const bridge = getBridge();
-	if (bridge && bridge.resolveEventLogPath) {
-		return bridge.resolveEventLogPath(filePath);
+	if (bridge && bridge.resolveEndpointLogPath) {
+		return bridge.resolveEndpointLogPath(filePath);
 	}
 
 	const mobile = getMobilePlugin();
-	if (mobile && mobile.resolveEventLogPath) {
-		return mobile.resolveEventLogPath({ filePath });
+	if (mobile && mobile.resolveEndpointLogPath) {
+		return mobile.resolveEndpointLogPath({ filePath });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'resolveEventLogPath', { filePath });
+	const nativeResult = await invokeNative('ReactorMobile', 'resolveEndpointLogPath', { filePath });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -206,18 +206,18 @@ export async function pickDefaultProgram() {
 	return bridge.pickDefaultProgram();
 }
 
-export async function runScriptNow(filePath) {
+export async function runEndpointNow(filePath) {
 	const bridge = getBridge();
-	if (bridge && bridge.runScriptNow) {
-		return bridge.runScriptNow(filePath);
+	if (bridge && bridge.runEndpointNow) {
+		return bridge.runEndpointNow(filePath);
 	}
 
 	const mobile = getMobilePlugin();
-	if (mobile && mobile.runScriptNow) {
-		return mobile.runScriptNow({ filePath });
+	if (mobile && mobile.runEndpointNow) {
+		return mobile.runEndpointNow({ filePath });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'runScriptNow', { filePath });
+	const nativeResult = await invokeNative('ReactorMobile', 'runEndpointNow', { filePath });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -225,18 +225,18 @@ export async function runScriptNow(filePath) {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
-export async function createScriptFile(templateKey, scriptName = '') {
+export async function createEndpointFile(templateKey, endpointName = '') {
 	const bridge = getBridge();
-	if (bridge && bridge.createScriptFile) {
-		return bridge.createScriptFile(templateKey, scriptName);
+	if (bridge && bridge.createEndpointFile) {
+		return bridge.createEndpointFile(templateKey, endpointName);
 	}
 
 	const mobile = getMobilePlugin();
-	if (mobile && mobile.createScriptFile) {
-		return mobile.createScriptFile({ templateKey, scriptName });
+	if (mobile && mobile.createEndpointFile) {
+		return mobile.createEndpointFile({ templateKey, endpointName });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'createScriptFile', { templateKey, scriptName });
+	const nativeResult = await invokeNative('ReactorMobile', 'createEndpointFile', { templateKey, endpointName });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -244,18 +244,18 @@ export async function createScriptFile(templateKey, scriptName = '') {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
-export async function renameScriptFile(filePath, nextName) {
+export async function renameEndpointFile(filePath, nextName) {
 	const bridge = getBridge();
-	if (bridge && bridge.renameScriptFile) {
-		return bridge.renameScriptFile(filePath, nextName);
+	if (bridge && bridge.renameEndpointFile) {
+		return bridge.renameEndpointFile(filePath, nextName);
 	}
 
 	const mobile = getMobilePlugin();
-	if (mobile && mobile.renameScriptFile) {
-		return mobile.renameScriptFile({ filePath, nextName });
+	if (mobile && mobile.renameEndpointFile) {
+		return mobile.renameEndpointFile({ filePath, nextName });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'renameScriptFile', { filePath, nextName });
+	const nativeResult = await invokeNative('ReactorMobile', 'renameEndpointFile', { filePath, nextName });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -263,32 +263,32 @@ export async function renameScriptFile(filePath, nextName) {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
-export async function confirmDeleteScript(scriptName) {
+export async function confirmDeleteEndpoint(endpointName) {
 	const bridge = getBridge();
-	if (bridge && bridge.confirmDeleteScript) {
-		return bridge.confirmDeleteScript(scriptName);
+	if (bridge && bridge.confirmDeleteEndpoint) {
+		return bridge.confirmDeleteEndpoint(endpointName);
 	}
 
 	if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
-		const confirmed = window.confirm(`Are you sure to delete script '${scriptName.replace( /\.[\w]+$/, '' ) || 'this script'}'?`);
+		const confirmed = window.confirm(`Are you sure to delete endpoint '${endpointName.replace( /\.[\w]+$/, '' ) || 'this endpoint'}'?`);
 		return { ok: true, confirmed };
 	}
 
 	return { ok: true, confirmed: false };
 }
 
-export async function deleteScriptFile(filePath) {
+export async function deleteEndpointFile(filePath) {
 	const bridge = getBridge();
-	if (bridge && bridge.deleteScriptFile) {
-		return bridge.deleteScriptFile(filePath);
+	if (bridge && bridge.deleteEndpointFile) {
+		return bridge.deleteEndpointFile(filePath);
 	}
 
 	const mobile = getMobilePlugin();
-	if (mobile && mobile.deleteScriptFile) {
-		return mobile.deleteScriptFile({ filePath });
+	if (mobile && mobile.deleteEndpointFile) {
+		return mobile.deleteEndpointFile({ filePath });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'deleteScriptFile', { filePath });
+	const nativeResult = await invokeNative('ReactorMobile', 'deleteEndpointFile', { filePath });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -296,18 +296,18 @@ export async function deleteScriptFile(filePath) {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
-export async function toggleScriptDirective(filePath, directive) {
+export async function toggleEndpointDirective(filePath, directive) {
 	const bridge = getBridge();
-	if (bridge && bridge.toggleScriptDirective) {
-		return bridge.toggleScriptDirective(filePath, directive);
+	if (bridge && bridge.toggleEndpointDirective) {
+		return bridge.toggleEndpointDirective(filePath, directive);
 	}
 
 	const mobile = getMobilePlugin();
-	if (mobile && mobile.toggleScriptDirective) {
-		return mobile.toggleScriptDirective({ filePath, directive });
+	if (mobile && mobile.toggleEndpointDirective) {
+		return mobile.toggleEndpointDirective({ filePath, directive });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'toggleScriptDirective', { filePath, directive });
+	const nativeResult = await invokeNative('ReactorMobile', 'toggleEndpointDirective', { filePath, directive });
 	if (nativeResult) {
 		return nativeResult;
 	}
@@ -616,18 +616,18 @@ export async function sendP2PData(target, text = '') {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
-export async function requestRemoteScriptsP2P(target, timeoutMs = 8000) {
+export async function requestRemoteEndpointsP2P(target, timeoutMs = 8000) {
 	const bridge = getBridge();
-	if (bridge && bridge.requestRemoteScriptsP2P) {
-		return bridge.requestRemoteScriptsP2P(target, timeoutMs);
+	if (bridge && bridge.requestRemoteEndpointsP2P) {
+		return bridge.requestRemoteEndpointsP2P(target, timeoutMs);
 	}
 
 	const mobile = getMobilePlugin();
-	if (mobile && mobile.requestRemoteScriptsP2P) {
-		return mobile.requestRemoteScriptsP2P({ target, timeoutMs });
+	if (mobile && mobile.requestRemoteEndpointsP2P) {
+		return mobile.requestRemoteEndpointsP2P({ target, timeoutMs });
 	}
 
-	const nativeResult = await invokeNative('ReactorMobile', 'requestRemoteScriptsP2P', { target, timeoutMs });
+	const nativeResult = await invokeNative('ReactorMobile', 'requestRemoteEndpointsP2P', { target, timeoutMs });
 	if (nativeResult) {
 		return nativeResult;
 	}

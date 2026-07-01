@@ -47,7 +47,7 @@ Recommended paths:
 The runtime data directory will contain:
 - `working-mode.json` for Exchange configuration
 - `name` for the Reactor node name
-- `projects/` for scripts
+- `endpoints/` for endpoints
 - `activity.log` for daemon activity
 - `tls/` for TLS certificates
 - `reactor-daemon.sock` for local daemon control
@@ -255,7 +255,7 @@ With `REACTOR_DATA_DIR=/var/lib/reactor`, the important files are:
 
 - `/var/lib/reactor/working-mode.json`
 - `/var/lib/reactor/name`
-- `/var/lib/reactor/projects/`
+- `/var/lib/reactor/endpoints/`
 - `/var/lib/reactor/activity.log`
 - `/var/lib/reactor/tls/cert.pem`
 - `/var/lib/reactor/tls/key.pem`

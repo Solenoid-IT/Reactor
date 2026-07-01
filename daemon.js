@@ -42,7 +42,7 @@ function getDaemonSocketPath(dataDir) {
 	return process.env.REACTOR_DAEMON_SOCKET || path.join(dataDir, 'reactor-daemon.sock');
 }
 
-function buildScriptAliases(script) {
+function buildEndpointAliases(endpoint) {
 	const aliases = new Set();
 	const add = (value) => {
 		if (!value) {
@@ -51,50 +51,50 @@ function buildScriptAliases(script) {
 		aliases.add(String(value).trim().toLowerCase());
 	};
 
-	add(script.name);
-	add(script.name.replace(/\.(ts|js)$/i, ''));
+	add(endpoint.name);
+	add(endpoint.name.replace(/\.(ts|js)$/i, ''));
 
-	const baseName = path.basename(script.path);
+	const baseName = path.basename(endpoint.path);
 	add(baseName);
 	add(baseName.replace(/\.(ts|js)$/i, ''));
 
 	if (baseName.toLowerCase() === 'boot.ts') {
-		add(path.basename(path.dirname(script.path)));
+		add(path.basename(path.dirname(endpoint.path)));
 	}
 
 	return aliases;
 }
 
-function findScriptByName(runtime, requestedName) {
+function findEndpointByName(runtime, requestedName) {
 	const target = String(requestedName || '').trim().toLowerCase();
 	if (!target) {
 		return null;
 	}
 
-	for (const script of runtime.scripts) {
-		const aliases = buildScriptAliases(script);
+	for (const endpoint of runtime.endpoints) {
+		const aliases = buildEndpointAliases(endpoint);
 		if (aliases.has(target)) {
-			return script;
+			return endpoint;
 		}
 	}
 
 	return null;
 }
 
-async function deleteScriptFromRuntime(runtime, script) {
-	const allowedPath = path.resolve(runtime.scriptsDir);
-	const normalizedFilePath = path.resolve(script.path);
+async function deleteEndpointFromRuntime(runtime, endpoint) {
+	const allowedPath = path.resolve(runtime.endpointsDir);
+	const normalizedFilePath = path.resolve(endpoint.path);
 	if (!normalizedFilePath.startsWith(allowedPath + path.sep)) {
 		throw new Error('path not allowed');
 	}
 
-	const scriptDir = path.dirname(normalizedFilePath);
-	const isBootProjectScript = path.basename(normalizedFilePath).toLowerCase() === 'boot.ts' && scriptDir !== allowedPath;
+	const endpointDir = path.dirname(normalizedFilePath);
+	const isBootProjectEndpoint = path.basename(normalizedFilePath).toLowerCase() === 'boot.ts' && endpointDir !== allowedPath;
 
 	let isProjectFolder = false;
-	if (isBootProjectScript && path.resolve(scriptDir).startsWith(allowedPath + path.sep)) {
+	if (isBootProjectEndpoint && path.resolve(endpointDir).startsWith(allowedPath + path.sep)) {
 		try {
-			await fs.access(path.join(scriptDir, 'package.json'));
+			await fs.access(path.join(endpointDir, 'package.json'));
 			isProjectFolder = true;
 		} catch {
 			isProjectFolder = false;
@@ -102,10 +102,10 @@ async function deleteScriptFromRuntime(runtime, script) {
 	}
 
 	if (isProjectFolder) {
-		const packageJsonPath = path.join(scriptDir, 'package.json');
+		const packageJsonPath = path.join(endpointDir, 'package.json');
 		try {
 			await fs.access(packageJsonPath);
-			await fs.rm(scriptDir, { recursive: true, force: true });
+			await fs.rm(endpointDir, { recursive: true, force: true });
 		} catch {
 			await fs.unlink(normalizedFilePath);
 		}
@@ -113,7 +113,7 @@ async function deleteScriptFromRuntime(runtime, script) {
 		await fs.unlink(normalizedFilePath);
 	}
 
-	await runtime.reloadScripts('daemonctl-delete-script');
+	await runtime.reloadEndpoints('daemonctl-delete-endpoint');
 }
 
 async function createControlServer(runtime, socketPath, onStopRequested, saveExchangeConfig) {
@@ -144,11 +144,11 @@ async function createControlServer(runtime, socketPath, onStopRequested, saveExc
 					if (command === 'list') {
 					response = {
 						ok: true,
-						scripts: runtime.scripts.map((script) => ({
-							name: script.name,
-							path: script.path,
-							scriptId: script.scriptId || null,
-							state: script.state,
+						endpoints: runtime.endpoints.map((endpoint) => ({
+							name: endpoint.name,
+							path: endpoint.path,
+							uuid: endpoint.uuid || null,
+							state: endpoint.state,
 						})),
 					};
 					} else if (command === 'status') {
@@ -156,47 +156,47 @@ async function createControlServer(runtime, socketPath, onStopRequested, saveExc
 							ok: true,
 							pid: process.pid,
 							uptimeSec: Math.floor(process.uptime()),
-							scriptsCount: runtime.scripts.length,
+							endpointsCount: runtime.endpoints.length,
 						};
 				} else if (command === 'run') {
-					await runtime.reloadScripts('daemonctl-run');
-					const script = findScriptByName(runtime, payload.name);
-					if (!script) {
+					await runtime.reloadEndpoints('daemonctl-run-endpoint');
+					const endpoint = findEndpointByName(runtime, payload.name);
+					if (!endpoint) {
 						response = {
 							ok: false,
-							error: `script not found: ${payload.name || ''}`,
+							error: `endpoint not found: ${payload.name || ''}`,
 						};
 					} else {
-						await runtime.runScript(script, {
+						await runtime.runEndpoint(endpoint, {
 							trigger: 'MANUAL_CLI',
 							event: 'ON_DEMAND',
 							force: true,
 						});
 						response = {
 							ok: true,
-							script: script.name,
-							path: script.path,
+							endpoint: endpoint.name,
+							path: endpoint.path,
 						};
 					}
-				} else if (command === 'script-id') {
-					await runtime.reloadScripts('daemonctl-script-id');
-					const script = findScriptByName(runtime, payload.name);
-					if (!script) {
+				} else if (command === 'endpoint-id') {
+					await runtime.reloadEndpoints('daemonctl-endpoint-id');
+					const endpoint = findEndpointByName(runtime, payload.name);
+					if (!endpoint) {
 						response = {
 							ok: false,
-							error: `script not found: ${payload.name || ''}`,
+							error: `endpoint not found: ${payload.name || ''}`,
 						};
-					} else if (!script.scriptId) {
+					} else if (!endpoint.uuid) {
 						response = {
 							ok: false,
-							error: `script has no project UUID: ${script.name}`,
+							error: `endpoint has no project UUID: ${endpoint.name}`,
 						};
 					} else {
 						response = {
 							ok: true,
-							script: script.name,
-							path: script.path,
-							scriptId: script.scriptId,
+							endpoint: endpoint.name,
+							path: endpoint.path,
+							uuid: endpoint.uuid,
 						};
 					}
 				} else if (command === 'set-name') {
@@ -267,19 +267,19 @@ async function createControlServer(runtime, socketPath, onStopRequested, saveExc
 				} else if (command === 'get-exchange') {
 					response = { ok: true, exchange: runtime.getExchangeConfig() };
 				} else if (command === 'delete') {
-					await runtime.reloadScripts('daemonctl-delete-script-preload');
-					const script = findScriptByName(runtime, payload.name);
-					if (!script) {
+					await runtime.reloadEndpoints('daemonctl-delete-endpoint-preload');
+					const endpoint = findEndpointByName(runtime, payload.name);
+					if (!endpoint) {
 						response = {
 							ok: false,
-							error: `script not found: ${payload.name || ''}`,
+							error: `endpoint not found: ${payload.name || ''}`,
 						};
 					} else {
-						await deleteScriptFromRuntime(runtime, script);
+						await deleteEndpointFromRuntime(runtime, endpoint);
 						response = {
 							ok: true,
-							script: script.name,
-							path: script.path,
+							endpoint: endpoint.name,
+							path: endpoint.path,
 						};
 					}
 				} else if (command === 'stop') {
@@ -319,13 +319,13 @@ async function createControlServer(runtime, socketPath, onStopRequested, saveExc
 
 async function main() {
 	const dataDir = process.env.REACTOR_DATA_DIR || getDefaultDataDir();
-	const scriptsDir = process.env.REACTOR_SCRIPTS_DIR || path.join(dataDir, 'projects');
+	const endpointsDir = process.env.REACTOR_ENDPOINTS_DIR || path.join(dataDir, 'endpoints');
 	const eventLogPath = process.env.REACTOR_EVENT_LOG_PATH || path.join(dataDir, 'activity.log');
 	const daemonSocketPath = getDaemonSocketPath(dataDir);
 	const workingModeConfigPath = path.join(dataDir, 'working-mode.json');
 
 	await fs.mkdir(dataDir, { recursive: true });
-	await fs.mkdir(scriptsDir, { recursive: true });
+	await fs.mkdir(endpointsDir, { recursive: true });
 	await fs.mkdir(path.dirname(eventLogPath), { recursive: true });
 
 	// Carica la configurazione exchange (env vars hanno priorità > file > default)
@@ -400,7 +400,7 @@ async function main() {
 
 	const exchangeCfg = await loadExchangeConfig();
 
-	const runtime = new ReactorRuntime(scriptsDir, eventLogPath, {
+	const runtime = new ReactorRuntime(endpointsDir, eventLogPath, {
 		reactorRootDir: dataDir,
 		exchangeMode: exchangeCfg.mode,
 		exchangeHost: exchangeCfg.host,
@@ -465,7 +465,7 @@ async function main() {
 
 	await runtime.init();
 	controlServer = await createControlServer(runtime, daemonSocketPath, shutdown, saveExchangeConfig);
-	runtime.log(`Daemon mode active (scriptsDir=${scriptsDir}, eventLogPath=${eventLogPath}, socket=${daemonSocketPath})`);
+	runtime.log(`Daemon mode active (endpointsDir=${endpointsDir}, eventLogPath=${eventLogPath}, socket=${daemonSocketPath})`);
 }
 
 main().catch((error) => {

@@ -23,5 +23,10 @@ Result:
 
 ## Runtime Behavior In Reactor
 
-- with both `STUN` and `TURN` configured, `Node.sendMessage()` and `Node.stream()` prefer WebRTC DataChannel P2P;
+- with both `STUN` and `TURN` configured, `Node.sendMessage(target, content, enqueueOnFail)` and `Node.stream()` prefer WebRTC DataChannel P2P;
 - if `TURN` is not configured (or P2P is unavailable), Reactor uses `Exchange` as relay.
+
+For `Node.sendMessage(...)`, queue fallback is opt-in:
+
+- `enqueueOnFail=false` (default): delivery failure is returned immediately
+- `enqueueOnFail=true`: payload is queued and retried later

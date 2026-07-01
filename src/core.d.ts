@@ -134,6 +134,7 @@ declare module 'core' {
 
 	export interface NodeSendMessageOptions {
 		headers?: HeadersMap;
+		enqueueOnFail?: boolean;
 	}
 
 	export interface NodeStreamOptions {
@@ -223,6 +224,11 @@ declare module 'core' {
 		sendMessage: (
 			target: string,
 			content: string | Uint8Array | Buffer | Record<string, unknown>,
+			enqueueOnFail?: boolean,
+		) => Promise<NodeSendMessageResponse>;
+		sendMessage: (
+			target: string,
+			content: string | Uint8Array | Buffer | Record<string, unknown>,
 			options?: NodeSendMessageOptions,
 		) => Promise<NodeSendMessageResponse>;
 		stream: (
@@ -277,7 +283,7 @@ declare module 'core' {
 		messageSenderName?: string | null;
 		messageTarget?: string | null;
 		messageTargetNode?: string | null;
-		messageTargetScriptId?: string | null;
+		messageTargetEndpointId?: string | null;
 		messageContent?: string;
 		messageContentType?: string;
 		messageBodyBase64?: string;

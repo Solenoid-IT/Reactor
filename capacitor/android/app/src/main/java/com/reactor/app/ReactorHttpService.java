@@ -191,12 +191,12 @@ public class ReactorHttpService extends Service {
             );
         private static final int DEFAULT_STREAM_CHUNK_SIZE = 64 * 1024;
 
-    private static class MessageScript {
-        File scriptFile;
-        String scriptName;
-        String scriptPath;
-        String scriptId;
-        String scriptState;
+    private static class MessageEndpoint {
+        File endpointFile;
+        String endpointName;
+        String endpointPath;
+        String endpointId;
+        String endpointState;
         String source;
         boolean enabled;
         boolean hasMessageEvent;
@@ -223,7 +223,7 @@ public class ReactorHttpService extends Service {
         String originalTarget;
         String baseTarget;
         String nodeName;
-        String scriptId;
+        String endpointId;
         boolean directAddress;
     }
 
@@ -574,11 +574,11 @@ public class ReactorHttpService extends Service {
         return new ArrayList<>();
     }
 
-    public static JSONArray getDiscoveryScriptsPayloadForP2P() {
+    public static JSONArray getDiscoveryEndpointsPayloadForP2P() {
         if (instance == null) {
             return new JSONArray();
         }
-        return instance.buildDiscoveryScriptsPayload();
+        return instance.buildDiscoveryEndpointsPayload();
     }
 
     public static String getCurrentReactorNameForP2P() {
@@ -945,7 +945,7 @@ public class ReactorHttpService extends Service {
     }
 
     private void emitNetChange(JSONObject previousSnapshot, JSONObject currentSnapshot, String reason) {
-        List<MessageScript> listeners = collectMessageListeners();
+        List<MessageEndpoint> listeners = collectMessageEndpoints();
         if (listeners.isEmpty()) {
             return;
         }
@@ -966,16 +966,16 @@ public class ReactorHttpService extends Service {
 
         String bodyText = payload.toString();
         Set<String> senderCandidates = new HashSet<>();
-        for (MessageScript script : listeners) {
-            if (!matchesEventSender(script, senderCandidates, "NET_CHANGE")) {
+        for (MessageEndpoint endpoint : listeners) {
+            if (!matchesEventSender(endpoint, senderCandidates, "NET_CHANGE")) {
                 continue;
             }
 
             try {
-                writeExecutionStart(script, "NET_CHANGE", "NET_CHANGE");
-                executeScriptActions(script, bodyText, headers);
+                writeExecutionStart(endpoint, "NET_CHANGE", "NET_CHANGE");
+                executeEndpointActions(endpoint, bodyText, headers);
             } catch (Exception executionError) {
-                writeExecutionError(script, "NET_CHANGE", "NET_CHANGE", executionError.getMessage());
+                writeExecutionError(endpoint, "NET_CHANGE", "NET_CHANGE", executionError.getMessage());
             }
         }
     }
@@ -1357,7 +1357,7 @@ public class ReactorHttpService extends Service {
             String path = target.split("\\?")[0];
 
             if ("GET".equals(method) && "/".equals(path)) {
-                List<MessageScript> listeners = collectMessageListeners();
+                List<MessageEndpoint> listeners = collectMessageEndpoints();
                 JSONObject payload = new JSONObject();
                 payload.put("ok", true);
                 payload.put("service", "reactor");
@@ -1365,7 +1365,7 @@ public class ReactorHttpService extends Service {
                 payload.put("timestamp", Instant.now().toString());
                 payload.put("uptimeSec", Math.max(0L, (System.currentTimeMillis() - startedAtMs) / 1000L));
                 payload.put("httpPort", currentPort);
-                payload.put("scriptsCount", listeners.size());
+                payload.put("endpointsCount", listeners.size());
                 writeJsonResponse(client, 200, payload.toString());
                 return;
             }
@@ -1382,7 +1382,7 @@ public class ReactorHttpService extends Service {
 
                 String senderName = headers.getOrDefault("reactor-name", "");
                 String senderId = headers.getOrDefault("reactor-sender", "");
-                String targetScriptId = headers.getOrDefault("reactor-target-script-id", "").trim().toLowerCase(Locale.ROOT);
+                String targetEndpointId = headers.getOrDefault("reactor-target-endpoint-id", "").trim().toLowerCase(Locale.ROOT);
                 String remoteHost = client.getInetAddress() != null ? String.valueOf(client.getInetAddress().getHostAddress()) : "";
 
                 JSONObject entry = new JSONObject();
@@ -1397,7 +1397,7 @@ public class ReactorHttpService extends Service {
                 entry.put("rawBody", bodyText);
                 appendGlobalLog(entry.toString());
 
-                List<MessageScript> listeners = collectMessageListeners();
+                List<MessageEndpoint> listeners = collectMessageEndpoints();
                 Set<String> senderCandidates = resolveSenderCandidates(senderName, senderId, remoteHost);
                 JSONObject streamPayload = tryParseJsonObject(bodyText);
                 boolean streamEnvelope = isStreamEnvelope(streamPayload);
@@ -1408,46 +1408,46 @@ public class ReactorHttpService extends Service {
                 Map<String, String> effectiveHeaders = streamEnvelope
                         ? withStreamHeaders(headers, streamPayload, primaryEvent)
                         : new HashMap<>(headers);
-                JSONArray deliveredScripts = new JSONArray();
-                JSONArray streamEndScripts = new JSONArray();
+                JSONArray deliveredEndpoints = new JSONArray();
+                JSONArray streamEndEndpoints = new JSONArray();
                 int deliveredCount = 0;
                 int streamEndCount = 0;
 
-                for (MessageScript script : listeners) {
-                    if (!matchesEventSender(script, senderCandidates, primaryEvent)) {
+                for (MessageEndpoint endpoint : listeners) {
+                    if (!matchesEventSender(endpoint, senderCandidates, primaryEvent)) {
                         continue;
                     }
-                    if (!matchesTargetScript(script, targetScriptId)) {
+                    if (!matchesTargetEndpoint(endpoint, targetEndpointId)) {
                         continue;
                     }
 
                     try {
-                        writeExecutionStart(script, primaryEvent, primaryEvent);
-                        executeScriptActions(script, bodyText, effectiveHeaders);
-                        deliveredScripts.put(script.scriptName);
+                        writeExecutionStart(endpoint, primaryEvent, primaryEvent);
+                        executeEndpointActions(endpoint, bodyText, effectiveHeaders);
+                        deliveredEndpoints.put(endpoint.endpointName);
                         deliveredCount += 1;
                     } catch (Exception executionError) {
-                        writeExecutionError(script, primaryEvent, primaryEvent, executionError.getMessage());
+                        writeExecutionError(endpoint, primaryEvent, primaryEvent, executionError.getMessage());
                     }
                 }
 
                 if (streamEnvelope && "end".equals(streamPhase)) {
                     Map<String, String> streamEndHeaders = withStreamHeaders(headers, streamPayload, "STREAMEND");
-                    for (MessageScript script : listeners) {
-                        if (!matchesEventSender(script, senderCandidates, "STREAMEND")) {
+                    for (MessageEndpoint endpoint : listeners) {
+                        if (!matchesEventSender(endpoint, senderCandidates, "STREAMEND")) {
                             continue;
                         }
-                        if (!matchesTargetScript(script, targetScriptId)) {
+                        if (!matchesTargetEndpoint(endpoint, targetEndpointId)) {
                             continue;
                         }
 
                         try {
-                            writeExecutionStart(script, "STREAMEND", "STREAMEND");
-                            executeScriptActions(script, bodyText, streamEndHeaders);
-                            streamEndScripts.put(script.scriptName);
+                            writeExecutionStart(endpoint, "STREAMEND", "STREAMEND");
+                            executeEndpointActions(endpoint, bodyText, streamEndHeaders);
+                            streamEndEndpoints.put(endpoint.endpointName);
                             streamEndCount += 1;
                         } catch (Exception executionError) {
-                            writeExecutionError(script, "STREAMEND", "STREAMEND", executionError.getMessage());
+                            writeExecutionError(endpoint, "STREAMEND", "STREAMEND", executionError.getMessage());
                         }
                     }
                 }
@@ -1456,9 +1456,9 @@ public class ReactorHttpService extends Service {
                 payload.put("ok", true);
                 payload.put("trigger", primaryEvent);
                 payload.put("delivered", deliveredCount > 0);
-                payload.put("scripts", deliveredScripts);
+                payload.put("endpoints", deliveredEndpoints);
                 payload.put("deliveredCount", deliveredCount);
-                payload.put("streamEndScripts", streamEndScripts);
+                payload.put("streamEndEndpoints", streamEndEndpoints);
                 payload.put("streamEndDeliveredCount", streamEndCount);
                 payload.put("senderCandidates", new JSONArray(senderCandidates));
 
@@ -1486,9 +1486,9 @@ public class ReactorHttpService extends Service {
         }
     }
 
-    private List<MessageScript> collectMessageListeners() {
-        List<MessageScript> listeners = new ArrayList<>();
-        File projectsDir = new File(getFilesDir(), "projects");
+    private List<MessageEndpoint> collectMessageEndpoints() {
+        List<MessageEndpoint> listeners = new ArrayList<>();
+        File projectsDir = new File(getFilesDir(), "endpoints");
         if (!projectsDir.exists() || !projectsDir.isDirectory()) {
             return listeners;
         }
@@ -1503,23 +1503,23 @@ public class ReactorHttpService extends Service {
                 continue;
             }
 
-            File scriptFile = resolveScriptFileFromProject(child);
-            if (scriptFile == null || !scriptFile.exists()) {
+            File endpointFile = resolveEndpointFileFromProject(child);
+            if (endpointFile == null || !endpointFile.exists()) {
                 continue;
             }
 
-            MessageScript script = parseMessageScript(scriptFile, child.getName());
-            if (script == null || !script.enabled) {
+            MessageEndpoint endpoint = parseMessageEndpoint(endpointFile, child.getName());
+            if (endpoint == null || !endpoint.enabled) {
                 continue;
             }
 
-            listeners.add(script);
+            listeners.add(endpoint);
         }
 
         return listeners;
     }
 
-    private File resolveScriptFileFromProject(File projectDir) {
+    private File resolveEndpointFileFromProject(File projectDir) {
         File bootTs = new File(projectDir, "boot.ts");
         if (bootTs.exists()) {
             return bootTs;
@@ -1533,7 +1533,7 @@ public class ReactorHttpService extends Service {
         return null;
     }
 
-    private String readProjectScriptId(File projectDir) {
+    private String readProjectEndpointId(File projectDir) {
         try {
             File uuidFile = new File(projectDir, "uuid");
             if (!uuidFile.exists()) {
@@ -1552,7 +1552,7 @@ public class ReactorHttpService extends Service {
                 .matches("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$");
     }
 
-    private JSONArray parseScriptTriggersFromSource(String source) {
+    private JSONArray parseEndpointTriggersFromSource(String source) {
         JSONArray triggers = new JSONArray();
         Set<String> unique = new HashSet<>();
         if (source == null || source.isEmpty()) {
@@ -1567,6 +1567,55 @@ public class ReactorHttpService extends Service {
             }
 
             String value = line.replace("// @on", "").trim();
+            String upperValue = value.toUpperCase(Locale.ROOT);
+            if (upperValue.startsWith("SCHEDULE")) {
+                if (!unique.contains("SCHEDULE")) {
+                    unique.add("SCHEDULE");
+                    triggers.put("SCHEDULE");
+                }
+                continue;
+            }
+
+            if (upperValue.startsWith("WATCH")) {
+                if (!unique.contains("WATCH")) {
+                    unique.add("WATCH");
+                    triggers.put("WATCH");
+                }
+                continue;
+            }
+
+            if (matchesSingleOnType(value, "STREAMEND")) {
+                if (!unique.contains("STREAMEND")) {
+                    unique.add("STREAMEND");
+                    triggers.put("STREAMEND");
+                }
+                continue;
+            }
+
+            if (matchesSingleOnType(value, "STREAM")) {
+                if (!unique.contains("STREAM")) {
+                    unique.add("STREAM");
+                    triggers.put("STREAM");
+                }
+                continue;
+            }
+
+            if (matchesSingleOnType(value, "MESSAGE")) {
+                if (!unique.contains("MESSAGE")) {
+                    unique.add("MESSAGE");
+                    triggers.put("MESSAGE");
+                }
+                continue;
+            }
+
+            if ("NET_CHANGE".equalsIgnoreCase(value)) {
+                if (!unique.contains("NET_CHANGE")) {
+                    unique.add("NET_CHANGE");
+                    triggers.put("NET_CHANGE");
+                }
+                continue;
+            }
+
             List<String> tokens = splitDirectiveTokens(value);
             for (String token : tokens) {
                 String normalized = String.valueOf(token).trim();
@@ -1575,7 +1624,13 @@ public class ReactorHttpService extends Service {
                 }
 
                 int open = normalized.indexOf('(');
-                String trigger = (open >= 0 ? normalized.substring(0, open) : normalized)
+                int openBracket = normalized.indexOf('[');
+                int cut = open;
+                if (cut < 0 || (openBracket >= 0 && openBracket < cut)) {
+                    cut = openBracket;
+                }
+
+                String trigger = (cut >= 0 ? normalized.substring(0, cut) : normalized)
                         .trim()
                         .toUpperCase(Locale.ROOT);
                 if (trigger.isEmpty() || unique.contains(trigger)) {
@@ -1590,16 +1645,16 @@ public class ReactorHttpService extends Service {
         return triggers;
     }
 
-    private JSONArray buildDiscoveryScriptsPayload() {
-        JSONArray scripts = new JSONArray();
-        File projectsDir = new File(getFilesDir(), "projects");
+    private JSONArray buildDiscoveryEndpointsPayload() {
+        JSONArray endpoints = new JSONArray();
+        File projectsDir = new File(getFilesDir(), "endpoints");
         if (!projectsDir.exists() || !projectsDir.isDirectory()) {
-            return scripts;
+            return endpoints;
         }
 
         File[] children = projectsDir.listFiles();
         if (children == null) {
-            return scripts;
+            return endpoints;
         }
 
         for (File child : children) {
@@ -1607,15 +1662,15 @@ public class ReactorHttpService extends Service {
                 continue;
             }
 
-            File scriptFile = resolveScriptFileFromProject(child);
-            if (scriptFile == null || !scriptFile.exists()) {
+            File endpointFile = resolveEndpointFileFromProject(child);
+            if (endpointFile == null || !endpointFile.exists()) {
                 continue;
             }
 
             try {
-                String source = readTextFile(scriptFile);
-                String scriptId = readProjectScriptId(child);
-                if (scriptId == null || scriptId.trim().isEmpty()) {
+                String source = readTextFile(endpointFile);
+                String endpointId = readProjectEndpointId(child);
+                if (endpointId == null || endpointId.trim().isEmpty()) {
                     continue;
                 }
 
@@ -1628,29 +1683,29 @@ public class ReactorHttpService extends Service {
                         continue;
                     }
 
-                    if (line.startsWith("// @state")) {
-                        enabled = line.toUpperCase(Locale.ROOT).contains("ENABLED");
+                    if (line.startsWith("// @enabled")) {
+                        enabled = line.toUpperCase(Locale.ROOT).contains("TRUE");
                         continue;
                     }
 
                     if (line.startsWith("// @mutex")) {
-                        mutex = line.toUpperCase(Locale.ROOT).contains("ON");
+                        mutex = line.toUpperCase(Locale.ROOT).contains("TRUE");
                     }
                 }
 
-                JSONObject script = new JSONObject();
-                script.put("uuid", scriptId);
-                script.put("name", child.getName());
-                script.put("triggers", parseScriptTriggersFromSource(source));
-                script.put("enabled", enabled);
-                script.put("mutex", mutex);
-                scripts.put(script);
+                JSONObject endpoint = new JSONObject();
+                endpoint.put("uuid", endpointId);
+                endpoint.put("name", child.getName());
+                endpoint.put("triggers", parseEndpointTriggersFromSource(source));
+                endpoint.put("enabled", enabled);
+                endpoint.put("mutex", mutex);
+                endpoints.put(endpoint);
             } catch (Exception ignored) {
-                // Skip malformed script metadata entries.
+                // Skip malformed endpoint metadata entries.
             }
         }
 
-        return scripts;
+        return endpoints;
     }
 
     private ParsedTarget parseTarget(String rawTarget) {
@@ -1666,16 +1721,16 @@ public class ReactorHttpService extends Service {
         if (slashIndex < 0) {
             parsed.baseTarget = trimmed;
             parsed.nodeName = trimmed.toLowerCase(Locale.ROOT);
-            parsed.scriptId = null;
+            parsed.endpointId = null;
         } else {
             String baseTarget = trimmed.substring(0, slashIndex).trim();
-            String scriptId = trimmed.substring(slashIndex + 1).trim().toLowerCase(Locale.ROOT);
-            if (baseTarget.isEmpty() || !isUuidV4(scriptId)) {
+            String endpointId = trimmed.substring(slashIndex + 1).trim().toLowerCase(Locale.ROOT);
+            if (baseTarget.isEmpty() || !isUuidV4(endpointId)) {
                 return null;
             }
             parsed.baseTarget = baseTarget;
             parsed.nodeName = baseTarget.toLowerCase(Locale.ROOT);
-            parsed.scriptId = scriptId;
+            parsed.endpointId = endpointId;
         }
 
         String loweredBase = String.valueOf(parsed.baseTarget).trim().toLowerCase(Locale.ROOT);
@@ -1686,9 +1741,9 @@ public class ReactorHttpService extends Service {
         return parsed;
     }
 
-    private MessageScript parseMessageScript(File scriptFile, String projectName) {
+    private MessageEndpoint parseMessageEndpoint(File endpointFile, String projectName) {
         try {
-            String source = readTextFile(scriptFile);
+            String source = readTextFile(endpointFile);
             String[] lines = source.split("\\r?\\n", -1);
 
             String state = "DISABLED";
@@ -1710,8 +1765,8 @@ public class ReactorHttpService extends Service {
                     continue;
                 }
 
-                if (line.startsWith("// @state")) {
-                    boolean isEnabled = line.toUpperCase(Locale.ROOT).contains("ENABLED");
+                if (line.startsWith("// @enabled")) {
+                    boolean isEnabled = line.toUpperCase(Locale.ROOT).contains("TRUE");
                     state = isEnabled ? "ENABLED" : "DISABLED";
                     enabled = isEnabled;
                     continue;
@@ -1719,6 +1774,57 @@ public class ReactorHttpService extends Service {
 
                 if (line.startsWith("// @on")) {
                     String value = line.replace("// @on", "").trim();
+                    String normalizedValue = String.valueOf(value).trim();
+                    if (matchesSingleOnType(normalizedValue, "STREAMEND")) {
+                        hasStreamEndEvent = true;
+                        List<String> senders = parseOnSenderList(normalizedValue, "STREAMEND");
+                        if (senders == null || senders.isEmpty()) {
+                            streamEndFromAnySender = true;
+                        } else {
+                            for (String sender : senders) {
+                                if (!streamEndSenders.contains(sender)) {
+                                    streamEndSenders.add(sender);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    if (matchesSingleOnType(normalizedValue, "STREAM")) {
+                        hasStreamEvent = true;
+                        List<String> senders = parseOnSenderList(normalizedValue, "STREAM");
+                        if (senders == null || senders.isEmpty()) {
+                            streamFromAnySender = true;
+                        } else {
+                            for (String sender : senders) {
+                                if (!streamSenders.contains(sender)) {
+                                    streamSenders.add(sender);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    if (matchesSingleOnType(normalizedValue, "MESSAGE")) {
+                        hasMessageEvent = true;
+                        List<String> senders = parseOnSenderList(normalizedValue, "MESSAGE");
+                        if (senders == null || senders.isEmpty()) {
+                            messageFromAnySender = true;
+                        } else {
+                            for (String sender : senders) {
+                                if (!messageSenders.contains(sender)) {
+                                    messageSenders.add(sender);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    if ("NET_CHANGE".equalsIgnoreCase(normalizedValue)) {
+                        hasNetChangeEvent = true;
+                        continue;
+                    }
+
                     List<String> tokens = splitDirectiveTokens(value);
                     for (String token : tokens) {
                         String normalizedToken = token.trim();
@@ -1809,25 +1915,25 @@ public class ReactorHttpService extends Service {
                 return null;
             }
 
-            MessageScript script = new MessageScript();
-            script.scriptFile = scriptFile;
-            script.scriptName = projectName;
-            script.scriptPath = scriptFile.getAbsolutePath();
-            script.scriptId = readProjectScriptId(scriptFile.getParentFile());
-            script.scriptState = state;
-            script.source = source;
-            script.enabled = enabled;
-            script.hasMessageEvent = hasMessageEvent;
-            script.messageFromAnySender = messageFromAnySender || messageSenders.isEmpty();
-            script.messageSenders = messageSenders;
-            script.hasStreamEvent = hasStreamEvent;
-            script.streamFromAnySender = streamFromAnySender || streamSenders.isEmpty();
-            script.streamSenders = streamSenders;
-            script.hasStreamEndEvent = hasStreamEndEvent;
-            script.streamEndFromAnySender = streamEndFromAnySender || streamEndSenders.isEmpty();
-            script.streamEndSenders = streamEndSenders;
-            script.hasNetChangeEvent = hasNetChangeEvent;
-            return script;
+            MessageEndpoint endpoint = new MessageEndpoint();
+            endpoint.endpointFile = endpointFile;
+            endpoint.endpointName = projectName;
+            endpoint.endpointPath = endpointFile.getAbsolutePath();
+            endpoint.endpointId = readProjectEndpointId(endpointFile.getParentFile());
+            endpoint.endpointState = state;
+            endpoint.source = source;
+            endpoint.enabled = enabled;
+            endpoint.hasMessageEvent = hasMessageEvent;
+            endpoint.messageFromAnySender = messageFromAnySender || messageSenders.isEmpty();
+            endpoint.messageSenders = messageSenders;
+            endpoint.hasStreamEvent = hasStreamEvent;
+            endpoint.streamFromAnySender = streamFromAnySender || streamSenders.isEmpty();
+            endpoint.streamSenders = streamSenders;
+            endpoint.hasStreamEndEvent = hasStreamEndEvent;
+            endpoint.streamEndFromAnySender = streamEndFromAnySender || streamEndSenders.isEmpty();
+            endpoint.streamEndSenders = streamEndSenders;
+            endpoint.hasNetChangeEvent = hasNetChangeEvent;
+            return endpoint;
         } catch (Exception ignored) {
             return null;
         }
@@ -1837,6 +1943,7 @@ public class ReactorHttpService extends Service {
         List<String> out = new ArrayList<>();
         StringBuilder token = new StringBuilder();
         int parenDepth = 0;
+        int bracketDepth = 0;
         String value = String.valueOf(rawValue);
 
         for (int i = 0; i < value.length(); i += 1) {
@@ -1854,7 +1961,19 @@ public class ReactorHttpService extends Service {
                 continue;
             }
 
-            if ((ch == ',' || Character.isWhitespace(ch)) && parenDepth == 0) {
+            if (ch == '[') {
+                bracketDepth += 1;
+                token.append(ch);
+                continue;
+            }
+
+            if (ch == ']') {
+                bracketDepth = Math.max(0, bracketDepth - 1);
+                token.append(ch);
+                continue;
+            }
+
+            if ((ch == ',' || Character.isWhitespace(ch)) && parenDepth == 0 && bracketDepth == 0) {
                 String trimmed = token.toString().trim();
                 if (!trimmed.isEmpty()) {
                     out.add(trimmed);
@@ -1872,6 +1991,52 @@ public class ReactorHttpService extends Service {
         }
 
         return out;
+    }
+
+    private List<String> parseOnSenderList(String value, String type) {
+        Matcher listMatch = Pattern.compile("^" + Pattern.quote(type) + "(?:\\s+\\[(.*)\\])?$", Pattern.CASE_INSENSITIVE)
+                .matcher(String.valueOf(value).trim());
+        if (listMatch.matches()) {
+            String sendersRaw = String.valueOf(listMatch.group(1) == null ? "" : listMatch.group(1)).trim();
+            if (sendersRaw.isEmpty()) {
+                return null;
+            }
+
+            List<String> senders = new ArrayList<>();
+            for (String senderCandidate : sendersRaw.split(",")) {
+                String normalizedSender = normalizeMessageSender(senderCandidate);
+                if (normalizedSender != null && !senders.contains(normalizedSender)) {
+                    senders.add(normalizedSender);
+                }
+            }
+            return senders;
+        }
+
+        Matcher legacyMatch = Pattern.compile("^" + Pattern.quote(type) + "(?:\\((.*)\\))?$", Pattern.CASE_INSENSITIVE)
+                .matcher(String.valueOf(value).trim());
+        if (legacyMatch.matches()) {
+            String sendersRaw = String.valueOf(legacyMatch.group(1) == null ? "" : legacyMatch.group(1)).trim();
+            if (sendersRaw.isEmpty()) {
+                return null;
+            }
+
+            List<String> senders = new ArrayList<>();
+            for (String senderCandidate : sendersRaw.split(",")) {
+                String normalizedSender = normalizeMessageSender(senderCandidate);
+                if (normalizedSender != null && !senders.contains(normalizedSender)) {
+                    senders.add(normalizedSender);
+                }
+            }
+            return senders;
+        }
+
+        return null;
+    }
+
+    private boolean matchesSingleOnType(String value, String type) {
+        return Pattern.compile("^" + Pattern.quote(type) + "(?:\\s+\\[.*\\]|\\(.*\\))?$", Pattern.CASE_INSENSITIVE)
+                .matcher(String.valueOf(value).trim())
+                .matches();
     }
 
     private String normalizeMessageSender(String rawSender) {
@@ -1938,12 +2103,12 @@ public class ReactorHttpService extends Service {
         return candidates;
     }
 
-    private boolean matchesMessageSender(MessageScript script, Set<String> senderCandidates) {
-        return matchesEventSender(script, senderCandidates, "MESSAGE");
+    private boolean matchesMessageSender(MessageEndpoint endpoint, Set<String> senderCandidates) {
+        return matchesEventSender(endpoint, senderCandidates, "MESSAGE");
     }
 
-    private boolean matchesEventSender(MessageScript script, Set<String> senderCandidates, String eventName) {
-        if (script == null) {
+    private boolean matchesEventSender(MessageEndpoint endpoint, Set<String> senderCandidates, String eventName) {
+        if (endpoint == null) {
             return false;
         }
 
@@ -1952,29 +2117,29 @@ public class ReactorHttpService extends Service {
         List<String> allowedSenders;
 
         if ("STREAM".equals(safeEvent)) {
-            if (!script.hasStreamEvent) {
+            if (!endpoint.hasStreamEvent) {
                 return false;
             }
-            fromAnySender = script.streamFromAnySender;
-            allowedSenders = script.streamSenders;
+            fromAnySender = endpoint.streamFromAnySender;
+            allowedSenders = endpoint.streamSenders;
         } else if ("STREAMEND".equals(safeEvent)) {
-            if (!script.hasStreamEndEvent) {
+            if (!endpoint.hasStreamEndEvent) {
                 return false;
             }
-            fromAnySender = script.streamEndFromAnySender;
-            allowedSenders = script.streamEndSenders;
+            fromAnySender = endpoint.streamEndFromAnySender;
+            allowedSenders = endpoint.streamEndSenders;
         } else if ("NET_CHANGE".equals(safeEvent)) {
-            if (!script.hasNetChangeEvent) {
+            if (!endpoint.hasNetChangeEvent) {
                 return false;
             }
             fromAnySender = true;
             allowedSenders = new ArrayList<>();
         } else {
-            if (!script.hasMessageEvent) {
+            if (!endpoint.hasMessageEvent) {
                 return false;
             }
-            fromAnySender = script.messageFromAnySender;
-            allowedSenders = script.messageSenders;
+            fromAnySender = endpoint.messageFromAnySender;
+            allowedSenders = endpoint.messageSenders;
         }
 
         if (fromAnySender || allowedSenders == null || allowedSenders.isEmpty()) {
@@ -1990,13 +2155,13 @@ public class ReactorHttpService extends Service {
         return false;
     }
 
-    private boolean matchesTargetScript(MessageScript script, String targetScriptId) {
-        String safeTargetScriptId = String.valueOf(targetScriptId).trim().toLowerCase(Locale.ROOT);
-        if (safeTargetScriptId.isEmpty()) {
+    private boolean matchesTargetEndpoint(MessageEndpoint endpoint, String targetEndpointId) {
+        String safeTargetEndpointId = String.valueOf(targetEndpointId).trim().toLowerCase(Locale.ROOT);
+        if (safeTargetEndpointId.isEmpty()) {
             return true;
         }
 
-        return safeTargetScriptId.equals(String.valueOf(script.scriptId).trim().toLowerCase(Locale.ROOT));
+        return safeTargetEndpointId.equals(String.valueOf(endpoint.endpointId).trim().toLowerCase(Locale.ROOT));
     }
 
     private JSONObject tryParseJsonObject(String value) {
@@ -2042,9 +2207,9 @@ public class ReactorHttpService extends Service {
             headers.put("x-reactor-stream-content-type", contentType);
         }
 
-        String targetScriptId = headers.getOrDefault("reactor-target-script-id", "").trim().toLowerCase(Locale.ROOT);
-        if (!targetScriptId.isEmpty()) {
-            headers.put("reactor-target-script-id", targetScriptId);
+        String targetEndpointId = headers.getOrDefault("reactor-target-endpoint-id", "").trim().toLowerCase(Locale.ROOT);
+        if (!targetEndpointId.isEmpty()) {
+            headers.put("reactor-target-endpoint-id", targetEndpointId);
         }
 
         if (streamPayload.has("index")) {
@@ -2066,19 +2231,19 @@ public class ReactorHttpService extends Service {
         return headers;
     }
 
-    private void writeExecutionStart(MessageScript script, String trigger, String event) {
+    private void writeExecutionStart(MessageEndpoint endpoint, String trigger, String event) {
         try {
             JSONObject entry = new JSONObject();
-            JSONObject scriptNode = new JSONObject();
-            scriptNode.put("name", script.scriptName);
-            scriptNode.put("path", script.scriptPath);
-            scriptNode.put("state", script.scriptState);
+            JSONObject endpointNode = new JSONObject();
+            endpointNode.put("name", endpoint.endpointName);
+            endpointNode.put("path", endpoint.endpointPath);
+            endpointNode.put("state", endpoint.endpointState);
 
             entry.put("timestamp", Instant.now().toString());
-            entry.put("type", "SCRIPT_EXECUTION");
+            entry.put("type", "ENDPOINT_EXECUTION");
             entry.put("scope", "PROJECT");
             entry.put("phase", "START");
-            entry.put("script", scriptNode);
+            entry.put("endpoint", endpointNode);
             entry.put("trigger", trigger);
             entry.put("event", event);
             entry.put("expression", JSONObject.NULL);
@@ -2087,7 +2252,7 @@ public class ReactorHttpService extends Service {
             entry.put("durationMs", JSONObject.NULL);
             entry.put("output", JSONObject.NULL);
             entry.put("error", JSONObject.NULL);
-            appendProjectLog(script, entry.toString());
+            appendProjectLog(endpoint, entry.toString());
 
             JSONObject globalEntry = new JSONObject(entry.toString());
             globalEntry.put("scope", "GLOBAL");
@@ -2097,19 +2262,19 @@ public class ReactorHttpService extends Service {
         }
     }
 
-    private void writeExecutionError(MessageScript script, String trigger, String event, String errorMessage) {
+    private void writeExecutionError(MessageEndpoint endpoint, String trigger, String event, String errorMessage) {
         try {
             JSONObject entry = new JSONObject();
-            JSONObject scriptNode = new JSONObject();
-            scriptNode.put("name", script.scriptName);
-            scriptNode.put("path", script.scriptPath);
-            scriptNode.put("state", script.scriptState);
+            JSONObject endpointNode = new JSONObject();
+            endpointNode.put("name", endpoint.endpointName);
+            endpointNode.put("path", endpoint.endpointPath);
+            endpointNode.put("state", endpoint.endpointState);
 
             entry.put("timestamp", Instant.now().toString());
-            entry.put("type", "SCRIPT_EXECUTION");
+            entry.put("type", "ENDPOINT_EXECUTION");
             entry.put("scope", "PROJECT");
             entry.put("phase", "ERROR");
-            entry.put("script", scriptNode);
+            entry.put("endpoint", endpointNode);
             entry.put("trigger", trigger);
             entry.put("event", event);
             entry.put("expression", JSONObject.NULL);
@@ -2118,15 +2283,15 @@ public class ReactorHttpService extends Service {
             entry.put("durationMs", JSONObject.NULL);
             entry.put("output", JSONObject.NULL);
             entry.put("error", String.valueOf(errorMessage));
-            appendProjectLog(script, entry.toString());
+            appendProjectLog(endpoint, entry.toString());
         } catch (Exception ignored) {
             // Ignore JSON logging failures.
         }
     }
 
-    private void appendProjectLog(MessageScript script, String line) {
+    private void appendProjectLog(MessageEndpoint endpoint, String line) {
         try {
-            File projectLogFile = new File(script.scriptFile.getParentFile(), "activity.log");
+            File projectLogFile = new File(endpoint.endpointFile.getParentFile(), "activity.log");
             try (FileOutputStream stream = new FileOutputStream(projectLogFile, true)) {
                 stream.write((line + "\n").getBytes(StandardCharsets.UTF_8));
             }
@@ -2135,8 +2300,8 @@ public class ReactorHttpService extends Service {
         }
     }
 
-    private void executeScriptActions(MessageScript script, String messageBody, Map<String, String> incomingHeaders) {
-        Matcher directMatcher = SEND_MESSAGE_CALL_PATTERN.matcher(script.source);
+    private void executeEndpointActions(MessageEndpoint endpoint, String messageBody, Map<String, String> incomingHeaders) {
+        Matcher directMatcher = SEND_MESSAGE_CALL_PATTERN.matcher(endpoint.source);
         while (directMatcher.find()) {
             String target = directMatcher.group(2) != null ? directMatcher.group(2).trim() : "";
             String content = directMatcher.group(4) != null ? directMatcher.group(4) : "";
@@ -2156,7 +2321,7 @@ public class ReactorHttpService extends Service {
             sendNodeMessage(target, content, extraHeaders);
         }
 
-        Matcher exchangeMatcher = EXCHANGE_SEND_MESSAGE_CALL_PATTERN.matcher(script.source);
+        Matcher exchangeMatcher = EXCHANGE_SEND_MESSAGE_CALL_PATTERN.matcher(endpoint.source);
         while (exchangeMatcher.find()) {
             String target = exchangeMatcher.group(2) != null ? exchangeMatcher.group(2).trim() : "";
             String content = exchangeMatcher.group(4) != null ? exchangeMatcher.group(4) : "";
@@ -2167,11 +2332,11 @@ public class ReactorHttpService extends Service {
             sendExchangeMessage(target, content);
         }
 
-        Map<String, String> stringVariables = extractStringVariables(script.source);
-        Map<String, String> streamVariables = extractStreamVariables(script.source, stringVariables);
+        Map<String, String> stringVariables = extractStringVariables(endpoint.source);
+        Map<String, String> streamVariables = extractStreamVariables(endpoint.source, stringVariables);
         Set<String> scheduledStreams = new HashSet<>();
 
-        Matcher directStreamMatcher = STREAM_FILE_CALL_PATTERN.matcher(script.source);
+        Matcher directStreamMatcher = STREAM_FILE_CALL_PATTERN.matcher(endpoint.source);
         while (directStreamMatcher.find()) {
             String target = directStreamMatcher.group(2) != null ? directStreamMatcher.group(2).trim() : "";
             String streamPath = directStreamMatcher.group(4) != null ? directStreamMatcher.group(4).trim() : "";
@@ -2192,7 +2357,7 @@ public class ReactorHttpService extends Service {
             }
         }
 
-        Matcher exchangeStreamMatcher = EXCHANGE_STREAM_FILE_CALL_PATTERN.matcher(script.source);
+        Matcher exchangeStreamMatcher = EXCHANGE_STREAM_FILE_CALL_PATTERN.matcher(endpoint.source);
         while (exchangeStreamMatcher.find()) {
             String target = exchangeStreamMatcher.group(2) != null ? exchangeStreamMatcher.group(2).trim() : "";
             String streamPath = exchangeStreamMatcher.group(4) != null ? exchangeStreamMatcher.group(4).trim() : "";
@@ -2213,7 +2378,7 @@ public class ReactorHttpService extends Service {
             }
         }
 
-        Matcher genericDirectStreamMatcher = STREAM_CALL_GENERIC_PATTERN.matcher(script.source);
+        Matcher genericDirectStreamMatcher = STREAM_CALL_GENERIC_PATTERN.matcher(endpoint.source);
         while (genericDirectStreamMatcher.find()) {
             String targetToken = genericDirectStreamMatcher.group(1);
             String pathToken = genericDirectStreamMatcher.group(2);
@@ -2241,7 +2406,7 @@ public class ReactorHttpService extends Service {
             }
         }
 
-        Matcher genericExchangeStreamMatcher = EXCHANGE_STREAM_CALL_GENERIC_PATTERN.matcher(script.source);
+        Matcher genericExchangeStreamMatcher = EXCHANGE_STREAM_CALL_GENERIC_PATTERN.matcher(endpoint.source);
         while (genericExchangeStreamMatcher.find()) {
             String targetToken = genericExchangeStreamMatcher.group(1);
             String pathToken = genericExchangeStreamMatcher.group(2);
@@ -2359,9 +2524,9 @@ public class ReactorHttpService extends Service {
         if (extraHeaders != null) {
             effectiveHeaders.putAll(extraHeaders);
         }
-        if (parsedTarget.scriptId != null && !parsedTarget.scriptId.isEmpty()) {
+        if (parsedTarget.endpointId != null && !parsedTarget.endpointId.isEmpty()) {
             effectiveHeaders.put("Reactor-Target-Node", String.valueOf(parsedTarget.baseTarget).trim().toLowerCase(Locale.ROOT));
-            effectiveHeaders.put("Reactor-Target-Script-Id", parsedTarget.scriptId);
+            effectiveHeaders.put("Reactor-Target-Endpoint-Id", parsedTarget.endpointId);
         }
 
         String streamId = UUID.randomUUID().toString();
@@ -2901,8 +3066,8 @@ public class ReactorHttpService extends Service {
         try {
             packet.put("type", "message");
             packet.put("to", String.valueOf(parsedTarget.baseTarget).toLowerCase(Locale.ROOT));
-            if (parsedTarget.scriptId != null && !parsedTarget.scriptId.isEmpty()) {
-                packet.put("targetScriptId", parsedTarget.scriptId);
+            if (parsedTarget.endpointId != null && !parsedTarget.endpointId.isEmpty()) {
+                packet.put("targetEndpointId", parsedTarget.endpointId);
             }
             packet.put("content", String.valueOf(content));
             packet.put("contentType", String.valueOf(contentType));
@@ -2936,8 +3101,8 @@ public class ReactorHttpService extends Service {
             packet.put("signalType", safeSignalType);
             packet.put("sessionId", String.valueOf(sessionId == null ? "" : sessionId).trim());
             packet.put("payload", payload != null ? new JSONObject(payload.toString()) : JSONObject.NULL);
-            if (parsedTarget.scriptId != null && !parsedTarget.scriptId.isEmpty()) {
-                packet.put("targetScriptId", parsedTarget.scriptId);
+            if (parsedTarget.endpointId != null && !parsedTarget.endpointId.isEmpty()) {
+                packet.put("targetEndpointId", parsedTarget.endpointId);
             }
         } catch (JSONException exception) {
             throw new RuntimeException(exception.getMessage() != null ? exception.getMessage() : "signal packet serialization failed");
@@ -3165,7 +3330,7 @@ public class ReactorHttpService extends Service {
             outbound.put("sessionId", packet.optString("sessionId", ""));
             outbound.put("signalType", signalType);
             outbound.put("payload", packet.has("payload") ? packet.opt("payload") : JSONObject.NULL);
-            outbound.put("targetScriptId", packet.optString("targetScriptId", ""));
+            outbound.put("targetEndpointId", packet.optString("targetEndpointId", ""));
             outbound.put("timestamp", Instant.now().toString());
             target.send(outbound.toString());
         } catch (Exception error) {
@@ -3321,12 +3486,12 @@ public class ReactorHttpService extends Service {
                     packet.put("type", "register");
                     packet.put("name", reactorName);
                     packet.put("token", registerToken);
-                    packet.put("scripts", buildDiscoveryScriptsPayload());
+                    packet.put("endpoints", buildDiscoveryEndpointsPayload());
                     packet.put("httpPort", currentPort);
                     packet.put("httpTls", false);
                     webSocket.send(packet.toString());
                 } catch (Exception ignored) {
-                    webSocket.send("{\"type\":\"register\",\"name\":\"mobile-reactor\",\"token\":\"\",\"scripts\":[],\"httpPort\":7070,\"httpTls\":false}");
+                    webSocket.send("{\"type\":\"register\",\"name\":\"mobile-reactor\",\"token\":\"\",\"endpoints\":[],\"httpPort\":7070,\"httpTls\":false}");
                 }
                 appendGlobalLog(buildExchangeLog("CLIENT_CONNECTED", "connected to " + url + " as " + reactorName));
                 flushOutgoingQueue();
@@ -3732,7 +3897,7 @@ public class ReactorHttpService extends Service {
 
             appendGlobalLog(buildExchangeLog("MESSAGE_RECEIVED", "message from " + from + " via exchange"));
 
-            List<MessageScript> listeners = collectMessageListeners();
+            List<MessageEndpoint> listeners = collectMessageEndpoints();
             Set<String> senderCandidates = new HashSet<>();
             senderCandidates.add(from.toLowerCase(Locale.ROOT));
             JSONObject streamPayload = tryParseJsonObject(content);
@@ -3749,25 +3914,25 @@ public class ReactorHttpService extends Service {
                     ? withStreamHeaders(headers, streamPayload, primaryEvent)
                     : headers;
 
-            for (MessageScript script : listeners) {
-                if (!matchesEventSender(script, senderCandidates, primaryEvent)) continue;
+            for (MessageEndpoint endpoint : listeners) {
+                if (!matchesEventSender(endpoint, senderCandidates, primaryEvent)) continue;
                 try {
-                    writeExecutionStart(script, primaryEvent, primaryEvent);
-                    executeScriptActions(script, content, effectiveHeaders);
+                    writeExecutionStart(endpoint, primaryEvent, primaryEvent);
+                    executeEndpointActions(endpoint, content, effectiveHeaders);
                 } catch (Exception e) {
-                    writeExecutionError(script, primaryEvent, primaryEvent, e.getMessage());
+                    writeExecutionError(endpoint, primaryEvent, primaryEvent, e.getMessage());
                 }
             }
 
             if (streamEnvelope && "end".equals(streamPhase)) {
                 Map<String, String> streamEndHeaders = withStreamHeaders(headers, streamPayload, "STREAMEND");
-                for (MessageScript script : listeners) {
-                    if (!matchesEventSender(script, senderCandidates, "STREAMEND")) continue;
+                for (MessageEndpoint endpoint : listeners) {
+                    if (!matchesEventSender(endpoint, senderCandidates, "STREAMEND")) continue;
                     try {
-                        writeExecutionStart(script, "STREAMEND", "STREAMEND");
-                        executeScriptActions(script, content, streamEndHeaders);
+                        writeExecutionStart(endpoint, "STREAMEND", "STREAMEND");
+                        executeEndpointActions(endpoint, content, streamEndHeaders);
                     } catch (Exception e) {
-                        writeExecutionError(script, "STREAMEND", "STREAMEND", e.getMessage());
+                        writeExecutionError(endpoint, "STREAMEND", "STREAMEND", e.getMessage());
                     }
                 }
             }

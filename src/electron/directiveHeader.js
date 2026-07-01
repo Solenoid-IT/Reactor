@@ -9,16 +9,17 @@ function parseDirectiveHeader(source) {
 	const values = {
 		state: null,
 		schedule: null,
-		on: null,
+		on: [],
 		mutex: null,
 		watch: [],
 	};
 
 	for (; index < lines.length; index += 1) {
 		const line = lines[index];
-		const stateMatch = line.match(/^\s*\/\/\s*@state\s+(ENABLED|DISABLED)\b/i);
-		if (stateMatch) {
-			values.state = stateMatch[1].toUpperCase();
+		const enabledMatch = line.match(/^\s*\/\/\s*@enabled\s+(TRUE|FALSE)\b/i);
+		if (enabledMatch) {
+			const parsedEnabled = enabledMatch[1].toUpperCase();
+			values.state = parsedEnabled === 'TRUE' ? 'ENABLED' : 'DISABLED';
 			continue;
 		}
 
@@ -30,13 +31,27 @@ function parseDirectiveHeader(source) {
 
 		const onMatch = line.match(/^\s*\/\/\s*@on\s+(.+)$/i);
 		if (onMatch) {
-			values.on = onMatch[1].trim();
+			const onValue = onMatch[1].trim();
+			const scheduleOnMatch = onValue.match(/^SCHEDULE\s+(?:"([^"]+)"|'([^']+)'|(.+))$/i);
+			if (scheduleOnMatch) {
+				values.schedule = String(scheduleOnMatch[1] || scheduleOnMatch[2] || scheduleOnMatch[3] || '').trim();
+				continue;
+			}
+
+			const watchOnMatch = onValue.match(/^WATCH\s+(.+)$/i);
+			if (watchOnMatch) {
+				values.watch.push(watchOnMatch[1].trim());
+				continue;
+			}
+
+			values.on.push(onValue);
 			continue;
 		}
 
-		const mutexMatch = line.match(/^\s*\/\/\s*@mutex(?:\s+(ON|OFF))?\b/i);
+		const mutexMatch = line.match(/^\s*\/\/\s*@mutex(?:\s+(TRUE|FALSE))?\b/i);
 		if (mutexMatch) {
-			values.mutex = (mutexMatch[1] || 'ON').toUpperCase();
+			const rawMutex = (mutexMatch[1] || 'TRUE').toUpperCase();
+			values.mutex = rawMutex === 'TRUE' ? 'TRUE' : 'FALSE';
 			continue;
 		}
 
@@ -69,44 +84,95 @@ function rebuildDirectiveHeader(source, overrides = {}) {
 	let bodyStart = index;
 	for (; bodyStart < lines.length; bodyStart += 1) {
 		const line = lines[bodyStart];
-		if (/^\s*\/\/\s*@(state|mutex|on|schedule|watch)\b/i.test(line) || line.trim() === '') {
+		if (/^\s*\/\/\s*@(enabled|mutex|on|schedule|watch)\b/i.test(line) || line.trim() === '') {
 			continue;
 		}
 		break;
 	}
 
 	const body = lines.slice(bodyStart).join('\n').replace(/^\n+/, '');
-	const headerLines = [];
+	const leadingHeaderLines = [];
+	const onHeaderLines = [];
 
 	if (nextValues.state) {
-		headerLines.push(`// @state ${nextValues.state}`);
+		const enabledValue = String(nextValues.state).toUpperCase() === 'ENABLED' ? 'TRUE' : 'FALSE';
+		leadingHeaderLines.push(`// @enabled ${enabledValue}`);
 	}
 
 	if (nextValues.mutex) {
-		headerLines.push(`// @mutex ${nextValues.mutex}`);
+		const mutexValue = String(nextValues.mutex).toUpperCase();
+		leadingHeaderLines.push(`// @mutex ${mutexValue === 'TRUE' ? 'TRUE' : 'FALSE'}`);
 	}
 
-	if (nextValues.on) {
-		headerLines.push(`// @on ${nextValues.on}`);
+	if (Array.isArray(nextValues.on)) {
+		for (const onValue of nextValues.on) {
+			if (onValue) {
+				onHeaderLines.push(`// @on ${onValue}`);
+			}
+		}
+	} else if (nextValues.on) {
+		onHeaderLines.push(`// @on ${nextValues.on}`);
 	}
 
 	if (nextValues.schedule) {
-		headerLines.push(`// @schedule ${nextValues.schedule}`);
+		onHeaderLines.push(`// @on SCHEDULE "${nextValues.schedule}"`);
 	}
 
 	if (Array.isArray(nextValues.watch)) {
 		for (const watchEntry of nextValues.watch) {
 			if (watchEntry) {
-				headerLines.push(`// @watch ${watchEntry}`);
+				onHeaderLines.push(`// @on WATCH ${formatWatchEntryForOnDirective(watchEntry)}`);
 			}
 		}
 	}
 
-	if (!headerLines.length) {
+	const headerSections = [];
+	if (leadingHeaderLines.length) {
+		headerSections.push(leadingHeaderLines.join('\n'));
+	}
+	if (onHeaderLines.length) {
+		headerSections.push(onHeaderLines.join('\n'));
+	}
+
+	const headerText = headerSections.join('\n\n');
+
+	if (!headerText) {
 		return body;
 	}
 
-	return `${headerLines.join('\n')}\n\n${body}`;
+	return `${headerText}\n\n${body}`;
+}
+
+function formatWatchEntryForOnDirective(watchEntry) {
+	const raw = String(watchEntry || '').trim();
+	if (!raw) {
+		return '""';
+	}
+
+	const match = raw.match(/^(.*?)\s*(\[.*\])\s*$/);
+	if (match) {
+		const pathPart = stripWrappingQuotes(match[1]);
+		const listenersPart = match[2].trim();
+		return `"${pathPart}" ${listenersPart}`;
+	}
+
+	return `"${stripWrappingQuotes(raw)}"`;
+}
+
+function stripWrappingQuotes(value) {
+	const trimmed = String(value || '').trim();
+	if (!trimmed) {
+		return '';
+	}
+
+	if (
+		(trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+		(trimmed.startsWith("'") && trimmed.endsWith("'"))
+	) {
+		return trimmed.slice(1, -1).trim();
+	}
+
+	return trimmed;
 }
 
 module.exports = {

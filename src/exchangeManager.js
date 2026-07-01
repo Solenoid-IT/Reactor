@@ -18,20 +18,20 @@ function parseLogicalExchangeTarget(rawTarget) {
 	if (slashIndex === -1) {
 		return {
 			nodeName: trimmed.toLowerCase(),
-			scriptId: null,
+			endpointId: null,
 			rawTarget: trimmed,
 		};
 	}
 
 	const nodeName = trimmed.slice(0, slashIndex).trim().toLowerCase();
-	const scriptId = trimmed.slice(slashIndex + 1).trim().toLowerCase();
-	if (!nodeName || !scriptId) {
+	const endpointId = trimmed.slice(slashIndex + 1).trim().toLowerCase();
+	if (!nodeName || !endpointId) {
 		return null;
 	}
 
 	return {
 		nodeName,
-		scriptId,
+		endpointId,
 		rawTarget: trimmed,
 	};
 }
@@ -170,22 +170,22 @@ class ExchangeManager {
 		return Math.max(minValue, Math.floor(raw));
 	}
 
-	_sanitizeDiscoveryScripts(rawScripts) {
-		if (!Array.isArray(rawScripts)) {
+	_sanitizeDiscoveryEndpoints(rawEndpoints) {
+		if (!Array.isArray(rawEndpoints)) {
 			return [];
 		}
 
-		return rawScripts
-			.map((script) => ({
-				uuid: String(script?.uuid || '').trim().toLowerCase(),
-				name: String(script?.name || '').trim() || 'unknown',
-				triggers: Array.isArray(script?.triggers)
-					? script.triggers.map((trigger) => String(trigger || '').trim()).filter(Boolean)
+		return rawEndpoints
+			.map((endpoint) => ({
+				uuid: String(endpoint?.uuid || '').trim().toLowerCase(),
+				name: String(endpoint?.name || '').trim() || 'unknown',
+				triggers: Array.isArray(endpoint?.triggers)
+					? endpoint.triggers.map((trigger) => String(trigger || '').trim()).filter(Boolean)
 					: [],
-				enabled: Boolean(script?.enabled),
-				mutex: Boolean(script?.mutex),
+				enabled: Boolean(endpoint?.enabled),
+				mutex: Boolean(endpoint?.mutex),
 			}))
-			.filter((script) => script.uuid);
+			.filter((endpoint) => endpoint.uuid);
 	}
 
 	_normalizeDiscoveryPort(rawPort) {
@@ -263,13 +263,13 @@ class ExchangeManager {
 		await fs.writeFile(this._undeliveredQueuePath, `${JSON.stringify(queue, null, 2)}\n`, 'utf8');
 	}
 
-	async _enqueueUndeliveredMessage(to, from, content, contentType, targetScriptId = null) {
+	async _enqueueUndeliveredMessage(to, from, content, contentType, targetEndpointId = null) {
 		const now = Date.now();
 		const queue = await this._readUndeliveredQueue();
 		queue.push({
 			id: `${now}-${Math.random().toString(16).slice(2)}`,
 			to,
-			targetScriptId: targetScriptId || null,
+			targetEndpointId: targetEndpointId || null,
 			from,
 			content,
 			contentType,
@@ -348,7 +348,7 @@ class ExchangeManager {
 					targetWs.send(JSON.stringify({
 						type: 'message',
 						from: item.from || 'unknown',
-						targetScriptId: item.targetScriptId || null,
+						targetEndpointId: item.targetEndpointId || null,
 						content: item.content !== undefined ? item.content : '',
 						contentType: String(item.contentType || 'text/plain'),
 					}));
@@ -631,10 +631,10 @@ class ExchangeManager {
 				const name = String(packet.name || '').trim().toLowerCase();
 				const providedToken = String(packet.token || '').trim();
 				const expectedToken = String(this.runtime.exchangeAuthToken || '').trim();
-				const discoveryScripts = this._sanitizeDiscoveryScripts(packet.scripts);
+				const discoveryEndpoints = this._sanitizeDiscoveryEndpoints(packet.endpoints);
 				const discoveryPort = this._normalizeDiscoveryPort(packet.httpPort);
 				const discoveryTls = Boolean(packet.httpTls);
-				const scriptsEndpoint = this._sanitizeDiscoveryEndpoint(packet.scriptsEndpoint);
+				const endpointsEndpoint = this._sanitizeDiscoveryEndpoint(packet.endpointsEndpoint);
 
 				if (expectedToken && providedToken !== expectedToken) {
 					this.runtime.log(`[Exchange] Registration rejected for ${name || 'unknown'}: invalid token`);
@@ -662,10 +662,10 @@ class ExchangeManager {
 						connectedAt,
 						lastSeenAt: new Date().toISOString(),
 						userAgent,
-						scripts: discoveryScripts,
+						endpoints: discoveryEndpoints,
 						httpPort: discoveryPort,
 						httpTls: discoveryTls,
-						scriptsEndpoint,
+						endpointsEndpoint,
 					});
 					void this._writeActiveConnectionsSnapshot();
 					this._appendConnectionLog('CLIENT_REGISTERED', {
@@ -689,15 +689,15 @@ class ExchangeManager {
 				const nextTls = Object.prototype.hasOwnProperty.call(packet, 'httpTls')
 					? Boolean(packet.httpTls)
 					: Boolean(current?.httpTls);
-				const nextEndpoint = Object.prototype.hasOwnProperty.call(packet, 'scriptsEndpoint')
-					? this._sanitizeDiscoveryEndpoint(packet.scriptsEndpoint)
-					: current?.scriptsEndpoint || null;
+				const nextEndpoint = Object.prototype.hasOwnProperty.call(packet, 'endpointsEndpoint')
+					? this._sanitizeDiscoveryEndpoint(packet.endpointsEndpoint)
+					: current?.endpointsEndpoint || null;
 				this._connectedClientDetails.set(clientName, {
 					...current,
-					scripts: this._sanitizeDiscoveryScripts(packet.scripts),
+					endpoints: this._sanitizeDiscoveryEndpoints(packet.endpoints),
 					httpPort: nextPort,
 					httpTls: nextTls,
-					scriptsEndpoint: nextEndpoint,
+					endpointsEndpoint: nextEndpoint,
 					lastSeenAt: new Date().toISOString(),
 				});
 				void this._writeActiveConnectionsSnapshot();
@@ -760,7 +760,7 @@ class ExchangeManager {
 				fromName || 'unknown',
 				packet.content !== undefined ? packet.content : '',
 				String(packet.contentType || 'text/plain'),
-				packet.targetScriptId || null,
+				packet.targetEndpointId || null,
 			).catch(() => {});
 			return;
 		}
@@ -769,7 +769,7 @@ class ExchangeManager {
 			targetWs.send(JSON.stringify({
 				type: 'message',
 				from: fromName || 'unknown',
-				targetScriptId: packet.targetScriptId || null,
+				targetEndpointId: packet.targetEndpointId || null,
 				content: packet.content !== undefined ? packet.content : '',
 				contentType: String(packet.contentType || 'text/plain'),
 			}));
@@ -781,7 +781,7 @@ class ExchangeManager {
 				fromName || 'unknown',
 				packet.content !== undefined ? packet.content : '',
 				String(packet.contentType || 'text/plain'),
-				packet.targetScriptId || null,
+				packet.targetEndpointId || null,
 			).catch(() => {});
 		}
 	}
@@ -810,7 +810,7 @@ class ExchangeManager {
 				sessionId: String(packet.sessionId || '').trim() || null,
 				signalType,
 				payload: packet.payload !== undefined ? packet.payload : null,
-				targetScriptId: packet.targetScriptId || null,
+				targetEndpointId: packet.targetEndpointId || null,
 				timestamp: new Date().toISOString(),
 			}));
 		} catch (error) {
@@ -935,14 +935,14 @@ class ExchangeManager {
 				const name = await this.runtime.getReactorName();
 				const safeName = String(name || '').trim() || 'unnamed';
 				const token = String(this.runtime.exchangeAuthToken || '').trim();
-				const scripts = typeof this.runtime.getDiscoveryScriptEntries === 'function'
-					? this.runtime.getDiscoveryScriptEntries()
+				const endpoints = typeof this.runtime.getDiscoveryEndpointEntries === 'function'
+					? this.runtime.getDiscoveryEndpointEntries()
 					: [];
 				ws.send(JSON.stringify({
 					type: 'register',
 					name: safeName,
 					token,
-					scripts,
+					endpoints,
 					httpPort: Number(this.runtime.httpServerPort) || 7070,
 					httpTls: Boolean(this.runtime.tlsEnabled),
 				}));
@@ -1150,28 +1150,28 @@ class ExchangeManager {
 		if (isStreamEnvelope) {
 			this._handleIncomingStreamEnvelope(from, messageJson, content, contentType, {
 				nodeName: String(packet.to || '').trim().toLowerCase() || null,
-				scriptId: String(packet.targetScriptId || '').trim().toLowerCase() || null,
+				endpointId: String(packet.targetEndpointId || '').trim().toLowerCase() || null,
 			});
 			return;
 		}
 
 		this.runtime.log(`[Exchange] Message from: ${from}`);
-		const targetScriptId = String(packet.targetScriptId || '').trim().toLowerCase() || null;
+		const targetEndpointId = String(packet.targetEndpointId || '').trim().toLowerCase() || null;
 		const listeners = this.runtime.filterMessageListenersByTarget(
 			this.runtime.findMessageListeners([from.toLowerCase()]),
-			targetScriptId,
+			targetEndpointId,
 		);
 
 		Promise.allSettled(
-			listeners.map((script) =>
-				this.runtime.runScript(script, {
+			listeners.map((endpoint) =>
+				this.runtime.runEndpoint(endpoint, {
 					trigger: 'MESSAGE',
 					event: 'MESSAGE',
 					messageSender: from,
 					messageSenderName: from,
 					messageTarget: String(packet.to || '').trim().toLowerCase() || null,
 					messageTargetNode: String(packet.to || '').trim().toLowerCase() || null,
-					messageTargetScriptId: targetScriptId,
+					messageTargetEndpointId: targetEndpointId,
 					messageContent: content,
 					messageContentType: contentType,
 					messageBodyBase64: Buffer.from(content, 'utf8').toString('base64'),
@@ -1197,7 +1197,7 @@ class ExchangeManager {
 				sessionId: String(packet.sessionId || '').trim() || null,
 				signalType,
 				payload: packet.payload !== undefined ? packet.payload : null,
-				targetScriptId: String(packet.targetScriptId || '').trim().toLowerCase() || null,
+				targetEndpointId: String(packet.targetEndpointId || '').trim().toLowerCase() || null,
 				timestamp: String(packet.timestamp || '').trim() || new Date().toISOString(),
 			});
 		}
@@ -1210,13 +1210,13 @@ class ExchangeManager {
 			remoteHost: from,
 			candidates: [from.toLowerCase()],
 		};
-		const targetScriptId = String(targetMeta.scriptId || '').trim().toLowerCase() || null;
+		const targetEndpointId = String(targetMeta.endpointId || '').trim().toLowerCase() || null;
 		const targetNode = String(targetMeta.nodeName || '').trim().toLowerCase() || null;
 
 		this.runtime.log(`[Exchange] Message from: ${from}`);
 		const listeners = this.runtime.filterStreamListenersByTarget(
 			this.runtime.findStreamListeners(senderMeta.candidates),
-			targetScriptId,
+			targetEndpointId,
 		);
 		const streamPacket = this.runtime && this.runtime.createIncomingStreamPacket
 			? this.runtime.createIncomingStreamPacket(streamEnvelope)
@@ -1232,15 +1232,15 @@ class ExchangeManager {
 					: null;
 
 				await Promise.allSettled(
-					listeners.map((script) =>
-						this.runtime.runScript(script, {
+					listeners.map((endpoint) =>
+						this.runtime.runEndpoint(endpoint, {
 							trigger: 'STREAM',
 							event: 'STREAM',
 							messageSender: from,
 							messageSenderName: from,
 							messageTarget: targetNode,
 							messageTargetNode: targetNode,
-							messageTargetScriptId: targetScriptId,
+							messageTargetEndpointId: targetEndpointId,
 							messageContent: safeRawContent,
 							messageContentType: contentType,
 							messageBodyBase64: safeMessageBodyBase64,
@@ -1250,7 +1250,7 @@ class ExchangeManager {
 							messageHeaders: {
 								'x-exchange-from': from,
 								'Reactor-Target-Node': targetNode || '',
-								'Reactor-Target-Script-Id': targetScriptId || '',
+								'Reactor-Target-Endpoint-Id': targetEndpointId || '',
 							},
 						}),
 					),
@@ -1260,7 +1260,7 @@ class ExchangeManager {
 						await this.runtime.emitStreamEnd(streamEndData, senderMeta, {
 							'x-exchange-from': from,
 							'Reactor-Target-Node': targetNode || '',
-							'Reactor-Target-Script-Id': targetScriptId || '',
+							'Reactor-Target-Endpoint-Id': targetEndpointId || '',
 						});
 				}
 			})
@@ -1298,7 +1298,7 @@ class ExchangeManager {
 		this.wsClient.send(JSON.stringify({
 			type: 'message',
 			to: parsedTarget.nodeName,
-			targetScriptId: parsedTarget.scriptId || null,
+			targetEndpointId: parsedTarget.endpointId || null,
 			content: serializedContent,
 			contentType,
 		}));
@@ -1330,7 +1330,7 @@ class ExchangeManager {
 		this.wsClient.send(JSON.stringify({
 			type: 'signal',
 			to: parsedTarget.nodeName,
-			targetScriptId: parsedTarget.scriptId || null,
+			targetEndpointId: parsedTarget.endpointId || null,
 			sessionId: String(options.sessionId || '').trim() || null,
 			signalType: safeSignalType,
 			payload,
@@ -1389,7 +1389,7 @@ class ExchangeManager {
 		const isClientConnected =
 			this.mode === 'client' && Boolean(this.wsClient) && this.wsClient.readyState === WebSocket.OPEN;
 		const now = Date.now();
-		const connectedClientsDetails = this.getConnectedClientsDiscoveryEntries(now);
+		const connectedClientsDetails = this.getConnectedClientsDiscoveryEndpointEntries(now);
 		return {
 			mode: this.mode,
 			host: this.host,
@@ -1419,7 +1419,7 @@ class ExchangeManager {
 		};
 	}
 
-	getConnectedClientsDiscoveryEntries(nowMs = Date.now()) {
+	getConnectedClientsDiscoveryEndpointEntries(nowMs = Date.now()) {
 		if (this.mode !== 'exchange') {
 			return [];
 		}
@@ -1437,11 +1437,11 @@ class ExchangeManager {
 					port: Number.isFinite(Number(detail?.port)) ? Number(detail.port) : null,
 					httpPort: Number.isFinite(Number(detail?.httpPort)) ? Number(detail.httpPort) : null,
 					httpTls: Boolean(detail?.httpTls),
-					scriptsEndpoint: detail?.scriptsEndpoint || null,
+					endpointsEndpoint: detail?.endpointsEndpoint || null,
 					connectedAt: connectedAt || null,
 					lastSeenAt: detail?.lastSeenAt || null,
 					userAgent: detail?.userAgent || '',
-					scripts: this._sanitizeDiscoveryScripts(detail?.scripts),
+					endpoints: this._sanitizeDiscoveryEndpoints(detail?.endpoints),
 					connectedForMs,
 					connectedForSec: Number.isFinite(connectedForMs) ? Math.floor(connectedForMs / 1000) : null,
 				};
@@ -1449,7 +1449,7 @@ class ExchangeManager {
 			.sort((a, b) => String(a.name).localeCompare(String(b.name)));
 	}
 
-	updateClientDiscoveryScripts(scripts = []) {
+	updateClientDiscoveryEndpoints(endpoints = []) {
 		if (this.mode !== 'client' || !this.wsClient || this.wsClient.readyState !== WebSocket.OPEN) {
 			return;
 		}
@@ -1457,12 +1457,12 @@ class ExchangeManager {
 		try {
 			this.wsClient.send(JSON.stringify({
 				type: 'profile',
-				scripts: this._sanitizeDiscoveryScripts(scripts),
+				endpoints: this._sanitizeDiscoveryEndpoints(endpoints),
 				httpPort: Number(this.runtime.httpServerPort) || 7070,
 				httpTls: Boolean(this.runtime.tlsEnabled),
 			}));
 		} catch {
-			// Ignore profile update failures: scripts will be re-sent on reconnect.
+			// Ignore profile update failures: endpoints will be re-sent on reconnect.
 		}
 	}
 }

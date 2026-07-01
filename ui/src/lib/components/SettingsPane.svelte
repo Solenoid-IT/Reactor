@@ -56,8 +56,8 @@
 	export let onClearMessageQueue = () => {};
 	export let onCopyText = async () => ({ ok: false, error: 'copy handler unavailable' });
 
-	let copiedScriptUuid = '';
-	let copiedScriptTimer = null;
+	let copiedEndpointUuid = '';
+	let copiedEndpointTimer = null;
 
 	$: p2pRemotePeers = (() => {
 		const fromStatus = Array.isArray(p2pStatus?.remotePeers)
@@ -71,20 +71,20 @@
 		return Array.from(new Set([...fromStatus, ...fromLinkedNodes])).sort((a, b) => a.localeCompare(b));
 	})();
 
-	function showCopiedFeedback(scriptUuid) {
-		copiedScriptUuid = String(scriptUuid || '').trim();
-		if (copiedScriptTimer) {
-			clearTimeout(copiedScriptTimer);
+	function showCopiedFeedback(endpointUuid) {
+		copiedEndpointUuid = String(endpointUuid || '').trim();
+		if (copiedEndpointTimer) {
+			clearTimeout(copiedEndpointTimer);
 		}
 
-		copiedScriptTimer = setTimeout(() => {
-			copiedScriptUuid = '';
-			copiedScriptTimer = null;
+		copiedEndpointTimer = setTimeout(() => {
+			copiedEndpointUuid = '';
+			copiedEndpointTimer = null;
 		}, 1500);
 	}
 
-	async function copyNodeScriptUuid(scriptUuid) {
-		const safeUuid = String(scriptUuid || '').trim();
+	async function copyNodeEndpointUuid(endpointUuid) {
+		const safeUuid = String(endpointUuid || '').trim();
 		if (!safeUuid) {
 			return;
 		}
@@ -110,14 +110,14 @@
 		}
 
 		if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
-			window.prompt('Copy script UUID', safeUuid);
+			window.prompt('Copy endpoint UUID', safeUuid);
 			showCopiedFeedback(safeUuid);
 		}
 	}
 
 	onDestroy(() => {
-		if (copiedScriptTimer) {
-			clearTimeout(copiedScriptTimer);
+		if (copiedEndpointTimer) {
+			clearTimeout(copiedEndpointTimer);
 		}
 	});
 
@@ -265,7 +265,7 @@
 			<span>Name</span>
 			<Helper ariaLabel="Reactor Name Help">
 				<div>The name uniquely identifies this Reactor as a node in the network.</div>
-				<div class="mt-1">A script can send messages to other nodes using this identifier.</div>
+				<div class="mt-1">An endpoint can send messages to other nodes using this identifier.</div>
 			</Helper>
 		</h3>
 		<Form on:submit={onNameSubmit}>
@@ -288,7 +288,7 @@
 			<i class="fa-solid fa-arrows-left-right me-2"></i>
 			<span>Working Mode</span>
 			<Helper ariaLabel="Working Mode Help">
-				<div><strong>Node</strong>: run local scripts and can use <code>Node.sendMessage</code> to communicate with other nodes.</div>
+				<div><strong>Node</strong>: run local endpoints and can use <code>Node.sendMessage</code> to communicate with other nodes.</div>
 				<div class="mt-1"><strong>Use EXCHANGE</strong>: connect this node to a remote EXCHANGE for message routing.</div>
 				<div class="mt-1"><strong>Exchange</strong>: run this Reactor as a central hub (like a router).</div>
 				<div class="mt-1">Exchange is used when nodes are on different networks, not on the same LAN.</div>
@@ -370,22 +370,22 @@
 											</summary>
 											<div style="opacity:0.7; margin-top:6px;">Connected: {node.connectedAt || '-'}</div>
 											<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
-											{#if Array.isArray(node.scripts) && node.scripts.length > 0}
+											{#if Array.isArray(node.endpoints) && node.endpoints.length > 0}
 												<div style="margin-top:6px; padding-left:8px; border-left:2px solid rgba(255,255,255,0.14);">
-													{#each node.scripts as script}
+													{#each node.endpoints as endpoint}
 														<div style="padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.06);">
-															<div><strong>{script.name || 'unnamed'}</strong></div>
+															<div><strong>{endpoint.name || 'unnamed'}</strong></div>
 															<div style="display:flex; align-items:center; gap:6px; opacity:0.78;">
-																<span>{script.uuid || '-'}</span>
-																<button type="button" class="btn-secondary" style="padding:1px 6px; font-size:0.9em;" on:click={() => copyNodeScriptUuid(script.uuid)}>{copiedScriptUuid && copiedScriptUuid === String(script.uuid || '').trim() ? 'Copied' : 'Copy'}</button>
+																<span>{endpoint.uuid || '-'}</span>
+																<button type="button" class="btn-secondary" style="padding:1px 6px; font-size:0.9em;" on:click={() => copyNodeEndpointUuid(endpoint.uuid)}>{copiedEndpointUuid && copiedEndpointUuid === String(endpoint.uuid || '').trim() ? 'Copied' : 'Copy'}</button>
 															</div>
-															<div style="opacity:0.68;">Triggers: {Array.isArray(script.triggers) && script.triggers.length > 0 ? script.triggers.join(', ') : '-'}</div>
-															<div style="opacity:0.68;">Enabled: {script.enabled ? 'yes' : 'no'} · Mutex: {script.mutex ? 'yes' : 'no'}</div>
+															<div style="opacity:0.68;">Triggers: {Array.isArray(endpoint.triggers) && endpoint.triggers.length > 0 ? endpoint.triggers.join(', ') : '-'}</div>
+															<div style="opacity:0.68;">Enabled: {endpoint.enabled ? 'yes' : 'no'} · Mutex: {endpoint.mutex ? 'yes' : 'no'}</div>
 														</div>
 													{/each}
 												</div>
 											{:else}
-												<div style="margin-top:6px; opacity:0.65;">No scripts exposed by this node</div>
+												<div style="margin-top:6px; opacity:0.65;">No endpoints exposed by this node</div>
 											{/if}
 										</details>
 									</div>
@@ -560,92 +560,6 @@
 					{/if}
 
 					{#if exchangeEnabled}
-						<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
-							<div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
-								<span class="detail-label">Remote Nodes ({linkedNodesTotal})</span>
-								<button type="button" class="btn-secondary" on:click={onRefreshLinkedNodes} disabled={linkedNodesLoading || !exchangeActive}>
-									<i class="fa-solid fa-rotate-right me-1"></i>{linkedNodesLoading ? 'Refreshing...' : 'Refresh'}
-								</button>
-							</div>
-							{#if !exchangeActive}
-								<div class="detail-value mt-2" style="opacity:0.65;">Connect to Exchange to load remote nodes</div>
-							{:else if linkedNodes.length === 0}
-								<div class="detail-value mt-2" style="opacity:0.65;">No remote nodes found (or discovery disabled on Exchange)</div>
-							{:else}
-								<div class="detail-value mt-2" style="max-height:220px; overflow:auto; font-size:0.78em;">
-									{#each linkedNodes as node}
-										<div style="padding:6px 0; border-bottom:1px dashed rgba(255,255,255,0.08);">
-											<details class="node-accordion-details">
-												<summary class="node-accordion-toggle">
-													<span class="node-accordion-title">
-														<strong>{node.name || 'unknown'}</strong>
-														{node.ip ? ` (${node.ip}${node.port ? `:${node.port}` : ''})` : ''}
-													</span>
-													<i class="fa-solid fa-chevron-down node-accordion-icon"></i>
-												</summary>
-												<div style="opacity:0.7; margin-top:6px;">Connected: {node.connectedAt || '-'}</div>
-												<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
-												{#if Array.isArray(node.scripts) && node.scripts.length > 0}
-													<div style="margin-top:6px; padding-left:8px; border-left:2px solid rgba(255,255,255,0.14);">
-														{#each node.scripts as script}
-															<div style="padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.06);">
-																<div><strong>{script.name || 'unnamed'}</strong></div>
-																<div style="display:flex; align-items:center; gap:6px; opacity:0.78;">
-																	<span>{script.uuid || '-'}</span>
-																	<button type="button" class="btn-secondary" style="padding:1px 6px; font-size:0.9em;" on:click={() => copyNodeScriptUuid(script.uuid)}>{copiedScriptUuid && copiedScriptUuid === String(script.uuid || '').trim() ? 'Copied' : 'Copy'}</button>
-																</div>
-																<div style="opacity:0.68;">Triggers: {Array.isArray(script.triggers) && script.triggers.length > 0 ? script.triggers.join(', ') : '-'}</div>
-																<div style="opacity:0.68;">Enabled: {script.enabled ? 'yes' : 'no'} · Mutex: {script.mutex ? 'yes' : 'no'}</div>
-															</div>
-														{/each}
-													</div>
-												{:else}
-													<div style="margin-top:6px; opacity:0.65;">No scripts exposed by this node</div>
-												{/if}
-											</details>
-										</div>
-									{/each}
-								</div>
-							{/if}
-						</div>
-
-						<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
-							<div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
-								<span class="detail-label">P2P Transport ({Array.isArray(p2pStatus?.sessions) ? p2pStatus.sessions.length : 0})</span>
-								<div style="display:flex; align-items:center; gap:8px;">
-									<span class="detail-value" style="font-size:0.78em; opacity:0.78;">
-										{p2pStatus?.iceServersConfigured ? 'ICE configured' : 'ICE not configured'}
-									</span>
-								</div>
-							</div>
-
-							{#if Array.isArray(p2pRemotePeers) && p2pRemotePeers.length > 0}
-								<div class="detail-value mt-2" style="font-size:0.78em; opacity:0.78;">Remote peers: {p2pRemotePeers.join(', ')}</div>
-							{:else if exchangeActive}
-								<div class="detail-value mt-2" style="font-size:0.78em; opacity:0.65;">No remote peers announced by Exchange yet</div>
-							{/if}
-
-							{#if !exchangeActive}
-								<div class="detail-value mt-2" style="opacity:0.65;">Connect to Exchange to start P2P signaling</div>
-							{:else if !Array.isArray(p2pStatus?.sessions) || p2pStatus.sessions.length === 0}
-								<div class="detail-value mt-2" style="opacity:0.65;">No active P2P sessions</div>
-							{:else}
-								<div class="detail-value mt-2" style="max-height:180px; overflow:auto; font-size:0.78em;">
-									{#each p2pStatus.sessions as session}
-										<div style="padding:6px 0; border-bottom:1px dashed rgba(255,255,255,0.08);">
-											<div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
-												<strong>{session.target || 'unknown'}</strong>
-												<span style="color:{p2pStateColor(session.state)}; font-weight:600;">{p2pStateLabel(session.state)}</span>
-											</div>
-											<div style="opacity:0.68;">Signal: {session.lastSignalType || '-'}</div>
-											{#if session.reason}
-												<div style="opacity:0.68;">Reason: {session.reason}</div>
-											{/if}
-										</div>
-									{/each}
-								</div>
-							{/if}
-						</div>
 					{/if}
 				</fieldset>
 			{/if}
@@ -715,7 +629,7 @@
 	<section class="detail-card settings-backup-card">
 		<h3><i class="fa-solid fa-box-archive me-2"></i>Backup</h3>
 		<div class="detail-value" style="font-size:0.82em; opacity:0.75; margin-bottom:10px;">
-			Export and import a full ZIP backup with projects and runtime configuration.
+			Export and import a full ZIP backup with endpoints and runtime configuration.
 		</div>
 		<div class="settings-backup-actions">
 			<button type="button" class="btn-secondary" on:click={onExportBackup}>
@@ -747,8 +661,8 @@
 			<i class="fa-solid fa-list-check me-2"></i>
 			<span>Message Queue</span>
 			<Helper ariaLabel="Message Queue Help">
-				<div>If a message cannot reach a target node by calling <code>Node.sendMessage()</code>, the message is not lost.</div>
-				<div class="mt-1">Payloads are stored in a temporary local queue and sent automatically when connectivity is restored.</div>
+				<div><code>Node.sendMessage(target, content, enqueueOnFail)</code> can queue payloads on delivery failure.</div>
+				<div class="mt-1">Queue fallback is enabled only when <code>enqueueOnFail</code> is set to <code>true</code>.</div>
 			</Helper>
 		</h3>
 		<div class="detail-value" style="font-size:0.82em; opacity:0.75; margin-bottom:10px;">

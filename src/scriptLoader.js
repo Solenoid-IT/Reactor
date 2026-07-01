@@ -6,7 +6,7 @@ const ts = require('typescript');
  * Transpiles TypeScript to CommonJS and loads as a module
  * Returns module exports
  */
-function loadScriptModule(tsFilePath, sourceCode, options = {}) {
+function loadEndpointModule(tsFilePath, sourceCode, options = {}) {
 	const transpiled = ts.transpileModule(sourceCode, {
 		compilerOptions: {
 			module: ts.ModuleKind.CommonJS,
@@ -41,4 +41,7 @@ function loadScriptModule(tsFilePath, sourceCode, options = {}) {
 	return moduleObject.exports;
 }
 
-module.exports = { loadScriptModule };
+module.exports = {
+	loadScriptModule: loadEndpointModule,
+	loadEndpointModule,
+};

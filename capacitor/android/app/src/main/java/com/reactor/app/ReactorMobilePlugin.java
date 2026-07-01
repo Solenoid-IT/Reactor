@@ -673,8 +673,8 @@ public class ReactorMobilePlugin extends Plugin {
                 .put("elapsedMs", System.currentTimeMillis() - startedAt);
     }
 
-    private File getProjectsDir() {
-        File projectsDir = new File(getContext().getFilesDir(), "projects");
+    private File getEndpointsDir() {
+        File projectsDir = new File(getContext().getFilesDir(), "endpoints");
         if (!projectsDir.exists()) {
             projectsDir.mkdirs();
         }
@@ -708,7 +708,7 @@ public class ReactorMobilePlugin extends Plugin {
 
     private List<File> getBackupSourceEntries() {
         return Arrays.asList(
-                getProjectsDir(),
+                getEndpointsDir(),
                 getWorkingModeFile(),
                 getReactorNameFile(),
                 getUiSettingsFile(),
@@ -772,7 +772,7 @@ public class ReactorMobilePlugin extends Plugin {
 
     private List<String> getAllowedBackupRoots() {
         return Arrays.asList(
-                "projects",
+                "endpoints",
                 "working-mode.json",
                 "name",
                 "ui-settings.json",
@@ -887,18 +887,18 @@ public class ReactorMobilePlugin extends Plugin {
         }
     }
 
-    private JSObject createExecutionStartEntry(String scriptName, String scriptPath, String scriptState, String scope, String trigger, String event) {
-        JSObject script = new JSObject();
-        script.put("name", scriptName);
-        script.put("path", scriptPath);
-        script.put("state", scriptState);
+    private JSObject createExecutionStartEntry(String endpointName, String endpointPath, String endpointState, String scope, String trigger, String event) {
+        JSObject endpoint = new JSObject();
+        endpoint.put("name", endpointName);
+        endpoint.put("path", endpointPath);
+        endpoint.put("state", endpointState);
 
         JSObject entry = new JSObject();
         entry.put("timestamp", Instant.now().toString());
-        entry.put("type", "SCRIPT_EXECUTION");
+        entry.put("type", "ENDPOINT_EXECUTION");
         entry.put("scope", scope);
         entry.put("phase", "START");
-        entry.put("script", script);
+        entry.put("endpoint", endpoint);
         entry.put("trigger", trigger);
         entry.put("event", event == null ? JSONObject.NULL : event);
         entry.put("expression", JSONObject.NULL);
@@ -910,14 +910,14 @@ public class ReactorMobilePlugin extends Plugin {
         return entry;
     }
 
-    private String detectScriptState(File scriptFile) {
+    private String detectEndpointState(File endpointFile) {
         try {
-            String source = readTextFile(scriptFile);
+            String source = readTextFile(endpointFile);
             String[] lines = source.split("\\r?\\n", -1);
             for (String line : lines) {
                 String trimmed = line.trim();
-                if (trimmed.startsWith("// @state")) {
-                    return trimmed.toUpperCase().contains("ENABLED") ? "ENABLED" : "DISABLED";
+                if (trimmed.startsWith("// @enabled")) {
+                    return trimmed.toUpperCase().contains("TRUE") ? "ENABLED" : "DISABLED";
                 }
             }
         } catch (Exception ignored) {
@@ -929,7 +929,7 @@ public class ReactorMobilePlugin extends Plugin {
     private boolean isAllowedPath(File target) {
         try {
             String canonicalTarget = target.getCanonicalPath();
-            String canonicalProjects = getProjectsDir().getCanonicalPath();
+            String canonicalProjects = getEndpointsDir().getCanonicalPath();
             String canonicalFiles = getContext().getFilesDir().getCanonicalPath();
 
             return canonicalTarget.startsWith(canonicalProjects + File.separator)
@@ -941,7 +941,7 @@ public class ReactorMobilePlugin extends Plugin {
         }
     }
 
-    private File resolveScriptFileFromProject(File projectDir) {
+    private File resolveEndpointFileFromProject(File projectDir) {
         File bootTs = new File(projectDir, "boot.ts");
         if (bootTs.exists()) {
             return bootTs;
@@ -955,49 +955,50 @@ public class ReactorMobilePlugin extends Plugin {
         return null;
     }
 
-    private JSObject buildScriptInfo(File scriptFile, String projectName) {
-        JSObject script = new JSObject();
-        script.put("name", projectName + ".ts");
-        script.put("path", scriptFile.getAbsolutePath());
-        File uuidFile = new File(scriptFile.getParentFile(), "uuid");
-        String scriptId = "";
+    private JSObject buildEndpointInfo(File endpointFile, String projectName) {
+        JSObject endpoint = new JSObject();
+        endpoint.put("name", projectName + ".ts");
+        endpoint.put("path", endpointFile.getAbsolutePath());
+        File uuidFile = new File(endpointFile.getParentFile(), "uuid");
+        String endpointId = "";
         try {
             if (uuidFile.exists()) {
-                scriptId = readTextFile(uuidFile).trim().toLowerCase();
+                endpointId = readTextFile(uuidFile).trim().toLowerCase();
             }
         } catch (Exception ignored) {
-            scriptId = "";
+            endpointId = "";
         }
-        script.put("scriptId", scriptId.isEmpty() ? null : scriptId);
-        script.put("eventLogPath", new File(scriptFile.getParentFile(), "activity.log").getAbsolutePath());
-        script.put("state", "DISABLED");
-        script.put("enabled", false);
-        script.put("schedule", "");
-        script.put("events", new JSArray());
-        script.put("messageSenders", new JSArray());
-        script.put("messageFromAnySender", false);
-        script.put("mutex", false);
-        script.put("watch", new JSArray());
+        endpoint.put("endpointId", endpointId.isEmpty() ? null : endpointId);
+        endpoint.put("eventLogPath", new File(endpointFile.getParentFile(), "activity.log").getAbsolutePath());
+        endpoint.put("state", "DISABLED");
+        endpoint.put("enabled", false);
+        endpoint.put("schedule", "");
+        endpoint.put("events", new JSArray());
+        endpoint.put("messageSenders", new JSArray());
+        endpoint.put("messageFromAnySender", false);
+        endpoint.put("mutex", false);
+        endpoint.put("watch", new JSArray());
 
         try {
-            List<String> lines = Files.readAllLines(scriptFile.toPath(), StandardCharsets.UTF_8);
+            List<String> lines = Files.readAllLines(endpointFile.toPath(), StandardCharsets.UTF_8);
             for (String rawLine : lines) {
                 String line = rawLine.trim();
                 if (!line.startsWith("// @")) {
                     continue;
                 }
 
-                if (line.startsWith("// @state")) {
-                    boolean enabled = line.toUpperCase().contains("ENABLED");
-                    script.put("enabled", enabled);
-                    script.put("state", enabled ? "ENABLED" : "DISABLED");
+                if (line.startsWith("// @enabled")) {
+                    boolean enabled = line.toUpperCase().contains("TRUE");
+                    endpoint.put("enabled", enabled);
+                    endpoint.put("state", enabled ? "ENABLED" : "DISABLED");
                 } else if (line.startsWith("// @mutex")) {
-                    boolean mutex = line.toUpperCase().contains("ON");
-                    script.put("mutex", mutex);
+                    String mutexUpper = line.toUpperCase();
+                    boolean mutex = mutexUpper.contains("TRUE");
+                    endpoint.put("mutex", mutex);
                 } else if (line.startsWith("// @schedule")) {
-                    script.put("schedule", line.replace("// @schedule", "").trim());
+                    endpoint.put("schedule", line.replace("// @schedule", "").trim());
                 } else if (line.startsWith("// @watch")) {
-                    JSArray watch = (JSArray) script.get("watch");
+                    JSArray watch = (JSArray) endpoint.get("watch");
                     watch.put(line.replace("// @watch", "").trim());
                 }
             }
@@ -1005,14 +1006,14 @@ public class ReactorMobilePlugin extends Plugin {
             // Keep defaults if parsing fails.
         }
 
-        return script;
+        return endpoint;
     }
 
     @PluginMethod
-    public void getScriptsInfo(PluginCall call) {
+    public void getEndpointsInfo(PluginCall call) {
         try {
-            File projectsDir = getProjectsDir();
-            JSArray scripts = new JSArray();
+            File projectsDir = getEndpointsDir();
+            JSArray endpoints = new JSArray();
             File[] children = projectsDir.listFiles();
             if (children != null) {
                 for (File child : children) {
@@ -1020,18 +1021,18 @@ public class ReactorMobilePlugin extends Plugin {
                         continue;
                     }
 
-                    File scriptFile = resolveScriptFileFromProject(child);
-                    if (scriptFile == null) {
+                    File endpointFile = resolveEndpointFileFromProject(child);
+                    if (endpointFile == null) {
                         continue;
                     }
 
-                    scripts.put(buildScriptInfo(scriptFile, child.getName()));
+                    endpoints.put(buildEndpointInfo(endpointFile, child.getName()));
                 }
             }
 
             JSObject result = new JSObject();
             result.put("path", projectsDir.getAbsolutePath());
-            result.put("scripts", scripts);
+            result.put("endpoints", endpoints);
             call.resolve(result);
         } catch (Exception e) {
             call.reject(e.getMessage());
@@ -1039,9 +1040,9 @@ public class ReactorMobilePlugin extends Plugin {
     }
 
     @PluginMethod
-    public void createScriptFile(PluginCall call) {
+    public void createEndpointFile(PluginCall call) {
         String templateKey = call.getString("templateKey", "blank");
-        String requestedName = call.getString("scriptName", "");
+        String requestedName = call.getString("endpointName", "");
 
         try {
             String safeTemplate = templateKey.replaceAll("[^a-zA-Z0-9_-]", "");
@@ -1052,9 +1053,9 @@ public class ReactorMobilePlugin extends Plugin {
                     .replaceAll("[._-]+$", "");
 
             String projectName = safeRequestedName.isEmpty()
-                    ? "script-" + safeTemplate + "-" + System.currentTimeMillis()
+                    ? "endpoint-" + safeTemplate + "-" + System.currentTimeMillis()
                     : safeRequestedName;
-            File projectDir = new File(getProjectsDir(), projectName);
+            File projectDir = new File(getEndpointsDir(), projectName);
             if (!projectDir.exists() && !projectDir.mkdirs()) {
                 throw new IOException("unable to create project directory");
             }
@@ -1064,16 +1065,16 @@ public class ReactorMobilePlugin extends Plugin {
             String source;
             switch (templateKey) {
                 case "schedule":
-                    source = "// @state DISABLED\n// @mutex OFF\n// @schedule EVERY 30 SECOND\n\nimport { log } from 'core';\nimport type { Context } from 'core';\n\nexport async function run(ctx: Context) {\n\tawait log('scheduled script tick');\n}\n";
+                    source = "// @enabled FALSE\n// @mutex FALSE\n// @schedule EVERY 30 SECOND\n\nimport { log } from 'core';\nimport type { Context } from 'core';\n\nexport async function run(ctx: Context) {\n\tawait log('scheduled endpoint tick');\n}\n";
                     break;
                 case "event":
-                    source = "// @state DISABLED\n// @mutex ON\n// @on MESSAGE\n\nimport { log } from 'core';\nimport type { Context } from 'core';\n\nexport async function run(ctx: Context) {\n\tawait log('event received');\n}\n";
+                    source = "// @enabled FALSE\n// @mutex TRUE\n// @on MESSAGE\n\nimport { log } from 'core';\nimport type { Context } from 'core';\n\nexport async function run(ctx: Context) {\n\tawait log('event received');\n}\n";
                     break;
                 case "watch":
-                    source = "// @state DISABLED\n// @mutex ON\n// @watch ./inbox [file:created, file:moved]\n\nimport { log } from 'core';\nimport type { Context } from 'core';\n\nexport async function run(ctx: Context) {\n\tawait log('watch event: ' + (ctx.watchPath || ''));\n}\n";
+                    source = "// @enabled FALSE\n// @mutex TRUE\n// @watch ./inbox [file:created, file:moved]\n\nimport { log } from 'core';\nimport type { Context } from 'core';\n\nexport async function run(ctx: Context) {\n\tawait log('watch event: ' + (ctx.watchPath || ''));\n}\n";
                     break;
                 default:
-                    source = "// @state DISABLED\n// @mutex OFF\n\nimport { log } from 'core';\nimport type { Context } from 'core';\n\nexport async function run(ctx: Context) {\n\tawait log('new blank script');\n}\n";
+                    source = "// @enabled FALSE\n// @mutex FALSE\n\nimport { log } from 'core';\nimport type { Context } from 'core';\n\nexport async function run(ctx: Context) {\n\tawait log('new blank endpoint');\n}\n";
                     break;
             }
 
@@ -1084,7 +1085,7 @@ public class ReactorMobilePlugin extends Plugin {
 
             String verifyContent = readTextFile(bootFile);
             if (verifyContent.trim().isEmpty()) {
-                throw new IOException("script template content not written");
+                throw new IOException("endpoint template content not written");
             }
 
             JSObject result = new JSObject();
@@ -1099,7 +1100,7 @@ public class ReactorMobilePlugin extends Plugin {
     }
 
     @PluginMethod
-    public void readScriptContent(PluginCall call) {
+    public void readEndpointContent(PluginCall call) {
         String filePath = call.getString("filePath");
         if (filePath == null || filePath.isEmpty()) {
             call.resolve(new JSObject().put("ok", false).put("error", "invalid request"));
@@ -1123,7 +1124,7 @@ public class ReactorMobilePlugin extends Plugin {
                 if (lower.endsWith(".log")) {
                     writeTextFile(file, "");
                 } else {
-                    call.resolve(new JSObject().put("ok", false).put("error", "script file not found"));
+                    call.resolve(new JSObject().put("ok", false).put("error", "endpoint file not found"));
                     return;
                 }
             }
@@ -1139,7 +1140,7 @@ public class ReactorMobilePlugin extends Plugin {
     }
 
     @PluginMethod
-    public void saveScriptContent(PluginCall call) {
+    public void saveEndpointContent(PluginCall call) {
         String filePath = call.getString("filePath");
         String content = call.getString("content", "");
 
@@ -1177,8 +1178,8 @@ public class ReactorMobilePlugin extends Plugin {
             if (filePath == null || filePath.isEmpty()) {
                 logFile = getGlobalLogFile();
             } else {
-                File scriptFile = new File(filePath);
-                File parent = scriptFile.getParentFile();
+                File endpointFile = new File(filePath);
+                File parent = endpointFile.getParentFile();
                 if (parent == null) {
                     call.resolve(new JSObject().put("ok", false).put("error", "activity.log path unavailable"));
                     return;
@@ -1215,8 +1216,8 @@ public class ReactorMobilePlugin extends Plugin {
             if (filePath == null || filePath.isEmpty()) {
                 logFile = getGlobalLogFile();
             } else {
-                File scriptFile = new File(filePath);
-                File parent = scriptFile.getParentFile();
+                File endpointFile = new File(filePath);
+                File parent = endpointFile.getParentFile();
                 if (parent == null) {
                     call.resolve(new JSObject().put("ok", false).put("error", "activity.log path unavailable"));
                     return;
@@ -1237,13 +1238,13 @@ public class ReactorMobilePlugin extends Plugin {
     }
 
     @PluginMethod
-    public void renameScriptFile(PluginCall call) {
+    public void renameEndpointFile(PluginCall call) {
         String filePath = call.getString("filePath", "");
         String nextName = call.getString("nextName", "");
 
         try {
-            File scriptFile = new File(filePath);
-            if (!isAllowedPath(scriptFile)) {
+            File endpointFile = new File(filePath);
+            if (!isAllowedPath(endpointFile)) {
                 call.resolve(new JSObject().put("ok", false).put("error", "path not allowed"));
                 return;
             }
@@ -1255,35 +1256,35 @@ public class ReactorMobilePlugin extends Plugin {
                     .replaceAll("[._-]+$", "");
 
             if (safeNextName.isEmpty()) {
-                call.resolve(new JSObject().put("ok", false).put("error", "invalid script name"));
+                call.resolve(new JSObject().put("ok", false).put("error", "invalid endpoint name"));
                 return;
             }
 
-            File projectDir = scriptFile.getParentFile();
+            File projectDir = endpointFile.getParentFile();
             if (projectDir == null || !projectDir.exists()) {
-                call.resolve(new JSObject().put("ok", false).put("error", "script project not found"));
+                call.resolve(new JSObject().put("ok", false).put("error", "endpoint project not found"));
                 return;
             }
 
-            File projectsDir = getProjectsDir();
+            File projectsDir = getEndpointsDir();
             File destinationDir = new File(projectsDir, safeNextName);
             if (destinationDir.exists()) {
-                call.resolve(new JSObject().put("ok", false).put("error", "script project already exists"));
+                call.resolve(new JSObject().put("ok", false).put("error", "endpoint project already exists"));
                 return;
             }
 
             Files.move(projectDir.toPath(), destinationDir.toPath(), StandardCopyOption.ATOMIC_MOVE);
 
-            File movedScript = new File(destinationDir, scriptFile.getName());
-            if (!movedScript.exists()) {
+            File movedEndpoint = new File(destinationDir, endpointFile.getName());
+            if (!movedEndpoint.exists()) {
                 File bootTs = new File(destinationDir, "boot.ts");
                 File bootJs = new File(destinationDir, "boot.js");
-                movedScript = bootTs.exists() ? bootTs : bootJs;
+                movedEndpoint = bootTs.exists() ? bootTs : bootJs;
             }
 
             JSObject result = new JSObject();
             result.put("ok", true);
-            result.put("path", movedScript.getAbsolutePath());
+            result.put("path", movedEndpoint.getAbsolutePath());
             result.put("name", safeNextName + ".ts");
             call.resolve(result);
         } catch (Exception e) {
@@ -1292,19 +1293,19 @@ public class ReactorMobilePlugin extends Plugin {
     }
 
     @PluginMethod
-    public void deleteScriptFile(PluginCall call) {
+    public void deleteEndpointFile(PluginCall call) {
         String filePath = call.getString("filePath", "");
 
         try {
-            File scriptFile = new File(filePath);
-            if (!isAllowedPath(scriptFile)) {
+            File endpointFile = new File(filePath);
+            if (!isAllowedPath(endpointFile)) {
                 call.resolve(new JSObject().put("ok", false).put("error", "path not allowed"));
                 return;
             }
 
-            File projectDir = scriptFile.getParentFile();
+            File projectDir = endpointFile.getParentFile();
             if (projectDir == null || !projectDir.exists()) {
-                call.resolve(new JSObject().put("ok", false).put("error", "script project not found"));
+                call.resolve(new JSObject().put("ok", false).put("error", "endpoint project not found"));
                 return;
             }
 
@@ -1316,72 +1317,73 @@ public class ReactorMobilePlugin extends Plugin {
     }
 
     @PluginMethod
-    public void toggleScriptDirective(PluginCall call) {
+    public void toggleEndpointDirective(PluginCall call) {
         String filePath = call.getString("filePath", "");
         String directive = String.valueOf(call.getString("directive", "")).trim().toLowerCase();
 
         try {
-            File scriptFile = new File(filePath);
-            if (!isAllowedPath(scriptFile)) {
+            File endpointFile = new File(filePath);
+            if (!isAllowedPath(endpointFile)) {
                 call.resolve(new JSObject().put("ok", false).put("error", "path not allowed"));
                 return;
             }
 
-            String lower = scriptFile.getName().toLowerCase();
+            String lower = endpointFile.getName().toLowerCase();
             if (!(lower.endsWith(".ts") || lower.endsWith(".js"))) {
                 call.resolve(new JSObject().put("ok", false).put("error", "unsupported file type"));
                 return;
             }
 
-            String source = readTextFile(scriptFile);
+            String source = readTextFile(endpointFile);
             String[] lines = source.split("\\r?\\n", -1);
             boolean found = false;
             String nextValue;
 
             if ("state".equals(directive)) {
-                nextValue = "ENABLED";
+                nextValue = "TRUE";
                 for (int i = 0; i < lines.length; i++) {
                     String trimmed = lines[i].trim();
-                    if (trimmed.startsWith("// @state")) {
+                    if (trimmed.startsWith("// @enabled")) {
                         found = true;
-                        boolean enabled = trimmed.toUpperCase().contains("ENABLED");
-                        nextValue = enabled ? "DISABLED" : "ENABLED";
-                        lines[i] = "// @state " + nextValue;
+                        boolean enabled = trimmed.toUpperCase().contains("TRUE");
+                        nextValue = enabled ? "FALSE" : "TRUE";
+                        lines[i] = "// @enabled " + nextValue;
                         break;
                     }
                 }
                 if (!found) {
-                    source = "// @state ENABLED\n" + source;
-                    nextValue = "ENABLED";
+                    source = "// @enabled TRUE\n" + source;
+                    nextValue = "TRUE";
                 } else {
                     source = String.join("\n", lines);
                 }
 
-                writeTextFile(scriptFile, source);
+                writeTextFile(endpointFile, source);
                 call.resolve(new JSObject().put("ok", true).put("directive", "state").put("value", nextValue));
                 return;
             }
 
             if ("mutex".equals(directive)) {
-                nextValue = "ON";
+                nextValue = "TRUE";
                 for (int i = 0; i < lines.length; i++) {
                     String trimmed = lines[i].trim();
                     if (trimmed.startsWith("// @mutex")) {
                         found = true;
-                        boolean on = trimmed.toUpperCase().contains("ON");
-                        nextValue = on ? "OFF" : "ON";
+                        String mutexUpper = trimmed.toUpperCase();
+                        boolean on = mutexUpper.contains("TRUE");
+                        nextValue = on ? "FALSE" : "TRUE";
                         lines[i] = "// @mutex " + nextValue;
                         break;
                     }
                 }
                 if (!found) {
-                    source = "// @mutex ON\n" + source;
-                    nextValue = "ON";
+                    source = "// @mutex TRUE\n" + source;
+                    nextValue = "TRUE";
                 } else {
                     source = String.join("\n", lines);
                 }
 
-                writeTextFile(scriptFile, source);
+                writeTextFile(endpointFile, source);
                 call.resolve(new JSObject().put("ok", true).put("directive", "mutex").put("value", nextValue));
                 return;
             }
@@ -1393,7 +1395,7 @@ public class ReactorMobilePlugin extends Plugin {
     }
 
     @PluginMethod
-    public void runScriptNow(PluginCall call) {
+    public void runEndpointNow(PluginCall call) {
         String filePath = call.getString("filePath", "");
 
         if (filePath == null || filePath.isEmpty()) {
@@ -1402,26 +1404,26 @@ public class ReactorMobilePlugin extends Plugin {
         }
 
         try {
-            File scriptFile = new File(filePath);
-            if (!isAllowedPath(scriptFile)) {
+            File endpointFile = new File(filePath);
+            if (!isAllowedPath(endpointFile)) {
                 call.resolve(new JSObject().put("ok", false).put("error", "path not allowed"));
                 return;
             }
 
-            String lower = scriptFile.getName().toLowerCase();
+            String lower = endpointFile.getName().toLowerCase();
             if (!(lower.endsWith(".ts") || lower.endsWith(".js"))) {
                 call.resolve(new JSObject().put("ok", false).put("error", "unsupported file type"));
                 return;
             }
 
-            if (!scriptFile.exists()) {
-                call.resolve(new JSObject().put("ok", false).put("error", "script file not found"));
+            if (!endpointFile.exists()) {
+                call.resolve(new JSObject().put("ok", false).put("error", "endpoint file not found"));
                 return;
             }
 
-            File projectDir = scriptFile.getParentFile();
+            File projectDir = endpointFile.getParentFile();
             if (projectDir == null) {
-                call.resolve(new JSObject().put("ok", false).put("error", "invalid script project"));
+                call.resolve(new JSObject().put("ok", false).put("error", "invalid endpoint project"));
                 return;
             }
 
@@ -1431,12 +1433,12 @@ public class ReactorMobilePlugin extends Plugin {
                 return;
             }
 
-            String scriptName = projectDir.getName();
-            String scriptState = detectScriptState(scriptFile);
+            String endpointName = projectDir.getName();
+                String endpointState = detectEndpointState(endpointFile);
             JSObject projectEntry = createExecutionStartEntry(
-                    scriptName,
-                    scriptFile.getAbsolutePath(),
-                    scriptState,
+                    endpointName,
+                    endpointFile.getAbsolutePath(),
+                    endpointState,
                     "PROJECT",
                     "MANUAL_TEST",
                     "ON_DEMAND"
@@ -1446,9 +1448,9 @@ public class ReactorMobilePlugin extends Plugin {
             File globalLogFile = getGlobalLogFile();
             if (isAllowedPath(globalLogFile) && !globalLogFile.getAbsolutePath().equals(logFile.getAbsolutePath())) {
                 JSObject globalEntry = createExecutionStartEntry(
-                        scriptName,
-                        scriptFile.getAbsolutePath(),
-                        scriptState,
+                        endpointName,
+                        endpointFile.getAbsolutePath(),
+                    endpointState,
                         "GLOBAL",
                         "MANUAL_TEST",
                         "ON_DEMAND"
@@ -1459,7 +1461,7 @@ public class ReactorMobilePlugin extends Plugin {
             JSObject result = new JSObject();
             result.put("ok", true);
             result.put("started", true);
-            result.put("script", scriptName);
+            result.put("endpoint", endpointName);
             result.put("eventLogPath", logFile.getAbsolutePath());
             call.resolve(result);
         } catch (Exception e) {
@@ -1766,18 +1768,12 @@ public class ReactorMobilePlugin extends Plugin {
 
             JSONArray parsedNodes = parsed.optJSONArray("nodes");
             JSArray filteredNodes = new JSArray();
-            String selfName = getConfiguredReactorName().trim().toLowerCase();
             int total = 0;
 
             if (parsedNodes != null) {
                 for (int index = 0; index < parsedNodes.length(); index += 1) {
                     JSONObject node = parsedNodes.optJSONObject(index);
                     if (node == null) {
-                        continue;
-                    }
-
-                    String nodeName = node.optString("name", "").trim().toLowerCase();
-                    if (!selfName.isEmpty() && selfName.equals(nodeName)) {
                         continue;
                     }
 
@@ -1956,7 +1952,7 @@ public class ReactorMobilePlugin extends Plugin {
     }
 
     @PluginMethod
-    public void requestRemoteScriptsP2P(PluginCall call) {
+    public void requestRemoteEndpointsP2P(PluginCall call) {
         String target = call.getString("target", "");
         long timeoutMs = call.getLong("timeoutMs", 8000L);
         JSObject workingMode = readWorkingModeConfig();
@@ -1967,7 +1963,7 @@ public class ReactorMobilePlugin extends Plugin {
         }
 
         AndroidP2PWebRtcManager.RelayConfig relayConfig = AndroidP2PWebRtcManager.fromWorkingMode(workingMode);
-        JSObject result = nativeP2PManager.requestRemoteScripts(target, relayConfig, timeoutMs);
+        JSObject result = nativeP2PManager.requestRemoteEndpoints(target, relayConfig, timeoutMs);
         call.resolve(result);
     }
 

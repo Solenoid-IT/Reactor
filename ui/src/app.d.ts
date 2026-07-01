@@ -1,21 +1,21 @@
 declare global {
 	interface Window {
 		reactor?: {
-			getScriptsInfo?: () => Promise<any>;
+			getEndpointsInfo?: () => Promise<any>;
 			getUiSettings?: () => Promise<any>;
 			stopBackgroundProcess?: () => Promise<any>;
-			openScriptsFolder?: () => Promise<any>;
-			openScriptFile?: (filePath: string) => Promise<any>;
-			readScriptContent?: (filePath: string) => Promise<any>;
-			saveScriptContent?: (filePath: string, content: string) => Promise<any>;
-			resolveEventLogPath?: (filePath?: string) => Promise<any>;
+			openEndpointsFolder?: () => Promise<any>;
+			openEndpointFile?: (filePath: string) => Promise<any>;
+			readEndpointContent?: (filePath: string) => Promise<any>;
+			saveEndpointContent?: (filePath: string, content: string) => Promise<any>;
+			resolveEndpointLogPath?: (filePath?: string) => Promise<any>;
 			pickDefaultProgram?: () => Promise<any>;
-			runScriptNow?: (filePath: string) => Promise<any>;
-			createScriptFile?: (templateKey: string, scriptName?: string) => Promise<any>;
-			renameScriptFile?: (filePath: string, nextName: string) => Promise<any>;
-			confirmDeleteScript?: (scriptName: string) => Promise<any>;
-			deleteScriptFile?: (filePath: string) => Promise<any>;
-			toggleScriptDirective?: (filePath: string, directive: string) => Promise<any>;
+			runEndpointNow?: (filePath: string) => Promise<any>;
+			createEndpointFile?: (templateKey: string, scriptName?: string) => Promise<any>;
+			renameEndpointFile?: (filePath: string, nextName: string) => Promise<any>;
+			confirmDeleteEndpoint?: (scriptName: string) => Promise<any>;
+			deleteEndpointFile?: (filePath: string) => Promise<any>;
+			toggleEndpointDirective?: (filePath: string, directive: string) => Promise<any>;
 			openEventLog?: (filePath: string) => Promise<any>;
 			clearEventLog?: (filePath: string) => Promise<any>;
 			getHttpServerConfig?: () => Promise<any>;
@@ -31,6 +31,7 @@ declare global {
 			clearMessageQueue?: () => Promise<any>;
 			exportBackup?: () => Promise<any>;
 			importBackup?: () => Promise<any>;
+			requestRemoteEndpointsP2P?: (target: string, timeoutMs: number) => Promise<any>;
 		};
 	}
 }

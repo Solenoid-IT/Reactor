@@ -4,22 +4,22 @@
   <img src="https://www.solenoid.it/cdn/logo/Reactor.jpg" alt="Reactor Logo" height="400" />
 </p>
 
-Reactor is an agnostic platform runtime for script execution (manager and runner).
+Reactor is an agnostic platform runtime for endpoint execution (manager and runner).
 
 Slogan: Same code everywhere.
 
 Core value:
-- one language (TypeScript) for script automation across desktop, mobile, and server
-- one trigger model (@schedule, @on, @watch) across all platforms
+- one language (TypeScript) for endpoint automation across desktop, mobile, and server
+- one trigger model (@on TYPE PARAMS) across all platforms
 
-Scripts are loaded from an external, user-specific folder and can be triggered by:
-- schedules using @schedule
-- runtime events using @on
-- file system changes using @watch
-- node-to-node messages using @on MESSAGE(...)
+Endpoints are loaded from an external, user-specific folder and can be triggered by:
+- schedules using @on SCHEDULE "..."
+- runtime events using @on EVENT_NAME
+- file system changes using @on WATCH "..."
+- node-to-node messages using @on MESSAGE [sender_a,sender_b]
 
-Each script also supports:
-- @state for enable/disable
+Each endpoint also supports:
+- @enabled for enable/disable
 - @mutex for concurrency control
 
 ## Requirements
@@ -115,10 +115,10 @@ Daemon CLI commands:
 ```bash
 npm run daemon:list
 npm run daemon:status
-npm run daemon:run -- "script-name"
+npm run daemon:run -- "endpoint-name"
 npm run daemon:stop
-node daemonctl.js test "script-name"
-node daemonctl.js delete "script-name"
+node daemonctl.js test "endpoint-name"
+node daemonctl.js delete "endpoint-name"
 node daemonctl.js set-name "my-reactor"
 node daemonctl.js set-port 7071
 node daemonctl.js set-exchange exchange 7070 --token "<token>" --discovery
@@ -135,7 +135,7 @@ npm run daemon:run -- watch.ts
 ### Daemon Environment Variables
 
 - REACTOR_DATA_DIR: base data directory for daemon runtime
-- REACTOR_SCRIPTS_DIR: scripts directory override
+- REACTOR_ENDPOINTS_DIR: endpoints directory override
 - REACTOR_EVENT_LOG_PATH: global activity log override
 - REACTOR_DAEMON_SOCKET: daemon control socket override
 
@@ -196,22 +196,22 @@ sudo journalctl -u reactor -f
 
 If you change paths or user, update WorkingDirectory, ExecStart, User, Group, and REACTOR_DATA_DIR in reactor.service.
 
-## External Scripts Folder (Post-build Behavior)
+## External Endpoints Folder (Post-build Behavior)
 
-Scripts are loaded only from an external user-specific folder.
+Endpoints are loaded only from an external user-specific folder.
 
-Scripts directory by OS:
-- macOS: ~/Library/Application Support/Reactor/projects
-- Windows: %AppData%\Reactor\projects
-- Linux: ~/.config/Reactor/projects
+Endpoints directory by OS:
+- macOS: ~/Library/Application Support/Reactor/endpoints
+- Windows: %AppData%\Reactor\endpoints
+- Linux: ~/.config/Reactor/endpoints
 
 Production update workflow:
 
-1. Create external scripts folder on target machine
+1. Create external endpoints folder on target machine
 2. Add .ts files to that folder
 3. Restart Reactor
 
-No app rebuild is required for script-only updates.
+No app rebuild is required for endpoint-only updates.
 
 ## Project Structure
 
@@ -219,44 +219,61 @@ No app rebuild is required for script-only updates.
 - daemon.js: headless daemon bootstrap
 - daemonctl.js: CLI client for daemon control
 - src/: runtime, parser, metadata, and UI modules
-- scripts/: demo scripts (not loaded automatically at runtime)
+- endpoints/: demo endpoints (not loaded automatically at runtime)
 - activity.log: persistent execution log (JSONL)
 
 ## Directive Reference
 
 Canonical header order:
 
-1. @state
+1. @enabled
 2. @mutex
 3. @on
-4. @schedule
-5. @watch
 
-Note: you do not need all directives. When UI rewrites headers (ENABLED/MUTEX toggles), it preserves this order.
+Note: you do not need all directives. When UI rewrites headers (enabled/mutex toggles), it preserves this order.
 
-### @state
+### @enabled
 
 Values:
-- @state ENABLED
-- @state DISABLED
+- @enabled TRUE
+- @enabled FALSE
 
 Rules:
-- default is DISABLED
-- DISABLED scripts are loaded but not registered for schedule/event/watch execution
+- default is FALSE
+- FALSE endpoints are loaded but not registered for schedule/event/watch execution
 
 ### @mutex
 
 Values:
-- @mutex ON
-- @mutex OFF
+- @mutex TRUE
+- @mutex FALSE
 
 Rules:
-- default is OFF
-- ON prevents concurrent runs of the same script
+- default is FALSE
+- TRUE prevents concurrent runs of the same endpoint
 
-### @schedule
+### @on
 
-Supported formats:
+Canonical syntax:
+- @on TYPE PARAMS
+
+Examples:
+- @on MESSAGE
+- @on MESSAGE [sender_1,sender_2]
+- @on STREAM
+- @on STREAM [sender_3]
+- @on STREAMEND
+- @on STREAMEND [sender_4]
+- @on SCHEDULE "EVERY 7 HOUR"
+- @on WATCH "/my/custom/path" [dir:created,file:created]
+- @on BOOT
+- @on NET_CHANGE
+- @on NET_DOWN
+- @on NET_UP
+- @on WIFI_ON
+- @on WIFI_OFF
+
+SCHEDULE expression formats:
 - EVERY N SECOND
 - EVERY N SECONDS
 - EVERY N MINUTE
@@ -264,23 +281,7 @@ Supported formats:
 - EVERY N HOUR
 - EVERY N HOURS
 
-Example:
-
-```ts
-// @schedule EVERY 30 SECOND
-```
-
-### @on
-
-Supported formats:
-- @on EVENT_A, EVENT_B, EVENT_C
-- @on EVENT_A EVENT_B EVENT_C
-- @on MESSAGE
-- @on MESSAGE(sender_1)
-- @on MESSAGE(10.20.43.20)
-- @on MESSAGE(10.20.43.20:7071, sender_2)
-
-Supported events:
+Supported event types:
 - BOOT
 - WIFI_ON
 - WIFI_OFF
@@ -288,25 +289,30 @@ Supported events:
 - NET_DOWN
 - NET_CHANGE
 - MESSAGE
+- STREAM
+- STREAMEND
+- SCHEDULE
+- WATCH
 
 MESSAGE sender filter rules:
 - @on MESSAGE receives messages from all senders
-- @on MESSAGE(R1) receives only from sender R1
-- @on MESSAGE(R1,R2) receives only from listed senders
+- @on MESSAGE [R1] receives only from sender R1
+- @on MESSAGE [R1,R2] receives only from listed senders
 - sender can be reactor name or host[:port]
 - host without port uses default 7070
 
 MESSAGE target rules:
-- `Node.sendMessage(target, content)` accepts `target=node_name` or `target=node_name/script_id`
+- `Node.sendMessage(target, content, enqueueOnFail = false)` accepts `target=node_name` or `target=node_name/endpoint_id`
 - `node_name` delivers to MESSAGE listeners on that node as before
-- `node_name/script_id` delivers only to the project whose root contains file `uuid` with that UUID v4 value
-- New script projects automatically create a root file named `uuid`
+- `node_name/endpoint_id` delivers only to the endpoint project whose root contains file `uuid` with that UUID v4 value
+- New endpoint projects automatically create a root file named `uuid`
 
 Message transport notes:
-- import { Node } from 'core' then call Node.sendMessage(target, content)
+- import { Node } from 'core' then call Node.sendMessage(target, content, enqueueOnFail)
 - request header Reactor-Name contains current node name
-- request headers may also include Reactor-Target-Node and Reactor-Target-Script-Id when the message is script-targeted
+- request headers may also include Reactor-Target-Node and Reactor-Target-Endpoint-Id when the message is endpoint-targeted
 - content supports string, JSON object, and binary payloads
+- when `enqueueOnFail` is TRUE, failed deliveries are queued and retried later; when FALSE, the call fails immediately
 
 Boot/network behavior:
 - On bootstrap, a coherent initial connectivity pair is emitted immediately
@@ -320,16 +326,14 @@ NET_CHANGE behavior:
 - Android falls back to a lightweight periodic poll only when the system callback is unavailable
 - Snapshot fields are best-effort and may include `online`, `primaryInterface`, `primaryAddress`, `subnet`, `gateway`, `transport`, `signal`, and `interfaces`
 
-### @watch
-
-Supported syntax:
-- @watch /my/folder
-- @watch /my/folder [file:created, file:moved, dir:deleted]
+WATCH syntax:
+- @on WATCH "/my/folder"
+- @on WATCH "/my/folder" [file:created, file:moved, dir:deleted]
 
 Rules:
 - Without listener pseudo-array, all listeners are enabled
 - With listener pseudo-array, only listed listeners are enabled
-- Absolute and relative paths are supported (relative paths resolve from script folder)
+- Absolute and relative paths are supported (relative paths resolve from endpoint folder)
 
 Available listeners:
 - file:created
@@ -343,29 +347,29 @@ Available listeners:
 Complete header example:
 
 ```ts
-// @state ENABLED
-// @mutex ON
+// @enabled TRUE
+// @mutex TRUE
 // @on BOOT
-// @schedule EVERY 30 SECOND
-// @watch /tmp/inbox [file:created, file:moved]
+// @on SCHEDULE "EVERY 30 SECOND"
+// @on WATCH "/tmp/inbox" [file:created, file:moved]
 ```
 
 HTTP server notes:
 - Reactor starts an internal HTTP server for health and message dispatch
-- `POST /message` is used by `@on MESSAGE(...)`
+- `POST /message` is used by `@on MESSAGE` and `@on MESSAGE [sender_a,sender_b]`
 - Default port: 7070
 - Port can be configured at runtime (UI bridge) or with environment variable REACTOR_HTTP_PORT
 
-## Script Contract
+## Endpoint Contract
 
-Each script must export run or default function.
+Each endpoint must export run or default function.
 
 Minimal example:
 
 ```ts
-// @state ENABLED
-// @mutex OFF
-// @schedule EVERY 30 SECOND
+// @enabled TRUE
+// @mutex FALSE
+// @on SCHEDULE "EVERY 30 SECOND"
 
 import { log } from 'core';
 import type { Context } from 'core';
@@ -383,7 +387,7 @@ Available ctx fields:
 - messageSenderName: sender name from Reactor-Name header (if present)
 - messageTarget: target node name for MESSAGE trigger when available
 - messageTargetNode: same as messageTarget, explicit node field
-- messageTargetScriptId: target project UUID when the sender addressed a specific script
+- messageTargetEndpointId: target endpoint project UUID when the sender addressed a specific endpoint
 - messageContent: UTF-8 message body text
 - messageContentType: incoming content-type
 - messageBodyBase64: raw body payload encoded as base64
@@ -401,9 +405,9 @@ Runtime APIs must be imported from `core`:
 WATCH example with listener filter:
 
 ```ts
-// @state ENABLED
-// @mutex ON
-// @watch /my/folder [file:created, file:moved, dir:deleted]
+// @enabled TRUE
+// @mutex TRUE
+// @on WATCH "/my/folder" [file:created, file:moved, dir:deleted]
 
 import { log } from 'core';
 import type { Context } from 'core';
@@ -419,12 +423,12 @@ export async function run(ctx: Context) {
 
 Reactor writes two log levels:
 
-- Global activity.log: START entries for runs triggered by @schedule, @on, @watch, and manual test/CLI execution
-- Project activity.log: START entries next to each project package.json
+- Global activity.log: START entries for runs triggered by @on, and manual test/CLI execution
+- Endpoint activity.log: START entries next to each endpoint package.json
 
 UI log mapping:
 - Top LOG menu uses global activity log
-- Item LOG menu uses per-project activity log
+- Item LOG menu uses per-endpoint activity log
 
 ## Build and Distribution
 
@@ -432,7 +436,7 @@ Reactor supports platform-specific builds from a single codebase:
 - desktop targets: macOS, Windows, Linux
 - mobile target: Capacitor-based build pipeline
 
-Packaging scripts:
+Packaging endpoints:
 
 ```bash
 npm run icon:mac
@@ -523,19 +527,19 @@ Build outputs:
 
 Mobile support is designed with two separate layers:
 - UI layer: shared web UI rendered in Capacitor WebView
-- Script execution layer: native mobile execution via a Capacitor plugin (for example capacitor-quickjs), not via browser eval/webview execution
+- Endpoint execution layer: native mobile execution via a Capacitor plugin (for example capacitor-quickjs), not via browser eval/webview execution
 
-This keeps script behavior aligned with desktop/server while reducing environment drift.
+This keeps endpoint behavior aligned with desktop/server while reducing environment drift.
 
 ## Permissions Strategy (Mobile)
 
 Reactor should support both strategies:
 - one-time permission bootstrap at first launch
-- per-script permission check when enabling scripts (based on @schedule, @on, @watch and plugin requirements)
+- per-endpoint permission check when enabling endpoints (based on @on directives and plugin requirements)
 
 A dedicated Settings section should expose global permissions state (for example storage and location).
 
-Important: automatic script runs must never block waiting for runtime permission dialogs.
+Important: automatic endpoint runs must never block waiting for runtime permission dialogs.
 
 ## Plugins and Packages
 
@@ -544,24 +548,24 @@ Reactor supports external packages on desktop/server using npm install.
 For mobile, package support should be delivered through Reactor plugins:
 - plugin manifests declare native/mobile capabilities and permissions
 - plugin build output can be consumed by reactor-cli for desktop and mobile targets
-- runtime uses platform adapters (filesystem/http/permissions) to keep script logic portable
+- runtime uses platform adapters (filesystem/http/permissions) to keep endpoint logic portable
 
 ## Multiplatform Goal
 
-The strongest Reactor benefit is the convenience of a single, multiplatform script manager in one language, with script execution triggered by many runtime events.
+The strongest Reactor benefit is the convenience of a single, multiplatform endpoint manager in one language, with endpoint execution triggered by many runtime events.
 
 Cross-platform recommendation: build each target on its native OS (or with a CI matrix).
 
-## Included Demo Scripts
+## Included Demo Endpoints
 
-Demo scripts are available under scripts.
+Demo endpoints are available under endpoints.
 
-Important: files in scripts are examples only and are not automatically loaded by runtime.
-To execute them, copy them to your external scripts folder.
+Important: files in endpoints are examples only and are not automatically loaded by runtime.
+To execute them, copy them to your external endpoints folder.
 
 ## Current Limits
-- @schedule parser supports SECOND, MINUTE, HOUR only
-- No sandboxing for user script execution
+- @on SCHEDULE parser supports SECOND, MINUTE, HOUR only
+- No sandboxing for user endpoint execution
 - Network monitor uses periodic DNS lookup
 
 ## Legal

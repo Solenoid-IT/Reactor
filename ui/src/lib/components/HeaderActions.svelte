@@ -54,7 +54,7 @@
 	</div>
 	<div class="actions">
 		<div class="template-picker" class:open={templateOpen}>
-			<button type="button" class="btn-primary" on:click={() => (templateOpen = !templateOpen)} title="create new script">+</button>
+			<button type="button" class="btn-primary" on:click={() => (templateOpen = !templateOpen)} title="create new endpoint">+</button>
 			<div class="template-menu" aria-hidden={!templateOpen}>
 				<button type="button" class="template-menu-item" on:click={() => { templateOpen = false; onCreateBlank(); }}><i class="fa-regular fa-file"></i><span>Blank</span></button>
 				<button type="button" class="template-menu-item" on:click={() => { templateOpen = false; onCreateSchedule(); }}><i class="fa-solid fa-clock-rotate-left"></i><span>Schedule</span></button>
@@ -75,8 +75,8 @@
 
 		<button type="button" class="btn-secondary" on:click={onOpenNetworkView} title="view node network"><i class="fa-solid fa-diagram-project"></i></button>
 
-		<button type="button" class="btn-secondary icon-button" on:click={onRefresh} title="refresh scripts" aria-label="Refresh scripts"><i class="fa-solid fa-rotate-right"></i></button>
-		<button type="button" class="btn-secondary icon-button" on:click={onOpenFolder} title="open projects folder" aria-label="Open projects folder"><i class="fa-regular fa-folder-open"></i></button>
+		<button type="button" class="btn-secondary icon-button" on:click={onRefresh} title="refresh endpoints" aria-label="Refresh endpoints"><i class="fa-solid fa-rotate-right"></i></button>
+		<button type="button" class="btn-secondary icon-button" on:click={onOpenFolder} title="open endpoints folder" aria-label="Open endpoints folder"><i class="fa-regular fa-folder-open"></i></button>
 	</div>
 </header>
 
@@ -144,6 +144,26 @@
 		align-items: center;
 		gap: 0.5rem;
 		flex-wrap: wrap;
+	}
+
+	.actions > button,
+	.actions > .template-picker > button,
+	.actions > .log-picker > button {
+		width: 42px;
+		height: 42px;
+		padding: 0;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		line-height: 1;
+	}
+
+	.actions > button i,
+	.actions > .log-picker > button i {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		line-height: 1;
 	}
 
 	@media (max-width: 900px) {
