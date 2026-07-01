@@ -31,6 +31,10 @@ Each endpoint also supports:
 
 ## How Reactor Scales
 
+<p align="center">
+  <img src="https://solenoid.it/cdn/illustrations/reactor-workflow.jpg" alt="Reactor workflow" width="900" />
+</p>
+
 Reactor includes a standard TypeScript communication model designed for real-time asynchronous workflow chains with high performance and high reliability.
 
 Delivery strategy in node mode:
