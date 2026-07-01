@@ -1756,6 +1756,38 @@ public class ReactorMobilePlugin extends Plugin {
         }
     }
 
+    private JSObject buildExchangeConnectionStatus(String mode, String host) {
+        String safeMode = String.valueOf(mode != null ? mode : "node").trim();
+        String safeHost = String.valueOf(host != null ? host : "").trim();
+
+        JSObject connection = new JSObject();
+        connection.put("mode", safeMode);
+
+        if ("exchange".equals(safeMode)) {
+            boolean connected = ReactorHttpService.isExchangeServerActive();
+            connection.put("state", connected ? "connected" : "disconnected");
+            connection.put("connected", connected);
+            connection.put("authenticated", true);
+            connection.put("reason", "");
+            return connection;
+        }
+
+        if ("node".equals(safeMode)) {
+            boolean connected = ReactorHttpService.isExchangeClientConnected();
+            connection.put("state", connected ? "connected" : (safeHost.isEmpty() ? "disconnected" : "connecting"));
+            connection.put("connected", connected);
+            connection.put("authenticated", connected);
+            connection.put("reason", connected ? "" : (safeHost.isEmpty() ? "Exchange connection unavailable" : "Connecting to Exchange"));
+            return connection;
+        }
+
+        connection.put("state", "disconnected");
+        connection.put("connected", false);
+        connection.put("authenticated", false);
+        connection.put("reason", "Exchange connection unavailable");
+        return connection;
+    }
+
     @PluginMethod
     public void getExchangeConfig(PluginCall call) {
         JSObject workingMode = readWorkingModeConfig();
@@ -1766,14 +1798,8 @@ public class ReactorMobilePlugin extends Plugin {
         String token = workingMode.getString("token", "");
         boolean discovery = workingMode.has("discovery") && workingMode.getBool("discovery");
 
-        boolean active;
-        if ("exchange".equals(ReactorHttpService.getCurrentExchangeMode())) {
-            active = ReactorHttpService.isExchangeServerActive();
-        } else if ("node".equals(ReactorHttpService.getCurrentExchangeMode())) {
-            active = ReactorHttpService.isExchangeClientConnected();
-        } else {
-            active = false;
-        }
+        JSObject connection = buildExchangeConnectionStatus(ReactorHttpService.getCurrentExchangeMode(), host);
+        boolean active = connection.getBool("connected");
 
         JSArray connectedClients = new JSArray();
         for (String clientName : ReactorHttpService.getExchangeConnectedClients()) {
@@ -1791,6 +1817,7 @@ public class ReactorMobilePlugin extends Plugin {
         config.put("turn", normalizeRelayConfigFromJson(workingMode, "turn", 3478, true));
         config.put("p2p", ReactorHttpService.getP2PStatus());
         config.put("active", active);
+        config.put("connection", connection);
         config.put("connectedClients", connectedClients);
 
         JSObject result = new JSObject();
