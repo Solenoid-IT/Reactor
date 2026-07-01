@@ -4,13 +4,20 @@
   <img src="https://www.solenoid.it/cdn/logo/Reactor.jpg" alt="Reactor Logo" height="400" />
 </p>
 
-Reactor is an agnostic platform runtime for endpoint execution (manager and runner).
+Reactor is a native multiplatform application for building and running endpoint workflows.
 
-Slogan: Same code everywhere.
+You can use Reactor as a powerful local automation runtime on a single machine, or scale the same TypeScript code across a network of nodes through an EXCHANGE.
 
-Core value:
-- one language (TypeScript) for endpoint automation across desktop, mobile, and server
-- one trigger model (@on TYPE PARAMS) across all platforms
+Slogan: Distribute your workflow.
+
+## Why Reactor
+
+- Native multiplatform runtime: desktop, mobile, and server
+- One code language: TypeScript
+- One trigger model: @on TYPE PARAMS
+- One execution concept: endpoint callbacks connected to multiple triggers
+
+Every node can host multiple endpoints. Each endpoint can bind one or more triggers to a callback function, so complex orchestration flows remain modular and easy to evolve.
 
 Endpoints are loaded from an external, user-specific folder and can be triggered by:
 - schedules using @on SCHEDULE "..."
@@ -21,6 +28,19 @@ Endpoints are loaded from an external, user-specific folder and can be triggered
 Each endpoint also supports:
 - @enabled for enable/disable
 - @mutex for concurrency control
+
+## How Reactor Scales
+
+Reactor includes a standard TypeScript communication model designed for real-time asynchronous workflow chains with high performance and high reliability.
+
+Delivery strategy in node mode:
+- P2P_DIRECT: direct WebRTC data channel between peers
+- P2P_RELAY: TURN-relayed WebRTC data channel when direct path is unavailable
+- EXCHANGE: server-routed delivery through EXCHANGE as robust fallback and coordination layer
+
+Each node connects to an EXCHANGE, while still attempting direct peering when possible. STUN/TURN infrastructure is configurable, so you can optimize connectivity based on your network constraints.
+
+Result: Reactor can execute local workflows, distributed multi-node workflows, and long asynchronous real-time call chains with strong delivery resilience.
 
 ## Requirements
 
