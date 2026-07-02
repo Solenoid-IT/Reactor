@@ -3658,6 +3658,161 @@ public class ReactorHttpService extends Service {
     }
 
     private void executeEndpointActions(MessageEndpoint endpoint, String messageBody, Map<String, String> incomingHeaders, Map<String, String> eventContext) {
+        // ── QuickJS execution: TS → sucrase → CommonJS JS → run(event) ──────────
+        String trigger = incomingHeaders != null ? incomingHeaders.getOrDefault("x-reactor-trigger", "") : "";
+        if (trigger.isEmpty() && eventContext != null) {
+            trigger = eventContext.getOrDefault("event.type", "");
+        }
+        if (trigger.isEmpty()) trigger = "MANUAL_TEST";
+
+        String eventContextJson = "{}";
+        if (eventContext != null && !eventContext.isEmpty()) {
+            try {
+                org.json.JSONObject obj = new org.json.JSONObject();
+                for (Map.Entry<String, String> entry : eventContext.entrySet()) {
+                    obj.put(entry.getKey(), entry.getValue());
+                }
+                eventContextJson = obj.toString();
+            } catch (Exception ignored) {}
+        }
+
+        final String finalTrigger = trigger;
+        final String finalEventContextJson = eventContextJson;
+
+        ReactorScriptOps ops = new ReactorScriptOps() {
+            @Override public void log(String message) {
+                appendProjectLog(endpoint, buildReadableGlobalLogLine("SCRIPT_LOG", message));
+            }
+
+            @Override public boolean deviceNotify(String message) {
+                boolean shown = sendEndpointNotification(message);
+                appendProjectLog(endpoint, buildReadableGlobalLogLine("DEVICE_NOTIFY",
+                    "shown=" + shown + " message=" + message));
+                return shown;
+            }
+
+            @Override public String nodeStream(String target, String filePath, String metaJson, String headersJson) {
+                try {
+                    Map<String, String> extraHeaders = new HashMap<>();
+                    try {
+                        org.json.JSONObject hdrs = new org.json.JSONObject(headersJson);
+                        Iterator<String> keys = hdrs.keys();
+                        while (keys.hasNext()) { String k = keys.next(); extraHeaders.put(k, hdrs.getString(k)); }
+                    } catch (Exception ignored) {}
+                    streamFileToNode(target, filePath, extraHeaders);
+                    appendProjectLog(endpoint, buildReadableGlobalLogLine("NODE_STREAM",
+                        "target=" + target + " path=" + filePath));
+                    return "{\"ok\":true}";
+                } catch (Exception e) {
+                    String msg = e.getMessage() != null ? e.getMessage() : "stream failed";
+                    appendProjectLog(endpoint, buildReadableGlobalLogLine("NODE_STREAM_ERROR", msg));
+                    return "{\"ok\":false,\"error\":" + org.json.JSONObject.quote(msg) + "}";
+                }
+            }
+
+            @Override public String nodeSendMessage(String target, String body, String contentType, String headersJson) {
+                try {
+                    Map<String, String> extraHeaders = new HashMap<>();
+                    try {
+                        org.json.JSONObject hdrs = new org.json.JSONObject(headersJson);
+                        Iterator<String> keys = hdrs.keys();
+                        while (keys.hasNext()) { String k = keys.next(); extraHeaders.put(k, hdrs.getString(k)); }
+                    } catch (Exception ignored) {}
+                    SendDeliveryResult result = sendNodeMessageWithContentType(target, body, contentType, extraHeaders);
+                    appendProjectLog(endpoint, buildReadableGlobalLogLine("NODE_SEND",
+                        "target=" + target + " deliveredVia=" + result.deliveredVia + " queued=" + result.queued));
+                    org.json.JSONObject resp = new org.json.JSONObject();
+                    resp.put("ok", true); resp.put("target", target);
+                    resp.put("deliveredVia", String.valueOf(result.deliveredVia)); resp.put("queued", result.queued);
+                    return resp.toString();
+                } catch (Exception e) {
+                    String msg = e.getMessage() != null ? e.getMessage() : "send failed";
+                    return "{\"ok\":false,\"error\":" + org.json.JSONObject.quote(msg) + "}";
+                }
+            }
+
+            @Override public boolean copyStream(String sourcePath, String destPath) {
+                try { copyResolvedStreamPath(sourcePath, destPath); return true; }
+                catch (Exception e) { return false; }
+            }
+
+            @Override public String getHomeDirectory() {
+                try { return android.os.Environment.getExternalStorageDirectory().getAbsolutePath(); }
+                catch (Exception e) { return "/storage/emulated/0"; }
+            }
+
+            @Override public String getNetworkStatus() {
+                try {
+                    android.net.ConnectivityManager cm = (android.net.ConnectivityManager)
+                        getSystemService(android.content.Context.CONNECTIVITY_SERVICE);
+                    boolean online = false;
+                    if (cm != null) {
+                        android.net.NetworkInfo info = cm.getActiveNetworkInfo();
+                        online = info != null && info.isConnected();
+                    }
+                    return "{\"online\":" + online + "}";
+                } catch (Exception e) { return "{\"online\":false}"; }
+            }
+
+            @Override public String sendHttpRequest(String url, String method, String headersJson, String body, long timeoutMs) {
+                try {
+                    okhttp3.OkHttpClient client = new okhttp3.OkHttpClient.Builder()
+                        .connectTimeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                        .readTimeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                        .build();
+                    okhttp3.RequestBody reqBody = null;
+                    String upperMethod = method.toUpperCase(Locale.ROOT);
+                    if (!body.isEmpty() && !"GET".equals(upperMethod) && !"HEAD".equals(upperMethod)) {
+                        reqBody = okhttp3.RequestBody.create(
+                            body.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                            okhttp3.MediaType.parse("application/octet-stream"));
+                    }
+                    okhttp3.Request.Builder rb = new okhttp3.Request.Builder().url(url).method(upperMethod, reqBody);
+                    try {
+                        org.json.JSONObject hdrs = new org.json.JSONObject(headersJson);
+                        Iterator<String> keys = hdrs.keys();
+                        while (keys.hasNext()) { String k = keys.next(); rb.header(k, hdrs.getString(k)); }
+                    } catch (Exception ignored) {}
+                    try (okhttp3.Response resp = client.newCall(rb.build()).execute()) {
+                        org.json.JSONObject result = new org.json.JSONObject();
+                        result.put("status", resp.code());
+                        org.json.JSONObject respH = new org.json.JSONObject();
+                        for (String name : resp.headers().names()) { respH.put(name, resp.header(name)); }
+                        result.put("headers", respH);
+                        result.put("body", resp.body() != null ? resp.body().string() : "");
+                        return result.toString();
+                    }
+                } catch (Exception e) {
+                    String msg = e.getMessage() != null ? e.getMessage() : "request failed";
+                    return "{\"status\":0,\"headers\":{},\"body\":" + org.json.JSONObject.quote(msg) + "}";
+                }
+            }
+
+            @Override public boolean spawnProcess(String command) { return false; }
+        };
+
+        try {
+            ops.log("BEFORE_ENGINE_CREATE");
+            ReactorScriptEngine engine = ReactorScriptEngine.create(ReactorHttpService.this);
+            ops.log("BEFORE_EXECUTE_BLOCKING trigger="+finalTrigger+" source.length="+endpoint.source.length());
+            ReactorScriptEngine.Result result = engine.executeBlocking(
+                finalTrigger,
+                endpoint.source,
+                finalEventContextJson,
+                ops
+            );
+            ops.log("AFTER_EXECUTE_BLOCKING result="+(result.getError() != null ? "ERROR: "+result.getError() : "SUCCESS"));
+        } catch (Exception e) {
+            String msg = e.getMessage() != null ? e.getMessage() : "execution failed";
+            ops.log("EXECUTE_ERROR: "+msg);
+            appendProjectLog(endpoint, buildReadableGlobalLogLine("SCRIPT_ERROR", msg));
+            throw new RuntimeException(msg);
+        }
+    }
+
+    // ── Legacy regex helpers (kept for reference, no longer called) ──────────
+    @SuppressWarnings("unused")
+    private void executeEndpointActionsLegacy(MessageEndpoint endpoint, String messageBody, Map<String, String> incomingHeaders, Map<String, String> eventContext) {
         Matcher directMatcher = SEND_MESSAGE_CALL_PATTERN.matcher(endpoint.source);
         while (directMatcher.find()) {
             String target = directMatcher.group(2) != null ? directMatcher.group(2).trim() : "";

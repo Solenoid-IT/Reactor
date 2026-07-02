@@ -1645,6 +1645,20 @@ public class ReactorMobilePlugin extends Plugin {
 
             writeTextFile(file, content);
             notifyExchangeProfileUpdated("endpoint-saved");
+
+            // Compile TypeScript → boot.compiled.js in background so it's ready on next trigger
+            if (lower.endsWith(".ts")) {
+                final File tsFile = file;
+                final android.content.Context appCtx = getActivity() != null
+                    ? getActivity().getApplicationContext() : null;
+                if (appCtx != null) {
+                    new Thread(() ->
+                        ReactorScriptEngine.create(appCtx).compileAndCache(tsFile),
+                        "reactor-ts-compile"
+                    ).start();
+                }
+            }
+
             call.resolve(new JSObject().put("ok", true).put("path", file.getAbsolutePath()));
         } catch (Exception e) {
             call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));

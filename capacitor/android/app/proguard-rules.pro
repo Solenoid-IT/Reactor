@@ -5,6 +5,12 @@
 # For more details, see
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
+# QuickJS JNI wrapper: keep all methods for JNI binding
+-keep class com.reactor.app.QuickJsWrapper { *; }
+
+# QuickJS-kt reflection binding: keep NativeOpsJs so its methods are accessible at runtime
+-keep class com.reactor.app.NativeOpsJs { *; }
+
 # If your project uses WebView with JS, uncomment the following
 # and specify the fully qualified class name to the JavaScript interface
 # class:
