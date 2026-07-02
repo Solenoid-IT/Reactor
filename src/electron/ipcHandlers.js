@@ -6,7 +6,21 @@ const AdmZip = require('adm-zip');
 const { parseDirectiveHeader, rebuildDirectiveHeader } = require('./directiveHeader');
 const { buildBackupZip, resolveSafeBackupTarget } = require('./backupArchive');
 const { ensureExternalTemplatesDirectory, readEndpointTemplate } = require('./endpointTemplates');
+const { readPermissionsState, writePermissionsState } = require('./permissionsState');
 const { readUiSettings, writeUiSettings } = require('./uiSettings');
+
+function getCurrentPlatformName() {
+	switch (process.platform) {
+		case 'darwin':
+			return 'Mac';
+		case 'win32':
+			return 'Windows';
+		case 'linux':
+			return 'Linux';
+		default:
+			return 'Mac';
+	}
+}
 
 async function openWithConfiguredProgramOrDefault(targetPath) {
 	const settings = await readUiSettings();
@@ -131,6 +145,46 @@ function setupIpcHandlers(runtime, options = {}) {
 
 	ipcMain.handle('get-ui-settings', async () => {
 		return readUiSettings();
+	});
+
+	ipcMain.handle('get-permissions-config', async () => {
+		if (!runtime) {
+			return { ok: false, error: 'runtime not ready', platform: getCurrentPlatformName(), permissions: {} };
+		}
+
+		try {
+			const rootDir = runtime.reactorRootDir || path.dirname(runtime.endpointsDir);
+			const permissions = await readPermissionsState(rootDir);
+			return { ok: true, platform: getCurrentPlatformName(), permissions };
+		} catch (error) {
+			return { ok: false, error: error.message, platform: getCurrentPlatformName(), permissions: {} };
+		}
+	});
+
+	ipcMain.handle('save-permissions-config', async (_, permissions) => {
+		if (!runtime) {
+			return { ok: false, error: 'runtime not ready', platform: getCurrentPlatformName(), permissions: {} };
+		}
+
+		try {
+			const rootDir = runtime.reactorRootDir || path.dirname(runtime.endpointsDir);
+			const nextPermissions = await writePermissionsState(rootDir, permissions);
+			return { ok: true, platform: getCurrentPlatformName(), permissions: nextPermissions };
+		} catch (error) {
+			return { ok: false, error: error.message, platform: getCurrentPlatformName(), permissions: {} };
+		}
+	});
+
+	ipcMain.handle('request-system-permissions', async (_, permissions) => {
+		const normalizedPermissions = Array.isArray(permissions)
+			? Array.from(new Set(permissions.map((permissionName) => String(permissionName || '').trim()).filter(Boolean)))
+			: [];
+		return {
+			ok: true,
+			platform: getCurrentPlatformName(),
+			granted: normalizedPermissions,
+			denied: [],
+		};
 	});
 
 	ipcMain.handle('stop-background-process', async () => {

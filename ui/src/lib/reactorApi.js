@@ -43,6 +43,63 @@ export async function getUiSettings() {
 	return { defaultProgramPath: '', httpServerPort: 7070 };
 }
 
+export async function getPermissionsConfig() {
+	const bridge = getBridge();
+	if (bridge && bridge.getPermissionsConfig) {
+		return bridge.getPermissionsConfig();
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.getPermissionsConfig) {
+		return mobile.getPermissionsConfig();
+	}
+
+	const nativeResult = await callNative('getPermissionsConfig');
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable', platform: '', permissions: {} };
+}
+
+export async function savePermissionsConfig(permissions) {
+	const bridge = getBridge();
+	if (bridge && bridge.savePermissionsConfig) {
+		return bridge.savePermissionsConfig(permissions);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.savePermissionsConfig) {
+		return mobile.savePermissionsConfig({ permissions });
+	}
+
+	const nativeResult = await callNative('savePermissionsConfig', { permissions });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function requestSystemPermissions(permissions = []) {
+	const bridge = getBridge();
+	if (bridge && bridge.requestSystemPermissions) {
+		return bridge.requestSystemPermissions(permissions);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.requestSystemPermissions) {
+		return mobile.requestSystemPermissions({ permissions });
+	}
+
+	const nativeResult = await callNative('requestSystemPermissions', { permissions });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable', granted: [], denied: [] };
+}
+
 export async function stopBackgroundProcess() {
 	const bridge = getBridge();
 	if (bridge && bridge.stopBackgroundProcess) {

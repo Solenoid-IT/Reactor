@@ -8,6 +8,8 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
+import android.provider.Settings;
 import android.util.Log;
 
 import com.getcapacitor.JSArray;
@@ -722,6 +724,10 @@ public class ReactorMobilePlugin extends Plugin {
         return new File(getContext().getFilesDir(), "tls");
     }
 
+    private File getPermissionsFile() {
+        return new File(getContext().getFilesDir(), "permissions.json");
+    }
+
     private File getTemplatesDir() {
         File templatesDir = new File(getContext().getFilesDir(), ENDPOINT_TEMPLATES_DIR);
         if (!templatesDir.exists()) {
@@ -744,6 +750,7 @@ public class ReactorMobilePlugin extends Plugin {
                 getEndpointsDir(),
                 getWorkingModeFile(),
                 getReactorNameFile(),
+            getPermissionsFile(),
                 getUiSettingsFile(),
                 getWorkflowFile(),
                 getGlobalLogFile(),
@@ -808,6 +815,7 @@ public class ReactorMobilePlugin extends Plugin {
                 "endpoints",
                 "working-mode.json",
                 "name",
+                "permissions.json",
                 "ui-settings.json",
                 "workflow.json",
                 "activity.log",
@@ -908,6 +916,150 @@ public class ReactorMobilePlugin extends Plugin {
         try (FileOutputStream stream = new FileOutputStream(file, false)) {
             stream.write(content.getBytes(StandardCharsets.UTF_8));
         }
+    }
+
+    private List<String> getRequestedPermissionNames(PluginCall call) {
+        JSArray input = call != null ? call.getArray("permissions", new JSArray()) : new JSArray();
+        List<String> normalized = new ArrayList<>();
+        if (input == null) {
+            return normalized;
+        }
+
+        for (int index = 0; index < input.length(); index++) {
+            String permissionName = String.valueOf(input.optString(index, "")).trim();
+            if (!permissionName.isEmpty() && !normalized.contains(permissionName)) {
+                normalized.add(permissionName);
+            }
+        }
+
+        return normalized;
+    }
+
+    private boolean requestsFilesystemPermission(List<String> permissions) {
+        if (permissions == null) {
+            return false;
+        }
+
+        for (String permissionName : permissions) {
+            if (permissionName != null && permissionName.trim().startsWith("filesystem.")) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private JSObject buildPermissionRequestResult(List<String> requestedPermissions, boolean granted) {
+        JSArray grantedPermissions = new JSArray();
+        JSArray deniedPermissions = new JSArray();
+
+        for (String permissionName : requestedPermissions) {
+            if (granted) {
+                grantedPermissions.put(permissionName);
+            } else {
+                deniedPermissions.put(permissionName);
+            }
+        }
+
+        return new JSObject()
+                .put("ok", true)
+                .put("platform", "Android")
+                .put("granted", grantedPermissions)
+                .put("denied", deniedPermissions);
+    }
+
+    private JSObject readPermissionsConfig() throws IOException {
+        File file = getPermissionsFile();
+        if (!file.exists() || !file.isFile()) {
+            return new JSObject();
+        }
+
+        String content = readTextFile(file).trim();
+        if (content.isEmpty()) {
+            return new JSObject();
+        }
+
+        return new JSObject(content);
+    }
+
+    private JSObject writePermissionsConfig(JSObject permissions) throws IOException {
+        JSObject safePermissions = permissions != null ? permissions : new JSObject();
+        writeTextFile(getPermissionsFile(), safePermissions.toString(2) + "\n");
+        return safePermissions;
+    }
+
+    @PluginMethod
+    public void getPermissionsConfig(PluginCall call) {
+        try {
+            JSObject permissions = readPermissionsConfig();
+            call.resolve(new JSObject()
+                    .put("ok", true)
+                    .put("platform", "Android")
+                    .put("permissions", permissions));
+        } catch (Exception e) {
+            call.resolve(new JSObject()
+                    .put("ok", false)
+                    .put("error", e.getMessage())
+                    .put("platform", "Android")
+                    .put("permissions", new JSObject()));
+        }
+    }
+
+    @PluginMethod
+    public void savePermissionsConfig(PluginCall call) {
+        try {
+            JSObject saved = writePermissionsConfig(call.getObject("permissions", new JSObject()));
+            call.resolve(new JSObject()
+                    .put("ok", true)
+                    .put("platform", "Android")
+                    .put("permissions", saved));
+        } catch (Exception e) {
+            call.resolve(new JSObject()
+                    .put("ok", false)
+                    .put("error", e.getMessage())
+                    .put("platform", "Android")
+                    .put("permissions", new JSObject()));
+        }
+    }
+
+    @PluginMethod
+    public void requestSystemPermissions(PluginCall call) {
+        List<String> requestedPermissions = getRequestedPermissionNames(call);
+        if (requestedPermissions.isEmpty()) {
+            call.resolve(buildPermissionRequestResult(requestedPermissions, true));
+            return;
+        }
+
+        if (requestsFilesystemPermission(requestedPermissions) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
+            try {
+                Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                intent.setData(Uri.parse("package:" + getContext().getPackageName()));
+                startActivityForResult(call, intent, "handleManageStoragePermissionResult");
+                return;
+            } catch (Exception ignored) {
+                try {
+                    Intent fallbackIntent = new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+                    startActivityForResult(call, fallbackIntent, "handleManageStoragePermissionResult");
+                    return;
+                } catch (Exception fallbackError) {
+                    call.resolve(new JSObject().put("ok", false).put("error", fallbackError.getMessage()).put("platform", "Android"));
+                    return;
+                }
+            }
+        }
+
+        call.resolve(buildPermissionRequestResult(requestedPermissions, true));
+    }
+
+    @ActivityCallback
+    private void handleManageStoragePermissionResult(PluginCall call, ActivityResult activityResult) {
+        if (call == null) {
+            return;
+        }
+
+        List<String> requestedPermissions = getRequestedPermissionNames(call);
+        boolean granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager();
+        call.resolve(buildPermissionRequestResult(requestedPermissions, granted));
     }
 
     private void appendTextFile(File file, String content) throws IOException {

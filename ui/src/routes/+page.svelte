@@ -4,10 +4,19 @@
 	import EndpointList from '$lib/components/EndpointList.svelte';
 	import DetailPane from '$lib/components/DetailPane.svelte';
 	import SettingsPane from '$lib/components/SettingsPane.svelte';
+	import {
+		buildPermissionsEntries,
+		getCurrentRuntimePlatform,
+		mergePermissionsEntries,
+		normalizeSavedPermissionsConfig,
+	} from '$lib/systemPermissions';
 	import Modal from '$lib/components/Modal.svelte';
 	import {
 		getEndpointsInfo,
 		getUiSettings,
+		getPermissionsConfig,
+		savePermissionsConfig,
+		requestSystemPermissions,
 		copyTextToClipboard,
 		stopBackgroundProcess,
 		openEndpointsFolder,
@@ -103,6 +112,9 @@
 	let messageQueueDirectPending = 0;
 	let messageQueueExchangePending = 0;
 	let messageQueueTtlDays = 7;
+	let permissionsPlatform = '';
+	let permissionsConfig = {};
+	let permissionsEntries = [];
 	let status = 'Ready';
 	let settingsOpen = false;
 	let renameOpen = false;
@@ -739,10 +751,95 @@
 		requestNetworkNodeEndpoints(safeName, true).catch(() => {});
 	}
 
+	function applyPermissionsConfigResult(result) {
+		const nextPlatform = String(result?.platform || permissionsPlatform || getCurrentRuntimePlatform()).trim() || getCurrentRuntimePlatform();
+		permissionsPlatform = nextPlatform;
+		permissionsConfig = normalizeSavedPermissionsConfig(result?.permissions);
+		permissionsEntries = buildPermissionsEntries(permissionsConfig, permissionsPlatform);
+	}
+
+	async function persistPermissionsEntries(nextEntries, successMessage) {
+		const nextConfig = mergePermissionsEntries(permissionsConfig, permissionsPlatform, nextEntries);
+		const result = await savePermissionsConfig(nextConfig);
+		if (!result?.ok) {
+			status = `Error: ${result?.error || 'unable to save permissions'}`;
+			return false;
+		}
+
+		applyPermissionsConfigResult(result);
+		if (successMessage) {
+			status = successMessage;
+		}
+		return true;
+	}
+
+	async function requestCheckedPermissionsForCurrentPlatform() {
+		const enabledPermissions = permissionsEntries.filter((entry) => entry?.checked).map((entry) => entry.name);
+		if (enabledPermissions.length === 0) {
+			return { ok: true, granted: [], denied: [] };
+		}
+
+		const result = await requestSystemPermissions(enabledPermissions);
+		if (!result?.ok) {
+			return result;
+		}
+
+		const grantedSet = new Set(Array.isArray(result.granted) ? result.granted.map((item) => String(item || '').trim()) : []);
+		const deniedSet = new Set(Array.isArray(result.denied) ? result.denied.map((item) => String(item || '').trim()) : []);
+		const nextEntries = permissionsEntries.map((entry) => ({
+			...entry,
+			checked: deniedSet.has(entry.name) ? false : grantedSet.size > 0 ? grantedSet.has(entry.name) : Boolean(entry.checked),
+		}));
+
+		await persistPermissionsEntries(
+			nextEntries,
+			deniedSet.size > 0
+				? `Backup imported: ${grantedSet.size} permissions granted, ${deniedSet.size} denied`
+				: `Backup imported: ${grantedSet.size || enabledPermissions.length} permissions granted`,
+		);
+		return result;
+	}
+
+	async function togglePermissionHandler(permissionName, checked) {
+		const safePermissionName = String(permissionName || '').trim();
+		if (!safePermissionName) {
+			return;
+		}
+
+		let nextEntries = permissionsEntries.map((entry) =>
+			entry.name === safePermissionName
+				? { ...entry, checked: Boolean(checked) }
+				: entry,
+		);
+
+		if (checked) {
+			status = `Requesting permission: ${safePermissionName}`;
+			const result = await requestSystemPermissions([safePermissionName]);
+			if (!result?.ok) {
+				status = `Error: ${result?.error || 'permission request failed'}`;
+				return;
+			}
+
+			const grantedSet = new Set(Array.isArray(result.granted) ? result.granted.map((item) => String(item || '').trim()) : []);
+			const deniedSet = new Set(Array.isArray(result.denied) ? result.denied.map((item) => String(item || '').trim()) : []);
+			const isGranted = deniedSet.has(safePermissionName) ? false : grantedSet.size === 0 || grantedSet.has(safePermissionName);
+			nextEntries = permissionsEntries.map((entry) =>
+				entry.name === safePermissionName
+					? { ...entry, checked: isGranted }
+					: entry,
+			);
+			await persistPermissionsEntries(nextEntries, isGranted ? `Permission enabled: ${safePermissionName}` : `Permission denied: ${safePermissionName}`);
+			return;
+		}
+
+		await persistPermissionsEntries(nextEntries, `Permission disabled: ${safePermissionName}`);
+	}
+
 	async function refreshAll() {
-		const [info, settings, serverConfig, currentReactorName, exchangeConfigResult, p2pStatusResult, exchangeTokenResult, tlsConfigResult, queueStatusResult] = await Promise.all([
+		const [info, settings, permissionsConfigResult, serverConfig, currentReactorName, exchangeConfigResult, p2pStatusResult, exchangeTokenResult, tlsConfigResult, queueStatusResult] = await Promise.all([
 			getEndpointsInfo(),
 			getUiSettings(),
+			getPermissionsConfig(),
 			getHttpServerConfig(),
 			getReactorName(),
 			getExchangeConfig(),
@@ -760,6 +857,7 @@
 		endpointsPath = info?.path || '';
 		httpPort = Number(serverConfig?.config?.port || settings?.httpServerPort || 7070);
 		reactorName = String(currentReactorName?.name || '');
+		applyPermissionsConfigResult(permissionsConfigResult);
 
 		if (tlsConfigResult?.ok && tlsConfigResult?.tls) {
 			const tls = tlsConfigResult.tls;
@@ -1260,7 +1358,10 @@
 
 		status = `Backup imported: ${result.path || 'OK'}`;
 		await refreshAll();
-		await refreshAll();
+		const permissionRequestResult = await requestCheckedPermissionsForCurrentPlatform();
+		if (!permissionRequestResult?.ok) {
+			status = `Backup imported, but permission sync failed: ${permissionRequestResult?.error || 'unknown'}`;
+		}
 	}
 
 	async function saveMessageQueueTtlDaysHandler(nextDays) {
@@ -1491,6 +1592,8 @@
 			{messageQueueDirectPending}
 			{messageQueueExchangePending}
 			{messageQueueTtlDays}
+			{permissionsPlatform}
+			{permissionsEntries}
 			{exchangeMode}
 			{exchangeEnabled}
 			{exchangeHost}
@@ -1527,6 +1630,7 @@
 			onRefreshLinkedNodes={() => refreshExchangeLinkedNodes(false)}
 			onExportBackup={exportBackupHandler}
 			onImportBackup={importBackupHandler}
+			onTogglePermission={togglePermissionHandler}
 			onStopBackgroundProcess={stopBackgroundProcessHandler}
 			onSaveMessageQueueTtlDays={saveMessageQueueTtlDaysHandler}
 			onFlushMessageQueue={flushMessageQueueHandler}

@@ -46,6 +46,9 @@
 	export let onRefreshLinkedNodes = () => {};
 	export let onExportBackup = () => {};
 	export let onImportBackup = () => {};
+	export let permissionsPlatform = '';
+	export let permissionsEntries = [];
+	export let onTogglePermission = () => {};
 	export let onStopBackgroundProcess = () => {};
 	export let messageQueuePending = 0;
 	export let messageQueueDirectPending = 0;
@@ -558,9 +561,6 @@
 					{:else}
 						<div class="detail-value mt-4" style="opacity:0.5;"><i class="fa-solid fa-plug-circle-xmark me-1"></i>Not connected</div>
 					{/if}
-
-					{#if exchangeEnabled}
-					{/if}
 				</fieldset>
 			{/if}
 
@@ -627,9 +627,36 @@
 	</section>
 
 	<section class="detail-card settings-backup-card">
+		<h3><i class="fa-solid fa-user-shield me-2"></i>System Permissions</h3>
+		<div class="detail-value" style="font-size:0.82em; opacity:0.75; margin-bottom:10px;">
+			Available permissions for {permissionsPlatform || 'this device'} are loaded from the shared app model and saved to permissions.json.
+		</div>
+		{#if Array.isArray(permissionsEntries) && permissionsEntries.length > 0}
+			<div class="permissions-list">
+				{#each permissionsEntries as permission (permission.name)}
+					<label class="permission-toggle-row">
+						<div>
+							<div class="permission-name">{permission.name}</div>
+							<div class="permission-caption">Saved for {permissionsPlatform || 'current platform'}</div>
+						</div>
+						<input
+							type="checkbox"
+							class="permission-toggle-input"
+							checked={Boolean(permission.checked)}
+							on:change={(event) => onTogglePermission(permission.name, event.currentTarget.checked)}
+						/>
+					</label>
+				{/each}
+			</div>
+		{:else}
+			<div class="detail-value" style="font-size:0.8em; opacity:0.6;">No permissions defined for this platform in available-permissions.json.</div>
+		{/if}
+	</section>
+
+	<section class="detail-card settings-backup-card">
 		<h3><i class="fa-solid fa-box-archive me-2"></i>Backup</h3>
 		<div class="detail-value" style="font-size:0.82em; opacity:0.75; margin-bottom:10px;">
-			Export and import a full ZIP backup with endpoints and runtime configuration.
+			Export and import a full ZIP backup with endpoints, runtime configuration, and permissions.json.
 		</div>
 		<div class="settings-backup-actions">
 			<button type="button" class="btn-secondary" on:click={onExportBackup}>
@@ -765,6 +792,42 @@
 		display: flex;
 		gap: 10px;
 		flex-wrap: wrap;
+	}
+
+	.permissions-list {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+
+	.permission-toggle-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		padding: 10px 12px;
+		border: 1px solid rgba(255,255,255,0.08);
+		border-radius: 10px;
+		background: rgba(255,255,255,0.03);
+	}
+
+	.permission-name {
+		font-size: 0.9em;
+		font-weight: 600;
+		word-break: break-word;
+	}
+
+	.permission-caption {
+		font-size: 0.76em;
+		opacity: 0.6;
+		margin-top: 2px;
+	}
+
+	.permission-toggle-input {
+		width: 18px;
+		height: 18px;
+		flex-shrink: 0;
+		accent-color: #4caf50;
 	}
 
 	.settings-backup-actions :global(button) {
