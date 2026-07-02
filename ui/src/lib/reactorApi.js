@@ -100,6 +100,29 @@ export async function requestSystemPermissions(permissions = []) {
 	return { ok: false, error: 'bridge unavailable', granted: [], denied: [] };
 }
 
+export async function openSystemPermissionSettings(permissions = []) {
+	const normalizedPermissions = Array.isArray(permissions)
+		? Array.from(new Set(permissions.map((permissionName) => String(permissionName || '').trim()).filter(Boolean)))
+		: [];
+
+	const bridge = getBridge();
+	if (bridge && bridge.openSystemPermissionSettings) {
+		return bridge.openSystemPermissionSettings(normalizedPermissions);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.openSystemPermissionSettings) {
+		return mobile.openSystemPermissionSettings({ permissions: normalizedPermissions });
+	}
+
+	const nativeResult = await callNative('openSystemPermissionSettings', { permissions: normalizedPermissions });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable', opened: false };
+}
+
 export async function stopBackgroundProcess() {
 	const bridge = getBridge();
 	if (bridge && bridge.stopBackgroundProcess) {

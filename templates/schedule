@@ -5,11 +5,15 @@
 
 
 
-import { Context, log } from 'core';
+import { Event, ScheduleEvent, log } from 'core';
 
 
 
-export async function run (ctx : Context)
+export async function run (event : Event)
 {
+	if (!(event instanceof ScheduleEvent)) {
+		return;
+	}
+
 	await log('scheduled endpoint tick');
 }

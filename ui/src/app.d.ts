@@ -6,6 +6,7 @@ declare global {
 			getPermissionsConfig?: () => Promise<any>;
 			savePermissionsConfig?: (permissions: any) => Promise<any>;
 			requestSystemPermissions?: (permissions: string[]) => Promise<any>;
+			openSystemPermissionSettings?: (permissions?: string[]) => Promise<any>;
 			stopBackgroundProcess?: () => Promise<any>;
 			openEndpointsFolder?: () => Promise<any>;
 			openEndpointFile?: (filePath: string) => Promise<any>;

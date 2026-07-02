@@ -6,13 +6,17 @@
 
 
 
-import { Context, log } from 'core';
+import { Event, WatchEvent, log } from 'core';
 
 
 
-export async function run(ctx : Context)
+export async function run(event : Event)
 {
+	if (!(event instanceof WatchEvent)) {
+		return;
+	}
+
 	const timestamp = new Date().toISOString();
-	const msg = `[${timestamp}] Watch event on ${ctx.watchPath}: ${ctx.watchType}`;
+	const msg = `[${timestamp}] Watch event on ${event.path}: ${event.watchType}`;
 	await log(msg, 'I');
 }

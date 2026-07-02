@@ -139,18 +139,20 @@ Sender filters use OR semantics. Example: `@on MESSAGE [R2,net:1.2.3.4:5678]` me
 
 // @on MESSAGE [R2,net:192.168.1.10:7070,net:www.example.com]
 
-import { Context, log } from 'core';
+import { Event, MessageEvent, log } from 'core';
 
-export async function run (ctx: Context)
+export async function run (event: Event)
 {
-	await log(`MESSAGE from ${ctx.messageSender || 'unknown'}`);
-	await log(`target node=${ctx.messageTargetNode || 'n/a'} endpoint=${ctx.messageTargetEndpoint || 'broadcast'} endpointId=${ctx.messageTargetEndpointId || 'n/a'}`);
+	if (!(event instanceof MessageEvent)) return;
+
+	await log(`MESSAGE from ${event.data.sender || 'unknown'}`);
+	await log(`target node=${event.data.targetNode || 'n/a'} endpoint=${event.data.targetEndpoint || 'broadcast'} endpointId=${event.data.targetEndpointId || 'n/a'}`);
 
 	// Text body
-	await log(`content=${ctx.messageContent || ''}`);
+	await log(`content=${event.data.content || ''}`);
 
 	// JSON body (if content-type is json)
-	if (ctx.messageJson)
+	if (event.data.json)
 	{
 		await log(`json received`);
 	}
@@ -236,16 +238,18 @@ export async function run() {
 
 // @on STREAM [R2,net:192.168.1.10:7070]
 
-import { Context, log } from 'core';
+import { Event, StreamEvent, log } from 'core';
 
 const buffersByStreamId = new Map<string, Buffer[]>();
 
-export async function run(ctx: Context) {
-	const stream = ctx.stream;
+export async function run(event: Event) {
+	if (!(event instanceof StreamEvent)) return;
+
+	const stream = event.data.stream;
 	if (!stream) return;
 
 	const streamId = stream.getId();
-	await log(`target node=${ctx.messageTargetNode || 'n/a'} endpoint=${ctx.messageTargetEndpoint || 'broadcast'} endpointId=${ctx.messageTargetEndpointId || 'n/a'}`);
+	await log(`target node=${event.data.targetNode || 'n/a'} endpoint=${event.data.targetEndpoint || 'broadcast'} endpointId=${event.data.targetEndpointId || 'n/a'}`);
 
 	if (stream.isStart()) {
 		buffersByStreamId.set(streamId, []);
@@ -278,14 +282,16 @@ For low-RAM transfers, let runtime spool chunks to disk and finalize on `STREAME
 
 // @on STREAMEND [R2,net:192.168.1.10:7070]
 
-import { Context, log } from 'core';
+import { Event, StreamEndEvent, log } from 'core';
 
-export async function run (ctx: Context)
+export async function run (event: Event)
 {
-	const end = ctx.streamEnd;
+	if (!(event instanceof StreamEndEvent)) return;
+
+	const end = event.data.streamEnd;
 	if (!end) return;
 
-	await log(`target node=${ctx.messageTargetNode || 'n/a'} endpoint=${ctx.messageTargetEndpoint || 'broadcast'} endpointId=${ctx.messageTargetEndpointId || 'n/a'}`);
+	await log(`target node=${event.data.targetNode || 'n/a'} endpoint=${event.data.targetEndpoint || 'broadcast'} endpointId=${event.data.targetEndpointId || 'n/a'}`);
 
 	if (!end.isValid()) {
 		await log(`STREAMEND invalid id=${end.getId()} error=${end.getError()}`);

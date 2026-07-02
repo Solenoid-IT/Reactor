@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["scripts/**/*.ts", "src/context.ts", "src/core.d.ts"]
+  "include": ["scripts/**/*.ts", "src/event.ts", "src/core.d.ts"]
 }

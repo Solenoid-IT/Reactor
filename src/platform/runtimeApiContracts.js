@@ -7,8 +7,8 @@ class FileAdapter {
 	async read() {
 		throw new Error('FileAdapter.read not implemented');
 	}
-	readStream(_options = {}) {
-		throw new Error('FileAdapter.readStream not implemented');
+	open(_options = {}) {
+		throw new Error('FileAdapter.open not implemented');
 	}
 	async write(_content, _append = false) {
 		throw new Error('FileAdapter.write not implemented');

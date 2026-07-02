@@ -16,6 +16,37 @@ function getCapacitorPlugins() {
 	return capacitor && capacitor.Plugins ? capacitor.Plugins : null;
 }
 
+function joinAndroidPath(basePath, childName) {
+	const normalizedBase = String(basePath || '').replace(/\\/g, '/').replace(/\/+$/g, '');
+	const normalizedChild = String(childName || '').replace(/\\/g, '/').replace(/^\/+/, '');
+	if (!normalizedBase) {
+		return normalizedChild;
+	}
+	if (!normalizedChild) {
+		return normalizedBase;
+	}
+	return `${normalizedBase}/${normalizedChild}`;
+}
+
+function getAndroidDirEntryName(entry) {
+	if (typeof entry === 'string') {
+		return String(entry).trim();
+	}
+	if (!entry || typeof entry !== 'object') {
+		return '';
+	}
+	return String(entry.name || entry.path || entry.uri || '').trim();
+}
+
+function isAndroidDirectoryEntry(entry) {
+	if (!entry || typeof entry !== 'object') {
+		return false;
+	}
+
+	const typeValue = String(entry.type || '').trim().toLowerCase();
+	return typeValue === 'directory' || typeValue === 'dir';
+}
+
 class AndroidFile extends FileAdapter {
 	constructor(filePath) {
 		super(filePath);
@@ -35,7 +66,7 @@ class AndroidFile extends FileAdapter {
 		}
 	}
 
-	async *readStream(options = {}) {
+	async *open(options = {}) {
 		const plugins = getCapacitorPlugins();
 		if (!plugins || !plugins.Filesystem) {
 			throw new Error('Filesystem plugin unavailable');
@@ -147,9 +178,45 @@ class AndroidDirectory extends DirectoryAdapter {
 		if (!plugins || !plugins.Filesystem) {
 			return [];
 		}
+
+		const walk = async (dirPath, recursive, output) => {
+			const out = await plugins.Filesystem.readdir({ path: dirPath });
+			const entries = Array.isArray(out?.files) ? out.files : [];
+
+			for (const entry of entries) {
+				const name = getAndroidDirEntryName(entry);
+				if (!name) {
+					continue;
+				}
+
+				const childPath = joinAndroidPath(dirPath, name);
+				output.push(childPath);
+
+				if (!recursive) {
+					continue;
+				}
+
+				let shouldTraverse = isAndroidDirectoryEntry(entry);
+				if (!shouldTraverse) {
+					try {
+						const meta = await plugins.Filesystem.stat({ path: childPath });
+						const metaType = String(meta?.type || '').trim().toLowerCase();
+						shouldTraverse = metaType === 'directory' || metaType === 'dir';
+					} catch {
+						shouldTraverse = false;
+					}
+				}
+
+				if (shouldTraverse) {
+					await walk(childPath, true, output);
+				}
+			}
+		};
+
 		try {
-			const out = await plugins.Filesystem.readdir({ path: this.dirPath });
-			return Array.isArray(out.files) ? out.files : [];
+			const output = [];
+			await walk(this.dirPath, Boolean(_recursive), output);
+			return output;
 		} catch {
 			return [];
 		}
@@ -379,6 +446,20 @@ function createAndroidRuntimeApi() {
 		},
 		System: {
 			Process: AndroidProcess,
+			getHomeDirectory: async () => {
+				const plugins = getCapacitorPlugins();
+				const mobile = plugins ? plugins.ReactorMobile : null;
+				if (!mobile || typeof mobile.getHomeDirectory !== 'function') {
+					throw new Error('ReactorMobile.getHomeDirectory unavailable');
+				}
+
+				const result = await mobile.getHomeDirectory();
+				if (!result || result.ok === false) {
+					throw new Error((result && result.error) || 'unable to resolve Android home directory');
+				}
+
+				return String(result.path || '').trim();
+			},
 		},
 	};
 }

@@ -187,6 +187,31 @@ function setupIpcHandlers(runtime, options = {}) {
 		};
 	});
 
+	ipcMain.handle('open-system-permission-settings', async (_, permissions) => {
+		try {
+			const platformName = getCurrentPlatformName();
+			const normalizedPermissions = Array.isArray(permissions)
+				? Array.from(new Set(permissions.map((permissionName) => String(permissionName || '').trim()).filter(Boolean)))
+				: [];
+
+			if (process.platform === 'darwin') {
+				const targetUrl = 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles';
+				await shell.openExternal(targetUrl);
+				return { ok: true, opened: true, platform: platformName, target: targetUrl, permissions: normalizedPermissions };
+			}
+
+			if (process.platform === 'win32') {
+				const targetUrl = 'ms-settings:privacy-broadfilesystemaccess';
+				await shell.openExternal(targetUrl);
+				return { ok: true, opened: true, platform: platformName, target: targetUrl, permissions: normalizedPermissions };
+			}
+
+			return { ok: false, opened: false, platform: platformName, error: 'system permission settings deep-link not available on this platform', permissions: normalizedPermissions };
+		} catch (error) {
+			return { ok: false, opened: false, platform: getCurrentPlatformName(), error: error.message || 'unable to open system permission settings' };
+		}
+	});
+
 	ipcMain.handle('stop-background-process', async () => {
 		try {
 			setImmediate(() => {
@@ -530,7 +555,7 @@ function setupIpcHandlers(runtime, options = {}) {
 		const endpointFileName = 'boot.ts';
 		const endpointFilePath = path.join(projectRoot, endpointFileName);
 		const projectUuidPath = path.join(projectRoot, 'uuid');
-		const contextFilePath = path.join(projectRoot, 'context.ts');
+		const contextFilePath = path.join(projectRoot, 'event.ts');
 		const packageJsonPath = path.join(projectRoot, 'package.json');
 		const eventLogPath = path.join(projectRoot, 'activity.log');
 
@@ -549,7 +574,7 @@ function setupIpcHandlers(runtime, options = {}) {
 			return { ok: false, error: error.message || 'endpoint template file not found' };
 		}
 		const contextContent = [
-			"export type { Context } from 'core';",
+			"export type { Event, ReactorEvent, WatchEvent, MessageEvent, StreamEvent, StreamEndEvent, ScheduleEvent, RuntimeEvent, ManualEvent } from 'core';",
 			'',
 		].join('\n');
 		const packageJson = {

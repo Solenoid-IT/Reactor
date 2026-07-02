@@ -30,7 +30,7 @@ class NodeFile extends FileAdapter {
 		}
 	}
 
-	readStream(options = {}) {
+	open(options = {}) {
 		return fsNative.createReadStream(this.filePath, options || {});
 	}
 
@@ -328,6 +328,7 @@ function createNodeRuntimeApi() {
 		},
 		System: {
 			Process: NodeProcess,
+			getHomeDirectory: async () => os.homedir(),
 		},
 	};
 }

@@ -6,11 +6,15 @@
 
 
 
-import { Context, log } from 'core';
+import { Event, WatchEvent, log } from 'core';
 
 
 
-export async function run (ctx : Context)
+export async function run (event : Event)
 {
-	await log('watch event: ' + ctx.watchPath + ' (' + ctx.watchType + ')');
+	if (!(event instanceof WatchEvent)) {
+		return;
+	}
+
+	await log('watch event: ' + event.path + ' (' + event.watchType + ')');
 }

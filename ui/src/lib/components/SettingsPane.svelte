@@ -49,6 +49,7 @@
 	export let permissionsPlatform = '';
 	export let permissionsEntries = [];
 	export let onTogglePermission = () => {};
+	export let onOpenSystemPermissionSettings = () => {};
 	export let onStopBackgroundProcess = () => {};
 	export let messageQueuePending = 0;
 	export let messageQueueDirectPending = 0;
@@ -630,6 +631,12 @@
 		<h3><i class="fa-solid fa-user-shield me-2"></i>System Permissions</h3>
 		<div class="detail-value" style="font-size:0.82em; opacity:0.75; margin-bottom:10px;">
 			Available permissions for {permissionsPlatform || 'this device'} are loaded from the shared app model and saved to permissions.json.
+		</div>
+		<div class="settings-backup-actions" style="margin-bottom:10px;">
+			<button type="button" class="btn-secondary" on:click={() => onOpenSystemPermissionSettings([])}>
+				<i class="fa-solid fa-gear me-2"></i>
+				Open System Settings
+			</button>
 		</div>
 		{#if Array.isArray(permissionsEntries) && permissionsEntries.length > 0}
 			<div class="permissions-list">

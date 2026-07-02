@@ -5,11 +5,15 @@
 
 
 
-import { Context, log } from 'core';
+import { Event, MessageEvent, log } from 'core';
 
 
 
-export async function run (ctx : Context)
+export async function run (event : Event)
 {
-	await log('message from ' + (ctx.messageSenderName || ctx.messageSender || 'unknown') + ': ' + (ctx.messageContent || ''));
+	if (!(event instanceof MessageEvent)) {
+		return;
+	}
+
+	await log('message from ' + (event.data.senderName || event.data.sender || 'unknown') + ': ' + (event.data.content || ''));
 }

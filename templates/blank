@@ -3,11 +3,11 @@
 
 
 
-import { Context, log } from 'core';
+import { Event, log } from 'core';
 
 
 
-export async function run (ctx : Context)
+export async function run (event : Event)
 {
 	await log('new blank endpoint');
 }

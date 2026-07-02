@@ -121,16 +121,16 @@ Prevents concurrent executions. Default: `FALSE`
 // @mutex TRUE
 ```
 
-**Context example:**
+**Event example:**
 ```typescript
-import { Context, log } from 'core';
+import { Event, WatchEvent, log } from 'core';
 
-export async function run (ctx: Context)
+export async function run (event: Event)
 {
-	if ( ctx.trigger === 'WATCH' )
+    if (event instanceof WatchEvent)
   {
-    await log(`File event: ${ctx.watchPath} (${ctx.watchType})`, 'I');
-	}
+    await log(`File event: ${event.path} (${event.watchType})`, 'I');
+  }
 }
 ```
 

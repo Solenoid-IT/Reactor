@@ -17,6 +17,7 @@
 		getPermissionsConfig,
 		savePermissionsConfig,
 		requestSystemPermissions,
+		openSystemPermissionSettings,
 		copyTextToClipboard,
 		stopBackgroundProcess,
 		openEndpointsFolder,
@@ -122,12 +123,25 @@
 	let renameOriginalEndpointName = '';
 	let renameValue = '';
 	let renameInput;
+	let endpointPermissionsWarningOpen = false;
+	let endpointPermissionsWarningFileName = '';
+	let endpointPermissionsWarningPlatform = '';
+	let endpointPermissionsWarningEntries = [];
 	let editorOpen = false;
 	let editorFilePath = '';
 	let editorFileName = '';
 	let editorLanguage = 'typescript';
 	let editorContent = '';
 	let CodeEditorComponent = null;
+
+	const endpointPermissionRulesByPlatform = {
+		Android: [
+			{
+				permission: 'filesystem.manage',
+				matches: (source) => /\/\/\s*@on\s+WATCH\b/i.test(String(source || '')),
+			},
+		],
+	};
 
 	function isBridgeUnavailable(result) {
 		return String(result?.error || '').toLowerCase().includes('bridge unavailable');
@@ -806,6 +820,15 @@
 			return;
 		}
 
+		const effectivePermissionsPlatform = String(permissionsPlatform || getCurrentRuntimePlatform()).trim().toLowerCase();
+		if (effectivePermissionsPlatform === 'android') {
+			const settingsResult = await openSystemPermissionSettings([safePermissionName]);
+			if (!settingsResult?.ok) {
+				status = `Error: ${settingsResult?.error || 'unable to open Android system settings'}`;
+				return;
+			}
+		}
+
 		let nextEntries = permissionsEntries.map((entry) =>
 			entry.name === safePermissionName
 				? { ...entry, checked: Boolean(checked) }
@@ -833,6 +856,16 @@
 		}
 
 		await persistPermissionsEntries(nextEntries, `Permission disabled: ${safePermissionName}`);
+	}
+
+	async function openSystemPermissionSettingsHandler(permissionNames = []) {
+		const result = await openSystemPermissionSettings(permissionNames);
+		if (!result?.ok) {
+			status = `Error: ${result?.error || 'unable to open system permission settings'}`;
+			return;
+		}
+
+		status = 'System permission settings opened';
 	}
 
 	async function refreshAll() {
@@ -1069,6 +1102,41 @@
 		editorOpen = false;
 	}
 
+	function closeEndpointPermissionsWarning() {
+		endpointPermissionsWarningOpen = false;
+		endpointPermissionsWarningFileName = '';
+		endpointPermissionsWarningPlatform = '';
+		endpointPermissionsWarningEntries = [];
+	}
+
+	function isEndpointBootFile(filePath, fileName) {
+		const normalizedPath = String(filePath || '').replace(/\\/g, '/').toLowerCase();
+		const normalizedName = String(fileName || '').trim().toLowerCase();
+		return normalizedName === 'boot.ts' || normalizedName === 'boot.js' || normalizedPath.endsWith('/boot.ts') || normalizedPath.endsWith('/boot.js');
+	}
+
+	function collectRequiredPermissionsFromSource(source, platformName) {
+		const safePlatform = String(platformName || '').trim();
+		const rules = Array.isArray(endpointPermissionRulesByPlatform[safePlatform])
+			? endpointPermissionRulesByPlatform[safePlatform]
+			: [];
+		if (rules.length === 0) {
+			return [];
+		}
+
+		const required = new Set();
+		for (const rule of rules) {
+			if (!rule || typeof rule.matches !== 'function') {
+				continue;
+			}
+			if (rule.matches(source)) {
+				required.add(String(rule.permission || '').trim());
+			}
+		}
+
+		return Array.from(required).filter(Boolean);
+	}
+
 	async function saveCodeEditor(nextContent) {
 		const result = await saveEndpointContent(editorFilePath, nextContent);
 		if (!result?.ok) {
@@ -1078,6 +1146,35 @@
 
 		editorContent = nextContent;
 		status = `Saved: ${editorFileName}`;
+
+		if (editorLanguage === 'typescript' && isEndpointBootFile(editorFilePath, editorFileName)) {
+			const permissionsResult = await getPermissionsConfig();
+			if (permissionsResult?.ok) {
+				applyPermissionsConfigResult(permissionsResult);
+			}
+
+			const runtimePlatform = String((permissionsResult?.platform || permissionsPlatform || getCurrentRuntimePlatform()) || '').trim();
+			const requiredPermissions = collectRequiredPermissionsFromSource(nextContent, runtimePlatform);
+			if (requiredPermissions.length > 0) {
+				const checkedMap = new Map((permissionsEntries || []).map((entry) => [String(entry?.name || '').trim(), Boolean(entry?.checked)]));
+				const warningEntries = requiredPermissions.map((permissionName) => {
+					const safeName = String(permissionName || '').trim();
+					return {
+						name: safeName,
+						granted: Boolean(checkedMap.get(safeName)),
+					};
+				});
+				const missingEntries = warningEntries.filter((entry) => !entry.granted);
+				if (missingEntries.length > 0) {
+					endpointPermissionsWarningFileName = editorFileName || fileNameFromPath(editorFilePath);
+					endpointPermissionsWarningPlatform = runtimePlatform;
+					endpointPermissionsWarningEntries = warningEntries;
+					endpointPermissionsWarningOpen = true;
+					status = `Saved: ${editorFileName} (permissions required)`;
+				}
+			}
+		}
+
 		await refreshAll();
 	}
 
@@ -1631,6 +1728,7 @@
 			onExportBackup={exportBackupHandler}
 			onImportBackup={importBackupHandler}
 			onTogglePermission={togglePermissionHandler}
+			onOpenSystemPermissionSettings={openSystemPermissionSettingsHandler}
 			onStopBackgroundProcess={stopBackgroundProcessHandler}
 			onSaveMessageQueueTtlDays={saveMessageQueueTtlDaysHandler}
 			onFlushMessageQueue={flushMessageQueueHandler}
@@ -1836,6 +1934,36 @@
 		<svelte:fragment slot="actions">
 			<button type="button" class="btn-secondary" on:click={closeRenameDialog}>Cancel</button>
 			<button type="button" class="btn-primary" on:click={confirmRenameDialog}>Save</button>
+		</svelte:fragment>
+	</Modal>
+
+	<Modal
+		open={endpointPermissionsWarningOpen}
+		title="Required Permissions"
+		subtitle={`Endpoint ${endpointPermissionsWarningFileName || 'boot.ts'} requires additional permissions on ${endpointPermissionsWarningPlatform || getCurrentRuntimePlatform()}.`}
+		ariaLabel="Required permissions warning"
+		onClose={closeEndpointPermissionsWarning}
+	>
+		<div class="permissions-warning-list">
+			{#each endpointPermissionsWarningEntries as permissionEntry}
+				<div class="permissions-warning-item {permissionEntry.granted ? 'is-granted' : 'is-missing'}">
+					<span class="permissions-warning-name">{permissionEntry.name}</span>
+					<span class="permissions-warning-state">{permissionEntry.granted ? 'Granted' : 'Missing'}</span>
+				</div>
+			{/each}
+		</div>
+		<svelte:fragment slot="actions">
+			<button type="button" class="btn-secondary" on:click={closeEndpointPermissionsWarning}>Close</button>
+			<button
+				type="button"
+				class="btn-primary"
+				on:click={() => {
+					closeEndpointPermissionsWarning();
+					openSettings();
+				}}
+			>
+				Open Settings
+			</button>
 		</svelte:fragment>
 	</Modal>
 </div>
@@ -2258,5 +2386,43 @@
 		.network-graph-canvas {
 			height: 360px;
 		}
+	}
+
+	.permissions-warning-list {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		margin-top: 6px;
+	}
+
+	.permissions-warning-item {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 12px;
+		padding: 8px 10px;
+		border-radius: 8px;
+		border: 1px solid rgba(255, 255, 255, 0.12);
+		background: rgba(255, 255, 255, 0.03);
+	}
+
+	.permissions-warning-item.is-missing {
+		border-color: rgba(239, 93, 93, 0.56);
+		background: rgba(160, 45, 45, 0.22);
+	}
+
+	.permissions-warning-item.is-granted {
+		border-color: rgba(96, 230, 154, 0.5);
+		background: rgba(96, 230, 154, 0.14);
+	}
+
+	.permissions-warning-name {
+		font-size: 0.86rem;
+		font-weight: 600;
+	}
+
+	.permissions-warning-state {
+		font-size: 0.78rem;
+		opacity: 0.9;
 	}
 </style>

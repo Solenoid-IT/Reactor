@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('reactor', {
 	getPermissionsConfig: () => ipcRenderer.invoke('get-permissions-config'),
 	savePermissionsConfig: (permissions) => ipcRenderer.invoke('save-permissions-config', permissions),
 	requestSystemPermissions: (permissions) => ipcRenderer.invoke('request-system-permissions', permissions),
+	openSystemPermissionSettings: (permissions) => ipcRenderer.invoke('open-system-permission-settings', permissions),
 	stopBackgroundProcess: () => ipcRenderer.invoke('stop-background-process'),
 	pickDefaultProgram: () => ipcRenderer.invoke('pick-default-program'),
 	openEventLog: (filePath) => ipcRenderer.invoke('open-event-log', filePath),

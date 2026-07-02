@@ -7,12 +7,16 @@ import fs from 'fs/promises';
 import path from 'path';
 import { log } from 'core';
 
-import { Context } from 'core';
+import { Event, RuntimeEvent } from 'core';
 
 
 
-export async function run (ctx : Context)
+export async function run (event : Event)
 {
+  if (!(event instanceof RuntimeEvent) || event.data.name !== 'BOOT') {
+    return;
+  }
+
   const endpoint = process.env.REACTOR_HTTP_TEST_URL || 'https://httpbin.org/post';
   const defaultFilePath = path.join(__dirname, 'upload-test.txt');
   const filePath = process.env.REACTOR_HTTP_TEST_FILE || defaultFilePath;

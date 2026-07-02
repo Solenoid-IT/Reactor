@@ -178,6 +178,22 @@ public class ReactorMobilePlugin extends Plugin {
         return new File(getContext().getFilesDir(), REACTOR_NAME_FILE);
     }
 
+    @PluginMethod
+    public void getHomeDirectory(PluginCall call) {
+        try {
+            File filesDir = getContext().getFilesDir();
+            String path = filesDir != null ? filesDir.getAbsolutePath() : "";
+            call.resolve(new JSObject()
+                    .put("ok", true)
+                    .put("path", path));
+        } catch (Exception e) {
+            call.resolve(new JSObject()
+                    .put("ok", false)
+                    .put("error", e.getMessage())
+                    .put("path", ""));
+        }
+    }
+
     private String readConfiguredReactorNameFile() {
         try {
             File file = getReactorNameFile();
@@ -968,7 +984,7 @@ public class ReactorMobilePlugin extends Plugin {
                 .put("denied", deniedPermissions);
     }
 
-    private JSObject readPermissionsConfig() throws IOException {
+    private JSObject readPermissionsConfig() throws Exception {
         File file = getPermissionsFile();
         if (!file.exists() || !file.isFile()) {
             return new JSObject();
@@ -982,7 +998,7 @@ public class ReactorMobilePlugin extends Plugin {
         return new JSObject(content);
     }
 
-    private JSObject writePermissionsConfig(JSObject permissions) throws IOException {
+    private JSObject writePermissionsConfig(JSObject permissions) throws Exception {
         JSObject safePermissions = permissions != null ? permissions : new JSObject();
         writeTextFile(getPermissionsFile(), safePermissions.toString(2) + "\n");
         return safePermissions;
@@ -1049,6 +1065,53 @@ public class ReactorMobilePlugin extends Plugin {
         }
 
         call.resolve(buildPermissionRequestResult(requestedPermissions, true));
+    }
+
+    @PluginMethod
+    public void openSystemPermissionSettings(PluginCall call) {
+        List<String> requestedPermissions = getRequestedPermissionNames(call);
+        try {
+            if (requestsFilesystemPermission(requestedPermissions) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                    intent.setData(Uri.parse("package:" + getContext().getPackageName()));
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    getContext().startActivity(intent);
+                    call.resolve(new JSObject()
+                            .put("ok", true)
+                            .put("opened", true)
+                            .put("platform", "Android")
+                            .put("target", "ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION"));
+                    return;
+                } catch (Exception ignored) {
+                    Intent fallbackIntent = new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+                    fallbackIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    getContext().startActivity(fallbackIntent);
+                    call.resolve(new JSObject()
+                            .put("ok", true)
+                            .put("opened", true)
+                            .put("platform", "Android")
+                            .put("target", "ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION"));
+                    return;
+                }
+            }
+
+            Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+            intent.setData(Uri.parse("package:" + getContext().getPackageName()));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(intent);
+            call.resolve(new JSObject()
+                    .put("ok", true)
+                    .put("opened", true)
+                    .put("platform", "Android")
+                    .put("target", "ACTION_APPLICATION_DETAILS_SETTINGS"));
+        } catch (Exception e) {
+            call.resolve(new JSObject()
+                    .put("ok", false)
+                    .put("opened", false)
+                    .put("platform", "Android")
+                    .put("error", e.getMessage() != null ? e.getMessage() : "unable to open system permission settings"));
+        }
     }
 
     @ActivityCallback
@@ -1323,7 +1386,7 @@ public class ReactorMobilePlugin extends Plugin {
 
             File uuidFile = new File(projectDir, "uuid");
             File bootFile = new File(projectDir, "boot.ts");
-            File contextFile = new File(projectDir, "context.ts");
+            File contextFile = new File(projectDir, "event.ts");
             File packageJsonFile = new File(projectDir, "package.json");
             File eventLogFile = new File(projectDir, "activity.log");
             String source = readEndpointTemplateFromStorage(safeTemplate);
@@ -1346,7 +1409,7 @@ public class ReactorMobilePlugin extends Plugin {
 
             writeTextFile(uuidFile, UUID.randomUUID().toString().toLowerCase() + "\n");
             writeTextFile(bootFile, source);
-            writeTextFile(contextFile, "export type { Context } from 'core';\n");
+            writeTextFile(contextFile, "export type { Event, ReactorEvent, WatchEvent, MessageEvent, StreamEvent, StreamEndEvent, ScheduleEvent, RuntimeEvent, ManualEvent } from 'core';\n");
             writeTextFile(packageJsonFile, packageJson.toString(2) + "\n");
             writeTextFile(eventLogFile, "");
 

@@ -3,6 +3,7 @@ const fsNative = require('fs');
 const crypto = require('crypto');
 const dns = require('dns');
 const http = require('http');
+const { pipeline } = require('stream/promises');
 const dgram = require('dgram');
 const net = require('net');
 const os = require('os');
@@ -34,7 +35,18 @@ const DEFAULT_MESSAGE_QUEUE_RETRY_MS = 30 * 1000;
 const DEFAULT_STREAM_MAX_ACTIVE = 24;
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_STREAM_CLEANUP_INTERVAL_MS = 30 * 1000;
+const DEFAULT_WATCH_CREATED_POLL_MS = 1000;
+const DEFAULT_WATCH_CREATED_QUIET_MS = 10 * 1000;
+const DEFAULT_WATCH_CREATED_LARGE_QUIET_MS = 30 * 1000;
+const DEFAULT_WATCH_CREATED_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_WATCH_CREATED_LARGE_FILE_BYTES = 1024 * 1024 * 1024;
 const PROJECT_UUID_FILE = 'uuid';
+
+function delay(ms) {
+	return new Promise((resolve) => {
+		setTimeout(resolve, Math.max(0, Number(ms) || 0));
+	});
+}
 
 function collectKnownEntries(rootPath, map) {
 	let entries = [];
@@ -909,6 +921,11 @@ class ReactorRuntime {
 		this.messageQueueConfigPath = path.join(this.reactorRootDir, 'message-queue-config.json');
 		this.messageQueueTtlMs = this.readQueueDuration('REACTOR_MESSAGE_QUEUE_TTL_MS', DEFAULT_MESSAGE_QUEUE_TTL_MS, 60 * 1000);
 		this.messageQueueRetryMs = this.readQueueDuration('REACTOR_MESSAGE_QUEUE_RETRY_MS', DEFAULT_MESSAGE_QUEUE_RETRY_MS, 5 * 1000);
+		this.watchCreatedPollMs = this.readQueueDuration('REACTOR_WATCH_CREATED_POLL_MS', DEFAULT_WATCH_CREATED_POLL_MS, 250);
+		this.watchCreatedQuietMs = this.readQueueDuration('REACTOR_WATCH_CREATED_QUIET_MS', DEFAULT_WATCH_CREATED_QUIET_MS, 2000);
+		this.watchCreatedLargeQuietMs = this.readQueueDuration('REACTOR_WATCH_CREATED_LARGE_QUIET_MS', DEFAULT_WATCH_CREATED_LARGE_QUIET_MS, this.watchCreatedQuietMs);
+		this.watchCreatedTimeoutMs = this.readQueueDuration('REACTOR_WATCH_CREATED_TIMEOUT_MS', DEFAULT_WATCH_CREATED_TIMEOUT_MS, this.watchCreatedQuietMs);
+		this.watchCreatedLargeFileBytes = Math.max(1, Number(process.env.REACTOR_WATCH_CREATED_LARGE_FILE_BYTES) || DEFAULT_WATCH_CREATED_LARGE_FILE_BYTES);
 		this.messageQueueFlushTimer = null;
 		this.isFlushingMessageQueue = false;
 	}
@@ -1139,6 +1156,75 @@ class ReactorRuntime {
 				this.log(`[Queue] Flush failed: ${error.message}`);
 			});
 		}, this.messageQueueRetryMs);
+	}
+
+	resolveWatchCreatedQuietMs(sizeBytes) {
+		const safeSize = Number(sizeBytes) || 0;
+		if (safeSize >= this.watchCreatedLargeFileBytes) {
+			return this.watchCreatedLargeQuietMs;
+		}
+
+		return this.watchCreatedQuietMs;
+	}
+
+	async waitForWatchCreatedFileReady(filePath) {
+		const safePath = String(filePath || '').trim();
+		if (!safePath) {
+			return { ready: false };
+		}
+
+		const startedAt = Date.now();
+		let lastSize = -1;
+		let lastMtimeMs = -1;
+		let lastChangeAt = startedAt;
+
+		while (Date.now() - startedAt <= this.watchCreatedTimeoutMs) {
+			let stats = null;
+			try {
+				stats = await fs.stat(safePath);
+			} catch {
+				await delay(this.watchCreatedPollMs);
+				continue;
+			}
+
+			if (!stats || !stats.isFile()) {
+				await delay(this.watchCreatedPollMs);
+				continue;
+			}
+
+			const size = Number(stats.size) || 0;
+			const mtimeMs = Number(stats.mtimeMs) || 0;
+			if (size !== lastSize || mtimeMs !== lastMtimeMs) {
+				lastSize = size;
+				lastMtimeMs = mtimeMs;
+				lastChangeAt = Date.now();
+			}
+
+			const quietMs = this.resolveWatchCreatedQuietMs(size);
+			if (Date.now() - lastChangeAt >= quietMs) {
+				await delay(this.watchCreatedPollMs);
+				try {
+					const confirmStats = await fs.stat(safePath);
+					if (confirmStats && confirmStats.isFile()) {
+						const confirmSize = Number(confirmStats.size) || 0;
+						const confirmMtimeMs = Number(confirmStats.mtimeMs) || 0;
+						if (confirmSize === lastSize && confirmMtimeMs === lastMtimeMs) {
+							return {
+								ready: true,
+								size: confirmSize,
+								mtimeMs: confirmMtimeMs,
+							};
+						}
+					}
+				} catch {
+					// Keep waiting while file writer settles.
+				}
+			}
+
+			await delay(this.watchCreatedPollMs);
+		}
+
+		return { ready: false };
 	}
 
 	addHttpServerLog(message) {
@@ -3458,27 +3544,332 @@ class ReactorRuntime {
 		};
 
 		const fileFacade = {
-			readStream: (filePath, options = {}) => {
+			open: (filePath, options = {}) => {
 				const safePath = String(filePath || '').trim();
 				if (!safePath) {
-					throw new Error('File.readStream requires a file path');
+					throw new Error('File.open requires a file path');
+				}
+
+				const safeOptions = options && typeof options === 'object' ? options : {};
+				const openMode = String(safeOptions.mode || 'read').trim().toLowerCase();
+
+				if (openMode === 'write') {
+					if (!fsNative || typeof fsNative.createWriteStream !== 'function') {
+						throw new Error('File.open write mode not supported on this platform');
+					}
+
+					fsNative.mkdirSync(path.dirname(safePath), { recursive: true });
+					const appendMode = Boolean(safeOptions.append);
+					return fsNative.createWriteStream(safePath, {
+						flags: appendMode ? 'a' : 'w',
+					});
 				}
 
 				const fileInstance = new this.runtimeApi.FileSystem.File(safePath);
-				if (fileInstance && typeof fileInstance.readStream === 'function') {
-					return fileInstance.readStream(options || {});
+				if (fileInstance && typeof fileInstance.open === 'function') {
+					const readOptions = { ...safeOptions };
+					delete readOptions.mode;
+					delete readOptions.append;
+					return fileInstance.open(readOptions);
 				}
 
 				if (fsNative && typeof fsNative.createReadStream === 'function') {
-					return fsNative.createReadStream(safePath, options || {});
+					const readOptions = { ...safeOptions };
+					delete readOptions.mode;
+					delete readOptions.append;
+					return fsNative.createReadStream(safePath, readOptions);
 				}
 
-				throw new Error('File.readStream not supported on this platform');
+				throw new Error('File.open not supported on this platform');
+			},
+			copyStream: async (inputStream, outputStream) => {
+				if (!inputStream || !outputStream) {
+					throw new Error('File.copyStream requires input and output streams');
+				}
+
+				if (typeof outputStream.getWriter === 'function') {
+					const writer = outputStream.getWriter();
+					try {
+						for await (const chunk of inputStream) {
+							await writer.write(chunk);
+						}
+						await writer.close();
+						return true;
+					} finally {
+						writer.releaseLock();
+					}
+				}
+
+				await pipeline(inputStream, outputStream);
+				return true;
 			},
 		};
 
+		const fileSystemFacade = {
+			...(this.runtimeApi.FileSystem || {}),
+			File: Object.assign(this.runtimeApi.FileSystem.File, {
+				open: (filePath, options = {}) => fileFacade.open(filePath, options),
+				copyStream: (inputStream, outputStream) => fileFacade.copyStream(inputStream, outputStream),
+			}),
+		};
+
+		const normalizeEventPath = (rawPath) => {
+			const normalized = String(rawPath || '').replace(/\\/g, '/');
+			if (!normalized) {
+				return '';
+			}
+
+			if (normalized === '/' || /^[A-Za-z]:\/$/.test(normalized)) {
+				return normalized;
+			}
+
+			return normalized.replace(/\/+$/, '');
+		};
+
+		class Event {
+			constructor(type, data = {}, timestamp = new Date().toISOString()) {
+				this.type = String(type || '').trim().toUpperCase();
+				this.data = data && typeof data === 'object' ? data : {};
+				this.timestamp = String(timestamp || new Date().toISOString());
+				Object.freeze(this.data);
+				Object.freeze(this);
+			}
+		}
+
+		class WatchEvent extends Event {
+			constructor(data = {}, timestamp) {
+				super('WATCH', {
+					path: normalizeEventPath(data.path),
+					watchType: data.watchType || null,
+				}, timestamp);
+			}
+
+			get path() {
+				return this.data.path;
+			}
+
+			get watchType() {
+				return this.data.watchType;
+			}
+		}
+
+		class MessageEvent extends Event {
+			constructor(data = {}, timestamp) {
+				super('MESSAGE', {
+					sender: data.sender || null,
+					senderName: data.senderName || null,
+					target: data.target || null,
+					targetNode: data.targetNode || null,
+					targetEndpoint: data.targetEndpoint || null,
+					targetEndpointId: data.targetEndpointId || null,
+					content: data.content || '',
+					contentType: data.contentType || '',
+					bodyBase64: data.bodyBase64 || '',
+					json: data.json === undefined ? null : data.json,
+					headers: data.headers && typeof data.headers === 'object' ? data.headers : {},
+				}, timestamp);
+			}
+		}
+
+		class StreamEvent extends Event {
+			constructor(data = {}, timestamp) {
+				super('STREAM', {
+					sender: data.sender || null,
+					senderName: data.senderName || null,
+					target: data.target || null,
+					targetNode: data.targetNode || null,
+					targetEndpoint: data.targetEndpoint || null,
+					targetEndpointId: data.targetEndpointId || null,
+					content: data.content || '',
+					contentType: data.contentType || '',
+					bodyBase64: data.bodyBase64 || '',
+					json: data.json === undefined ? null : data.json,
+					headers: data.headers && typeof data.headers === 'object' ? data.headers : {},
+					stream: data.stream || null,
+				}, timestamp);
+			}
+		}
+
+		class StreamEndEvent extends Event {
+			constructor(data = {}, timestamp) {
+				const resolvedTmpPath = String(
+					data.tmpPath
+					|| (
+						data.streamEnd && typeof data.streamEnd.getPath === 'function'
+							? data.streamEnd.getPath()
+							: ''
+					)
+					|| '',
+				);
+				const resolvedMetadata = data.metadata && typeof data.metadata === 'object'
+					? data.metadata
+					: (
+						data.streamEnd && typeof data.streamEnd.getMetadata === 'function'
+							? data.streamEnd.getMetadata()
+							: {}
+					);
+				super('STREAMEND', {
+					sender: data.sender || null,
+					senderName: data.senderName || null,
+					target: data.target || null,
+					targetNode: data.targetNode || null,
+					targetEndpoint: data.targetEndpoint || null,
+					targetEndpointId: data.targetEndpointId || null,
+					content: data.content || '',
+					contentType: data.contentType || '',
+					bodyBase64: data.bodyBase64 || '',
+					json: data.json === undefined ? null : data.json,
+					headers: data.headers && typeof data.headers === 'object' ? data.headers : {},
+					metadata: resolvedMetadata,
+					tmpPath: resolvedTmpPath,
+					streamEnd: data.streamEnd || null,
+				}, timestamp);
+			}
+
+			get metadata() {
+				return this.data.metadata;
+			}
+
+			get tmpPath() {
+				return this.data.tmpPath;
+			}
+		}
+
+		class ScheduleEvent extends Event {
+			constructor(data = {}, timestamp) {
+				super('SCHEDULE', {
+					expression: data.expression || null,
+				}, timestamp);
+			}
+		}
+
+		class RuntimeEvent extends Event {
+			constructor(data = {}, timestamp) {
+				super('EVENT', {
+					name: data.name || null,
+					networkChange: data.networkChange || null,
+				}, timestamp);
+			}
+
+			get name() {
+				return this.data.name;
+			}
+		}
+
+		class ManualEvent extends Event {
+			constructor(data = {}, timestamp) {
+				super('MANUAL_TEST', {
+					reason: data.reason || 'ON_DEMAND',
+				}, timestamp);
+			}
+		}
+
+		const createEventFromContext = (context = {}) => {
+			const trigger = String(context.trigger || '').trim().toUpperCase();
+			switch (trigger) {
+				case 'WATCH':
+					return new WatchEvent({
+						path: context.watchPath || '',
+						watchType: context.watchType || null,
+					});
+				case 'MESSAGE':
+					return new MessageEvent({
+						sender: context.messageSender || null,
+						senderName: context.messageSenderName || null,
+						target: context.messageTarget || null,
+						targetNode: context.messageTargetNode || null,
+						targetEndpoint: context.messageTargetEndpoint || null,
+						targetEndpointId: context.messageTargetEndpointId || null,
+						content: context.messageContent || '',
+						contentType: context.messageContentType || '',
+						bodyBase64: context.messageBodyBase64 || '',
+						json: context.messageJson === undefined ? null : context.messageJson,
+						headers: context.messageHeaders || {},
+					});
+				case 'STREAM':
+					return new StreamEvent({
+						sender: context.messageSender || null,
+						senderName: context.messageSenderName || null,
+						target: context.messageTarget || null,
+						targetNode: context.messageTargetNode || null,
+						targetEndpoint: context.messageTargetEndpoint || null,
+						targetEndpointId: context.messageTargetEndpointId || null,
+						content: context.messageContent || '',
+						contentType: context.messageContentType || '',
+						bodyBase64: context.messageBodyBase64 || '',
+						json: context.messageJson === undefined ? null : context.messageJson,
+						headers: context.messageHeaders || {},
+						stream: context.stream || null,
+					});
+				case 'STREAMEND':
+					return new StreamEndEvent({
+						sender: context.messageSender || null,
+						senderName: context.messageSenderName || null,
+						target: context.messageTarget || null,
+						targetNode: context.messageTargetNode || null,
+						targetEndpoint: context.messageTargetEndpoint || null,
+						targetEndpointId: context.messageTargetEndpointId || null,
+						content: context.messageContent || '',
+						contentType: context.messageContentType || '',
+						bodyBase64: context.messageBodyBase64 || '',
+						json: context.messageJson === undefined ? null : context.messageJson,
+						headers: context.messageHeaders || {},
+						metadata: context.streamEnd && typeof context.streamEnd.getMetadata === 'function'
+							? context.streamEnd.getMetadata()
+							: (context.streamEndMetadata || {}),
+						tmpPath: context.streamEnd && typeof context.streamEnd.getPath === 'function'
+							? context.streamEnd.getPath()
+							: (context.streamEndPath || null),
+						streamEnd: context.streamEnd || null,
+					});
+				case 'SCHEDULE':
+					return new ScheduleEvent({
+						expression: context.expression || null,
+					});
+				case 'EVENT':
+					return new RuntimeEvent({
+						name: context.event || null,
+						networkChange: context.networkChange || null,
+					});
+				case 'MANUAL_TEST':
+					return new ManualEvent({
+						reason: context.event || 'ON_DEMAND',
+					});
+				default:
+					return new Event(trigger || 'UNKNOWN', {
+						...context,
+					});
+			}
+		};
+
 		return {
+			Event,
+			WatchEvent,
+			MessageEvent,
+			StreamEvent,
+			StreamEndEvent,
+			ScheduleEvent,
+			RuntimeEvent,
+			ManualEvent,
+			__createEventFromContext: createEventFromContext,
 			Node: {
+				getHomeDirectory: async () => {
+					if (!this.runtimeApi.System || typeof this.runtimeApi.System.getHomeDirectory !== 'function') {
+						throw new Error('Node.getHomeDirectory not supported on this platform');
+					}
+
+					const rawHomeDirectory = await this.runtimeApi.System.getHomeDirectory();
+					const normalizedHomeDirectory = String(rawHomeDirectory || '').replace(/\\/g, '/');
+					if (!normalizedHomeDirectory) {
+						return '';
+					}
+
+					if (normalizedHomeDirectory === '/' || /^[A-Za-z]:\/$/.test(normalizedHomeDirectory)) {
+						return normalizedHomeDirectory;
+					}
+
+					return normalizedHomeDirectory.replace(/\/+$/, '');
+				},
 				sendMessage: async (target, content, optionsOrEnqueueOnFail = false) => {
 					let headers = {};
 					let enqueueOnFail = false;
@@ -3512,7 +3903,7 @@ class ReactorRuntime {
 			},
 			File: fileFacade,
 			api: this.runtimeApi,
-			FileSystem: this.runtimeApi.FileSystem,
+			FileSystem: fileSystemFacade,
 			HttpClient: httpClient,
 			Device: this.runtimeApi.Device,
 			System: this.runtimeApi.System,
@@ -4039,6 +4430,9 @@ class ReactorRuntime {
 					projectDir,
 					uuid: endpointId,
 					endpointId: endpointId,
+					createEvent: typeof coreApi.__createEventFromContext === 'function'
+						? coreApi.__createEventFromContext
+						: null,
 					eventLogPath: path.join(path.dirname(normalizedEndpointPath), 'activity.log'),
 					run: runner,
 					schedule: metadata.schedule,
@@ -4222,7 +4616,10 @@ class ReactorRuntime {
 		});
 
 		try {
-			await Promise.resolve(endpoint.run({ ...context }));
+			const eventObject = endpoint && typeof endpoint.createEvent === 'function'
+				? endpoint.createEvent(context || {})
+				: { ...context };
+			await Promise.resolve(endpoint.run(eventObject));
 			this.log(`Completed ${endpoint.name}`);
 		} catch (error) {
 			this.log(`Error in ${endpoint.name}: ${error.stack || error.message}`);
@@ -4260,6 +4657,7 @@ class ReactorRuntime {
 				const listenerSet = Array.isArray(watchRule.listeners)
 					? new Set(watchRule.listeners)
 					: ALL_WATCH_LISTENERS;
+				const pendingCreatedDispatches = new Map();
 
 				if (Array.isArray(watchRule.listeners) && watchRule.listeners.length === 0) {
 					this.log(`Skipping @watch ${watchPath} in ${endpoint.name}: no valid listeners in filter list`);
@@ -4288,6 +4686,33 @@ class ReactorRuntime {
 						const fullPath = path.join(resolvedWatchPath, String(filename));
 						const watchType = detectWatchType(eventType, fullPath, knownEntries);
 						if (!watchType || !listenerSet.has(watchType)) {
+							return;
+						}
+
+						if (watchType === 'file:created') {
+							if (pendingCreatedDispatches.has(fullPath)) {
+								return;
+							}
+
+							const pending = (async () => {
+								const readyResult = await this.waitForWatchCreatedFileReady(fullPath);
+								if (!readyResult.ready || this.isReloading) {
+									return;
+								}
+
+								this.log(`[WATCH] ${endpoint.name}: file:created at ${fullPath} (stable)`);
+								this.runEndpoint(endpoint, {
+									trigger: 'WATCH',
+									watchPath: fullPath,
+									watchType,
+								}).catch((error) => {
+									this.log(`Error running ${endpoint.name} on watch event: ${error.message}`);
+								});
+							})().finally(() => {
+								pendingCreatedDispatches.delete(fullPath);
+							});
+
+							pendingCreatedDispatches.set(fullPath, pending);
 							return;
 						}
 

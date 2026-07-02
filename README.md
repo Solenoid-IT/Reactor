@@ -407,33 +407,30 @@ Minimal example:
 
 // @on SCHEDULE "EVERY 30 SECOND"
 
-import { Context, log } from 'core';
+import { Event, log } from 'core';
 
-export async function run (ctx: Context)
+export async function run (event: Event)
 {
   await log( 'scheduled execution', 'I' );
 }
 ```
 
-Available ctx fields:
-- trigger: EVENT, SCHEDULE, WATCH, or MESSAGE
-- event: event name when trigger is EVENT
-- expression: schedule expression when trigger is SCHEDULE
-- messageSender: normalized sender identifier for MESSAGE trigger
-- messageSenderName: sender name from Reactor-Name header (if present)
-- messageTarget: target node name for MESSAGE trigger when available
-- messageTargetNode: same as messageTarget, explicit node field
-- messageTargetEndpointId: target endpoint project UUID when the sender addressed a specific endpoint
-- messageContent: UTF-8 message body text
-- messageContentType: incoming content-type
-- messageBodyBase64: raw body payload encoded as base64
-- messageJson: parsed JSON body when content-type is application/json
-- messageHeaders: incoming request headers for MESSAGE trigger
-- watchPath: path that generated WATCH event
-- watchType: watch event type
+Available event classes:
+- Event (base)
+- WatchEvent
+- MessageEvent
+- StreamEvent
+- StreamEndEvent
+- ScheduleEvent
+- RuntimeEvent
+- ManualEvent
+
+Common payload access:
+- event.type: trigger type
+- event.data: trigger-specific payload
 
 Runtime APIs must be imported from `core`:
-- `import { Context } from 'core'`
+- `import { Event } from 'core'`
 - `import { log } from 'core'`
 - `import { Node } from 'core'` then `Node.sendMessage(...)`
 - `import { HttpClient, FileSystem, Device, System, api } from 'core'`
@@ -446,13 +443,13 @@ WATCH example with listener filter:
 
 // @on WATCH "/my/folder" [file:created, file:moved, dir:deleted]
 
-import { Context, log } from 'core';
+import { Event, WatchEvent, log } from 'core';
 
-export async function run (ctx: Context)
+export async function run (event: Event)
 {
-  if ( ctx.trigger === 'WATCH' )
+  if (event instanceof WatchEvent)
   {
-    await log( 'watch event: ' + ctx.watchPath + ' (' + ctx.watchType + ')', 'I' );
+    await log( 'watch event: ' + event.path + ' (' + event.watchType + ')', 'I' );
   }
 }
 ```

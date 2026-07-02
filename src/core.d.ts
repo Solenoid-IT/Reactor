@@ -53,17 +53,40 @@ declare module 'core' {
 
 	export interface FileApi {
 		read(): Promise<string | null>;
-		readStream(options?: { chunkSize?: number; encoding?: string }): AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array>;
 		write(content: string, append?: boolean): Promise<boolean>;
 		delete(): Promise<boolean>;
 		getMeta(): Promise<FileMeta>;
 	}
 
 	export interface FileStaticApi {
-		readStream(
+		copyStream(
+			input: AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream,
+			output: WritableStream<Uint8Array> | NodeJS.WritableStream,
+		): Promise<boolean>;
+		open(
 			filePath: string,
-			options?: { chunkSize?: number; encoding?: string },
+			options?: { chunkSize?: number; encoding?: string; mode?: 'read' },
 		): AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array>;
+		open(
+			filePath: string,
+			options: { mode: 'write'; append?: boolean },
+		): WritableStream<Uint8Array> | NodeJS.WritableStream;
+	}
+
+	export interface FileConstructorApi {
+		new (filePath: string): FileApi;
+		copyStream(
+			input: AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream,
+			output: WritableStream<Uint8Array> | NodeJS.WritableStream,
+		): Promise<boolean>;
+		open(
+			filePath: string,
+			options?: { chunkSize?: number; encoding?: string; mode?: 'read' },
+		): AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array>;
+		open(
+			filePath: string,
+			options: { mode: 'write'; append?: boolean },
+		): WritableStream<Uint8Array> | NodeJS.WritableStream;
 	}
 
 	export interface DirectoryApi {
@@ -74,7 +97,7 @@ declare module 'core' {
 	}
 
 	export interface FileSystemApi {
-		File: new (filePath: string) => FileApi;
+		File: FileConstructorApi;
 		Directory: new (dirPath: string) => DirectoryApi;
 	}
 
@@ -130,6 +153,7 @@ declare module 'core' {
 
 	export interface SystemApi {
 		Process: new (command: string) => ProcessApi;
+		getHomeDirectory(): Promise<string>;
 	}
 
 	export interface NodeSendMessageOptions {
@@ -223,6 +247,8 @@ declare module 'core' {
 	}
 
 	export interface NodeApi {
+		getHomeDirectory: () => Promise<string>;
+
 		sendMessage: (
 			target: string,
 			content: string | Uint8Array | Buffer | Record<string, unknown>,
@@ -277,27 +303,104 @@ declare module 'core' {
 		current: NetChangeSnapshot;
 	}
 
-	export interface Context {
-		trigger?: string;
-		event?: string | null;
-		expression?: string | null;
-		messageSender?: string | null;
-		messageSenderName?: string | null;
-		messageTarget?: string | null;
-		messageTargetNode?: string | null;
-		messageTargetEndpoint?: string | null;
-		messageTargetEndpointId?: string | null;
-		messageContent?: string;
-		messageContentType?: string;
-		messageBodyBase64?: string;
-		messageJson?: unknown;
-		stream?: StreamPacketApi | null;
-		streamEnd?: StreamEndApi | null;
-		networkChange?: NetChangeContext | null;
-		messageHeaders?: IncomingHeadersMap;
-		watchPath?: string;
-		watchType?: 'file:created' | 'file:deleted' | 'file:moved' | 'dir:created' | 'dir:deleted' | 'dir:moved' | 'file:changed';
+	export type WatchEventType = 'file:created' | 'file:deleted' | 'file:moved' | 'dir:created' | 'dir:deleted' | 'dir:moved' | 'file:changed';
+
+	export interface EventData {
+		[key: string]: unknown;
 	}
+
+	export class Event<TType extends string = string, TData extends EventData = EventData> {
+		readonly type: TType;
+		readonly data: TData;
+		readonly timestamp: string;
+		constructor(type: TType, data?: TData, timestamp?: string);
+	}
+
+	export interface WatchEventData extends EventData {
+		path: string;
+		watchType: WatchEventType | null;
+	}
+
+	export class WatchEvent extends Event<'WATCH', WatchEventData> {
+		constructor(data?: Partial<WatchEventData>, timestamp?: string);
+		readonly path: string;
+		readonly watchType: WatchEventType | null;
+		readonly data: never;
+	}
+
+	export interface MessageEventData extends EventData {
+		sender: string | null;
+		senderName: string | null;
+		target: string | null;
+		targetNode: string | null;
+		targetEndpoint: string | null;
+		targetEndpointId: string | null;
+		content: string;
+		contentType: string;
+		bodyBase64: string;
+		json: unknown;
+		headers: IncomingHeadersMap;
+	}
+
+	export class MessageEvent extends Event<'MESSAGE', MessageEventData> {
+		constructor(data?: Partial<MessageEventData>, timestamp?: string);
+	}
+
+	export interface StreamEventData extends MessageEventData {
+		stream: StreamPacketApi | null;
+	}
+
+	export class StreamEvent extends Event<'STREAM', StreamEventData> {
+		constructor(data?: Partial<StreamEventData>, timestamp?: string);
+	}
+
+	export interface StreamEndEventData extends MessageEventData {
+		metadata: Record<string, unknown>;
+		tmpPath: string;
+		streamEnd: StreamEndApi | null;
+	}
+
+	export class StreamEndEvent extends Event<'STREAMEND', StreamEndEventData> {
+		constructor(data?: Partial<StreamEndEventData>, timestamp?: string);
+		readonly metadata: Record<string, unknown>;
+		readonly tmpPath: string;
+	}
+
+	export interface ScheduleEventData extends EventData {
+		expression: string | null;
+	}
+
+	export class ScheduleEvent extends Event<'SCHEDULE', ScheduleEventData> {
+		constructor(data?: Partial<ScheduleEventData>, timestamp?: string);
+	}
+
+	export interface RuntimeEventData extends EventData {
+		name: string | null;
+		networkChange: NetChangeContext | null;
+	}
+
+	export class RuntimeEvent extends Event<'EVENT', RuntimeEventData> {
+		constructor(data?: Partial<RuntimeEventData>, timestamp?: string);
+		readonly name: string | null;
+	}
+
+	export interface ManualEventData extends EventData {
+		reason: string | null;
+	}
+
+	export class ManualEvent extends Event<'MANUAL_TEST', ManualEventData> {
+		constructor(data?: Partial<ManualEventData>, timestamp?: string);
+	}
+
+	export type ReactorEvent =
+		| WatchEvent
+		| MessageEvent
+		| StreamEvent
+		| StreamEndEvent
+		| ScheduleEvent
+		| RuntimeEvent
+		| ManualEvent
+		| Event;
 
 	export const api: RuntimeApi;
 	export const File: FileStaticApi;

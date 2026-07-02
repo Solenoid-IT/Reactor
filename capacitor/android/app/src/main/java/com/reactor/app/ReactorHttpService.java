@@ -14,6 +14,8 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
 import android.os.Build;
+import android.os.Environment;
+import android.os.FileObserver;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -114,6 +116,12 @@ public class ReactorHttpService extends Service {
     private static final long DEFAULT_P2P_AUTODIAL_COOLDOWN_MS = 30L * 1000L;
     private static final long NET_CHANGE_DEBOUNCE_MS = 2500L;
     private static final long NET_CHANGE_FALLBACK_POLL_INTERVAL_MS = 60000L;
+    private static final long WATCH_CREATED_POLL_MS = 1000L;
+    private static final long WATCH_CREATED_QUIET_MS = 10000L;
+    private static final long WATCH_CREATED_LARGE_QUIET_MS = 30000L;
+    private static final long WATCH_CREATED_TIMEOUT_MS = 10L * 60L * 1000L;
+    private static final long WATCH_CREATED_CLOSE_SETTLE_MS = 1500L;
+    private static final long WATCH_CREATED_LARGE_FILE_BYTES = 1024L * 1024L * 1024L;
 
     private static volatile boolean running = false;
     private static volatile int currentPort = DEFAULT_PORT;
@@ -161,39 +169,59 @@ public class ReactorHttpService extends Service {
     private boolean networkCallbackRegistered = false;
     private Handler networkDebounceHandler;
     private Runnable networkDebounceRunnable;
+    private final List<EndpointWatchObserver> watchObservers = new ArrayList<>();
+    private final Object watchObserverLock = new Object();
+    private final ConcurrentHashMap<String, IncomingStreamState> incomingStreams = new ConcurrentHashMap<>();
 
     private static final Pattern SEND_MESSAGE_CALL_PATTERN = Pattern.compile(
             "Node\\.sendMessage\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\1\\s*,\\s*(['\"])\\s*(.*?)\\s*\\3",
             Pattern.DOTALL
     );
+        private static final Pattern FILE_COPY_STREAM_CALL_PATTERN = Pattern.compile(
+            "FileSystem\\.File\\.copyStream\\s*\\(\\s*([^,\\)]+)\\s*,\\s*([^\\)]+)\\s*\\)",
+            Pattern.DOTALL
+        );
         private static final Pattern EXCHANGE_SEND_MESSAGE_CALL_PATTERN = Pattern.compile(
             "Node\\.exchange\\s*\\(\\s*\\)\\s*\\.\\s*sendMessage\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\1\\s*,\\s*(['\"])\\s*(.*?)\\s*\\3",
             Pattern.DOTALL
         );
         private static final Pattern STREAM_FILE_CALL_PATTERN = Pattern.compile(
-            "Node\\.stream\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\1\\s*,\\s*File\\.readStream\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\3",
+            "Node\\.stream\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\1\\s*,\\s*(?:File\\.open|FileSystem\\.File\\.open)\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\3",
             Pattern.DOTALL
         );
         private static final Pattern EXCHANGE_STREAM_FILE_CALL_PATTERN = Pattern.compile(
-            "Node\\.exchange\\s*\\(\\s*\\)\\s*\\.\\s*stream\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\1\\s*,\\s*File\\.readStream\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\3",
+            "Node\\.exchange\\s*\\(\\s*\\)\\s*\\.\\s*stream\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\1\\s*,\\s*(?:File\\.open|FileSystem\\.File\\.open)\\s*\\(\\s*(['\"])\\s*(.*?)\\s*\\3",
             Pattern.DOTALL
         );
             private static final Pattern STREAM_CALL_GENERIC_PATTERN = Pattern.compile(
-                "Node\\.stream\\s*\\(\\s*([^,\\)]+)\\s*,\\s*File\\.readStream\\s*\\(\\s*([^\\),]+)",
+                "Node\\.stream\\s*\\(\\s*([^,\\)]+)\\s*,\\s*([^,\\)]+)",
                 Pattern.DOTALL
             );
             private static final Pattern EXCHANGE_STREAM_CALL_GENERIC_PATTERN = Pattern.compile(
-                "Node\\.exchange\\s*\\(\\s*\\)\\s*\\.\\s*stream\\s*\\(\\s*([^,\\)]+)\\s*,\\s*File\\.readStream\\s*\\(\\s*([^\\),]+)",
+                "Node\\.exchange\\s*\\(\\s*\\)\\s*\\.\\s*stream\\s*\\(\\s*([^,\\)]+)\\s*,\\s*([^,\\)]+)",
                 Pattern.DOTALL
             );
             private static final Pattern STREAM_VAR_ASSIGN_PATTERN = Pattern.compile(
-                "(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*=\\s*(?:await\\s+)?File\\.readStream\\s*\\(\\s*([^\\),]+)",
+                "(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*=\\s*(?:await\\s+)?(?:File\\.open|FileSystem\\.File\\.open)\\s*\\(\\s*([^\\),]+)",
                 Pattern.DOTALL
             );
             private static final Pattern STRING_VAR_ASSIGN_PATTERN = Pattern.compile(
                 "(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*=\\s*(['\"])(.*?)\\2",
                 Pattern.DOTALL
             );
+            private static final Pattern HOME_DIR_VAR_ASSIGN_PATTERN = Pattern.compile(
+                "(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*=\\s*(?:await\\s+)?Node\\.getHomeDirectory\\s*\\(",
+                Pattern.DOTALL
+            );
+        private static final Set<String> VALID_WATCH_LISTENERS = new HashSet<>(Arrays.asList(
+                "file:created",
+                "file:deleted",
+                "file:moved",
+                "file:changed",
+                "dir:created",
+                "dir:deleted",
+                "dir:moved"
+        ));
         private static final int DEFAULT_STREAM_CHUNK_SIZE = 64 * 1024;
 
     private static class MessageEndpoint {
@@ -214,6 +242,42 @@ public class ReactorHttpService extends Service {
         boolean streamEndFromAnySender;
         List<String> streamEndSenders;
         boolean hasNetChangeEvent;
+        boolean hasWatchEvent;
+        List<WatchRule> watchRules;
+    }
+
+    private static class WatchRule {
+        String path;
+        Set<String> listeners;
+    }
+
+    private static class EndpointWatchObserver {
+        MessageEndpoint endpoint;
+        WatchRule rule;
+        String resolvedPath;
+        FileObserver observer;
+        ConcurrentHashMap<String, PendingWatchCreatedState> pendingCreatedStates = new ConcurrentHashMap<>();
+        Set<String> pendingCreatedInFlight = ConcurrentHashMap.newKeySet();
+    }
+
+    private static class PendingWatchCreatedState {
+        volatile long firstSeenAtMs;
+        volatile long lastMutationAtMs;
+        volatile long lastCloseWriteAtMs;
+        volatile long lastSize;
+        volatile long lastMtimeMs;
+    }
+
+    private static class IncomingStreamState {
+        String key;
+        String streamId;
+        String sender;
+        File partFile;
+        FileOutputStream output;
+        JSONObject metadata;
+        String contentType;
+        long totalBytes;
+        int chunks;
     }
 
     private static class PendingBinaryChunkMeta {
@@ -1006,9 +1070,11 @@ public class ReactorHttpService extends Service {
 
         appendGlobalLog(buildServerLifecycleLog("START", "listening on port " + port));
         startNetworkWatcher();
+        startWatchObservers();
     }
 
     private synchronized void stopServer() {
+        stopWatchObservers();
         stopNetworkWatcher();
         running = false;
 
@@ -1217,7 +1283,7 @@ public class ReactorHttpService extends Service {
 
             try {
                 writeExecutionStart(endpoint, "NET_CHANGE", "NET_CHANGE");
-                executeEndpointActions(endpoint, bodyText, headers);
+                executeEndpointActions(endpoint, bodyText, headers, null);
             } catch (Exception executionError) {
                 writeExecutionError(endpoint, "NET_CHANGE", "NET_CHANGE", executionError.getMessage());
             }
@@ -1653,9 +1719,19 @@ public class ReactorHttpService extends Service {
                         ? streamPayload.optString("phase", "").trim().toLowerCase(Locale.ROOT)
                         : "";
                 String primaryEvent = streamEnvelope ? "STREAM" : "MESSAGE";
+                String streamSenderKey = String.valueOf(senderName == null ? "" : senderName).trim().toLowerCase(Locale.ROOT);
+                if (streamSenderKey.isEmpty()) {
+                    streamSenderKey = String.valueOf(senderId == null ? "" : senderId).trim().toLowerCase(Locale.ROOT);
+                }
+                if (streamSenderKey.isEmpty()) {
+                    streamSenderKey = String.valueOf(remoteHost == null ? "" : remoteHost).trim().toLowerCase(Locale.ROOT);
+                }
                 Map<String, String> effectiveHeaders = streamEnvelope
                         ? withStreamHeaders(headers, streamPayload, primaryEvent)
                         : new HashMap<>(headers);
+                Map<String, String> streamEventContext = streamEnvelope
+                    ? buildIncomingStreamEventContext(streamSenderKey, streamPayload)
+                    : new HashMap<>();
                 JSONArray deliveredEndpoints = new JSONArray();
                 JSONArray streamEndEndpoints = new JSONArray();
                 int deliveredCount = 0;
@@ -1671,7 +1747,7 @@ public class ReactorHttpService extends Service {
 
                     try {
                         writeExecutionStart(endpoint, primaryEvent, primaryEvent);
-                        executeEndpointActions(endpoint, bodyText, effectiveHeaders);
+                        executeEndpointActions(endpoint, bodyText, effectiveHeaders, streamEventContext);
                         deliveredEndpoints.put(endpoint.endpointName);
                         deliveredCount += 1;
                     } catch (Exception executionError) {
@@ -1691,7 +1767,7 @@ public class ReactorHttpService extends Service {
 
                         try {
                             writeExecutionStart(endpoint, "STREAMEND", "STREAMEND");
-                            executeEndpointActions(endpoint, bodyText, streamEndHeaders);
+                            executeEndpointActions(endpoint, bodyText, streamEndHeaders, streamEventContext);
                             streamEndEndpoints.put(endpoint.endpointName);
                             streamEndCount += 1;
                         } catch (Exception executionError) {
@@ -2106,6 +2182,9 @@ public class ReactorHttpService extends Service {
                 ? streamPayload.optString("phase", "").trim().toLowerCase(Locale.ROOT)
                 : "";
         String primaryEvent = streamEnvelope ? "STREAM" : "MESSAGE";
+        Map<String, String> streamEventContext = streamEnvelope
+            ? buildIncomingStreamEventContext(safeFromNode, streamPayload)
+            : new HashMap<>();
         Map<String, String> effectiveHeaders = streamEnvelope
                 ? withStreamHeaders(headers, streamPayload, primaryEvent)
                 : new HashMap<>(headers);
@@ -2125,7 +2204,7 @@ public class ReactorHttpService extends Service {
 
             try {
                 writeExecutionStart(endpoint, primaryEvent, primaryEvent);
-                executeEndpointActions(endpoint, parsedEnvelope.bodyText, effectiveHeaders);
+                executeEndpointActions(endpoint, parsedEnvelope.bodyText, effectiveHeaders, streamEventContext);
             } catch (Exception executionError) {
                 writeExecutionError(endpoint, primaryEvent, primaryEvent, executionError.getMessage());
             }
@@ -2148,7 +2227,7 @@ public class ReactorHttpService extends Service {
 
                 try {
                     writeExecutionStart(endpoint, "STREAMEND", "STREAMEND");
-                    executeEndpointActions(endpoint, parsedEnvelope.bodyText, streamEndHeaders);
+                    executeEndpointActions(endpoint, parsedEnvelope.bodyText, streamEndHeaders, streamEventContext);
                 } catch (Exception executionError) {
                     writeExecutionError(endpoint, "STREAMEND", "STREAMEND", executionError.getMessage());
                 }
@@ -2220,6 +2299,167 @@ public class ReactorHttpService extends Service {
             parsed.bodyText = String.valueOf(rawEnvelopePayload == null ? "" : rawEnvelopePayload);
         }
         return parsed;
+    }
+
+    private File getIncomingStreamsDirectory() {
+        return new File(getFilesDir(), "temp_files/streams");
+    }
+
+    private String buildIncomingStreamKey(String senderKey, String streamId) {
+        String safeSender = String.valueOf(senderKey == null ? "" : senderKey).trim().toLowerCase(Locale.ROOT);
+        String safeStreamId = String.valueOf(streamId == null ? "" : streamId).trim();
+        return safeSender + "|" + safeStreamId;
+    }
+
+    private String sanitizeIncomingStreamSegment(String value) {
+        String safe = String.valueOf(value == null ? "" : value).replaceAll("[^a-zA-Z0-9._-]", "_");
+        if (safe.isEmpty()) {
+            return "unknown";
+        }
+        return safe.length() > 64 ? safe.substring(0, 64) : safe;
+    }
+
+    private void appendMetadataContext(Map<String, String> context, String prefix, JSONObject metadata) {
+        if (context == null || metadata == null) {
+            return;
+        }
+
+        Iterator<String> keys = metadata.keys();
+        while (keys.hasNext()) {
+            String key = String.valueOf(keys.next());
+            String safeKey = key.trim();
+            if (safeKey.isEmpty()) {
+                continue;
+            }
+
+            Object value = metadata.opt(safeKey);
+            String nextPrefix = prefix + "." + safeKey;
+            if (value instanceof JSONObject) {
+                appendMetadataContext(context, nextPrefix, (JSONObject) value);
+                continue;
+            }
+
+            if (value instanceof JSONArray) {
+                context.put(nextPrefix, String.valueOf(value));
+                continue;
+            }
+
+            if (value == null || value == JSONObject.NULL) {
+                continue;
+            }
+
+            context.put(nextPrefix, String.valueOf(value));
+        }
+    }
+
+    private Map<String, String> buildIncomingStreamEventContext(String senderKey, JSONObject streamPayload) {
+        Map<String, String> context = new HashMap<>();
+        if (streamPayload == null || !streamPayload.optBoolean("__reactorStream", false)) {
+            return context;
+        }
+
+        String streamId = String.valueOf(streamPayload.optString("streamId", "")).trim();
+        if (streamId.isEmpty()) {
+            return context;
+        }
+
+        String phase = String.valueOf(streamPayload.optString("phase", "")).trim().toLowerCase(Locale.ROOT);
+        String key = buildIncomingStreamKey(senderKey, streamId);
+        context.put("event.streamId", streamId);
+
+        if ("start".equals(phase)) {
+            try {
+                File dir = getIncomingStreamsDirectory();
+                if (!dir.exists()) {
+                    dir.mkdirs();
+                }
+
+                IncomingStreamState previous = incomingStreams.remove(key);
+                if (previous != null) {
+                    try {
+                        if (previous.output != null) {
+                            previous.output.close();
+                        }
+                    } catch (Exception ignored) {
+                        // Ignore stale stream close errors.
+                    }
+                }
+
+                IncomingStreamState state = new IncomingStreamState();
+                state.key = key;
+                state.streamId = streamId;
+                state.sender = String.valueOf(senderKey == null ? "" : senderKey);
+                String senderSegment = sanitizeIncomingStreamSegment(state.sender);
+                String streamSegment = sanitizeIncomingStreamSegment(streamId);
+                state.partFile = new File(dir, System.currentTimeMillis() + "-" + senderSegment + "-" + streamSegment + ".part");
+                state.output = new FileOutputStream(state.partFile, false);
+                state.metadata = streamPayload.optJSONObject("metadata");
+                state.contentType = String.valueOf(streamPayload.optString("contentType", "application/octet-stream"));
+                state.totalBytes = 0L;
+                state.chunks = 0;
+                incomingStreams.put(key, state);
+            } catch (Exception ignored) {
+                // Best effort stream cache.
+            }
+            return context;
+        }
+
+        IncomingStreamState state = incomingStreams.get(key);
+        if (state == null) {
+            return context;
+        }
+
+        if ("chunk".equals(phase)) {
+            try {
+                String encoding = String.valueOf(streamPayload.optString("encoding", "base64")).trim().toLowerCase(Locale.ROOT);
+                byte[] bytes;
+                if ("base64".equals(encoding)) {
+                    bytes = Base64.decode(String.valueOf(streamPayload.optString("data", "")), Base64.DEFAULT);
+                } else {
+                    bytes = String.valueOf(streamPayload.optString("data", "")).getBytes(StandardCharsets.UTF_8);
+                }
+
+                if (bytes != null && bytes.length > 0 && state.output != null) {
+                    state.output.write(bytes);
+                    state.totalBytes += bytes.length;
+                }
+                state.chunks += 1;
+            } catch (Exception ignored) {
+                // Ignore malformed chunks.
+            }
+            return context;
+        }
+
+        if (!"end".equals(phase)) {
+            return context;
+        }
+
+        incomingStreams.remove(key);
+        File finalFile = null;
+        try {
+            if (state.output != null) {
+                state.output.flush();
+                state.output.close();
+            }
+            String finalName = String.valueOf(state.partFile.getName()).replaceAll("\\.part$", ".bin");
+            finalFile = new File(state.partFile.getParentFile(), finalName);
+            boolean renamed = state.partFile.renameTo(finalFile);
+            if (!renamed) {
+                finalFile = state.partFile;
+            }
+        } catch (Exception ignored) {
+            finalFile = state.partFile;
+        }
+
+        String tmpPath = finalFile != null ? finalFile.getAbsolutePath() : "";
+        context.put("event.tmpPath", tmpPath);
+
+        JSONObject metadata = state.metadata != null ? state.metadata : streamPayload.optJSONObject("metadata");
+        if (metadata != null) {
+            appendMetadataContext(context, "event.metadata", metadata);
+        }
+
+        return context;
     }
 
     private boolean getP2PRoutingEligibility() {
@@ -2373,6 +2613,8 @@ public class ReactorHttpService extends Service {
             boolean streamEndFromAnySender = false;
             List<String> streamEndSenders = new ArrayList<>();
             boolean hasNetChangeEvent = false;
+            boolean hasWatchEvent = false;
+            List<WatchRule> watchRules = new ArrayList<>();
 
             for (String rawLine : lines) {
                 String line = rawLine.trim();
@@ -2435,6 +2677,15 @@ public class ReactorHttpService extends Service {
                         continue;
                     }
 
+                    if (normalizedValue.toUpperCase(Locale.ROOT).startsWith("WATCH")) {
+                        WatchRule parsedWatch = parseWatchRule(normalizedValue);
+                        if (parsedWatch != null) {
+                            hasWatchEvent = true;
+                            watchRules.add(parsedWatch);
+                        }
+                        continue;
+                    }
+
                     if ("NET_CHANGE".equalsIgnoreCase(normalizedValue)) {
                         hasNetChangeEvent = true;
                         continue;
@@ -2447,23 +2698,15 @@ public class ReactorHttpService extends Service {
 
                         if (upperToken.startsWith("STREAMEND")) {
                             hasStreamEndEvent = true;
-                            int open = normalizedToken.indexOf('(');
-                            int close = normalizedToken.lastIndexOf(')');
-                            if (open < 0 || close <= open) {
+                            List<String> senders = parseOnSenderList(normalizedToken, "STREAMEND");
+                            if (senders == null || senders.isEmpty()) {
                                 streamEndFromAnySender = true;
                                 continue;
                             }
 
-                            String sendersRaw = normalizedToken.substring(open + 1, close).trim();
-                            if (sendersRaw.isEmpty()) {
-                                streamEndFromAnySender = true;
-                                continue;
-                            }
-
-                            for (String senderCandidate : sendersRaw.split(",")) {
-                                String normalizedSender = normalizeMessageSender(senderCandidate);
-                                if (normalizedSender != null && !streamEndSenders.contains(normalizedSender)) {
-                                    streamEndSenders.add(normalizedSender);
+                            for (String sender : senders) {
+                                if (!streamEndSenders.contains(sender)) {
+                                    streamEndSenders.add(sender);
                                 }
                             }
                             continue;
@@ -2474,25 +2717,26 @@ public class ReactorHttpService extends Service {
                             continue;
                         }
 
+                        if (upperToken.startsWith("WATCH")) {
+                            WatchRule parsedWatch = parseWatchRule(normalizedToken);
+                            if (parsedWatch != null) {
+                                hasWatchEvent = true;
+                                watchRules.add(parsedWatch);
+                            }
+                            continue;
+                        }
+
                         if (upperToken.startsWith("STREAM")) {
                             hasStreamEvent = true;
-                            int open = normalizedToken.indexOf('(');
-                            int close = normalizedToken.lastIndexOf(')');
-                            if (open < 0 || close <= open) {
+                            List<String> senders = parseOnSenderList(normalizedToken, "STREAM");
+                            if (senders == null || senders.isEmpty()) {
                                 streamFromAnySender = true;
                                 continue;
                             }
 
-                            String sendersRaw = normalizedToken.substring(open + 1, close).trim();
-                            if (sendersRaw.isEmpty()) {
-                                streamFromAnySender = true;
-                                continue;
-                            }
-
-                            for (String senderCandidate : sendersRaw.split(",")) {
-                                String normalizedSender = normalizeMessageSender(senderCandidate);
-                                if (normalizedSender != null && !streamSenders.contains(normalizedSender)) {
-                                    streamSenders.add(normalizedSender);
+                            for (String sender : senders) {
+                                if (!streamSenders.contains(sender)) {
+                                    streamSenders.add(sender);
                                 }
                             }
                             continue;
@@ -2503,30 +2747,22 @@ public class ReactorHttpService extends Service {
                         }
 
                         hasMessageEvent = true;
-                        int open = normalizedToken.indexOf('(');
-                        int close = normalizedToken.lastIndexOf(')');
-                        if (open < 0 || close <= open) {
+                        List<String> senders = parseOnSenderList(normalizedToken, "MESSAGE");
+                        if (senders == null || senders.isEmpty()) {
                             messageFromAnySender = true;
                             continue;
                         }
 
-                        String sendersRaw = normalizedToken.substring(open + 1, close).trim();
-                        if (sendersRaw.isEmpty()) {
-                            messageFromAnySender = true;
-                            continue;
-                        }
-
-                        for (String senderCandidate : sendersRaw.split(",")) {
-                            String normalizedSender = normalizeMessageSender(senderCandidate);
-                            if (normalizedSender != null && !messageSenders.contains(normalizedSender)) {
-                                messageSenders.add(normalizedSender);
+                        for (String sender : senders) {
+                            if (!messageSenders.contains(sender)) {
+                                messageSenders.add(sender);
                             }
                         }
                     }
                 }
             }
 
-            if (!hasMessageEvent && !hasStreamEvent && !hasStreamEndEvent && !hasNetChangeEvent) {
+            if (!hasMessageEvent && !hasStreamEvent && !hasStreamEndEvent && !hasNetChangeEvent && !hasWatchEvent) {
                 return null;
             }
 
@@ -2548,6 +2784,8 @@ public class ReactorHttpService extends Service {
             endpoint.streamEndFromAnySender = streamEndFromAnySender || streamEndSenders.isEmpty();
             endpoint.streamEndSenders = streamEndSenders;
             endpoint.hasNetChangeEvent = hasNetChangeEvent;
+            endpoint.hasWatchEvent = hasWatchEvent;
+            endpoint.watchRules = watchRules;
             return endpoint;
         } catch (Exception ignored) {
             return null;
@@ -2606,6 +2844,380 @@ public class ReactorHttpService extends Service {
         }
 
         return out;
+    }
+
+    private String stripWrappingQuotes(String value) {
+        String trimmed = String.valueOf(value == null ? "" : value).trim();
+        if (trimmed.isEmpty()) {
+            return "";
+        }
+
+        if ((trimmed.startsWith("\"") && trimmed.endsWith("\""))
+                || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+            return trimmed.substring(1, trimmed.length() - 1).trim();
+        }
+
+        return trimmed;
+    }
+
+    private WatchRule parseWatchRule(String rawValue) {
+        String value = String.valueOf(rawValue == null ? "" : rawValue).trim();
+        if (value.isEmpty()) {
+            return null;
+        }
+
+        String withoutType = value;
+        if (withoutType.toUpperCase(Locale.ROOT).startsWith("WATCH")) {
+            withoutType = withoutType.substring(5).trim();
+        }
+
+        if (withoutType.isEmpty()) {
+            return null;
+        }
+
+        String watchPath;
+        Set<String> listeners = new HashSet<>();
+
+        Matcher withListeners = Pattern.compile("^(.*?)\\s*\\[(.*)]\\s*$", Pattern.DOTALL).matcher(withoutType);
+        if (withListeners.matches()) {
+            watchPath = stripWrappingQuotes(withListeners.group(1));
+            String rawListeners = String.valueOf(withListeners.group(2) == null ? "" : withListeners.group(2)).trim();
+            if (!rawListeners.isEmpty()) {
+                String[] parts = rawListeners.split(",");
+                for (String part : parts) {
+                    String normalized = String.valueOf(part).trim().toLowerCase(Locale.ROOT);
+                    if (VALID_WATCH_LISTENERS.contains(normalized)) {
+                        listeners.add(normalized);
+                    }
+                }
+            }
+        } else {
+            watchPath = stripWrappingQuotes(withoutType);
+        }
+
+        if (watchPath.isEmpty()) {
+            return null;
+        }
+
+        WatchRule rule = new WatchRule();
+        rule.path = watchPath;
+        rule.listeners = listeners;
+        return rule;
+    }
+
+    private String expandWatchPath(String rawPath, File endpointDir) {
+        String watchPath = String.valueOf(rawPath == null ? "" : rawPath).trim();
+        if (watchPath.isEmpty()) {
+            return "";
+        }
+
+        String homePlaceholder = "{HOME_DIR}";
+        if (watchPath.contains(homePlaceholder)) {
+            String mobileHome = "";
+            try {
+                mobileHome = Environment.getExternalStorageDirectory().getAbsolutePath();
+            } catch (Exception ignored) {
+                mobileHome = getFilesDir().getAbsolutePath();
+            }
+            watchPath = watchPath.replace(homePlaceholder, mobileHome);
+        }
+
+        File resolved = new File(watchPath);
+        if (!resolved.isAbsolute()) {
+            File base = endpointDir != null ? endpointDir : getFilesDir();
+            resolved = new File(base, watchPath);
+        }
+
+        return resolved.getAbsolutePath();
+    }
+
+    private void startWatchObservers() {
+        synchronized (watchObserverLock) {
+            stopWatchObservers();
+
+            List<MessageEndpoint> endpoints = collectMessageEndpoints();
+            for (MessageEndpoint endpoint : endpoints) {
+                if (endpoint == null || !endpoint.enabled || !endpoint.hasWatchEvent || endpoint.watchRules == null || endpoint.watchRules.isEmpty()) {
+                    continue;
+                }
+
+                File endpointDir = endpoint.endpointFile != null ? endpoint.endpointFile.getParentFile() : null;
+                for (WatchRule rule : endpoint.watchRules) {
+                    if (rule == null || String.valueOf(rule.path).trim().isEmpty()) {
+                        continue;
+                    }
+
+                    String resolvedPath = expandWatchPath(rule.path, endpointDir);
+                    if (resolvedPath.isEmpty()) {
+                        continue;
+                    }
+
+                    File watchDir = new File(resolvedPath);
+                    if (!watchDir.exists() || !watchDir.isDirectory()) {
+                        continue;
+                    }
+
+                    final String observedRoot = resolvedPath;
+                    final MessageEndpoint observedEndpoint = endpoint;
+                    final WatchRule observedRule = rule;
+                    final EndpointWatchObserver tracked = new EndpointWatchObserver();
+                    tracked.endpoint = endpoint;
+                    tracked.rule = rule;
+                    tracked.resolvedPath = resolvedPath;
+
+                    int mask = FileObserver.CREATE
+                            | FileObserver.DELETE
+                            | FileObserver.MOVED_FROM
+                            | FileObserver.MOVED_TO
+                            | FileObserver.MODIFY
+                            | FileObserver.CLOSE_WRITE
+                            | FileObserver.DELETE_SELF
+                            | FileObserver.MOVE_SELF;
+
+                    FileObserver observer = new FileObserver(observedRoot, mask) {
+                        @Override
+                        public void onEvent(int event, String path) {
+                            String suffix = String.valueOf(path == null ? "" : path).trim();
+                            String fullPath = suffix.isEmpty()
+                                    ? observedRoot
+                                    : new File(observedRoot, suffix).getAbsolutePath();
+
+                            Set<String> listenerSet = null;
+                            if (observedRule.listeners != null && !observedRule.listeners.isEmpty()) {
+                                listenerSet = new HashSet<>(observedRule.listeners);
+                            }
+
+                            handlePendingWatchCreatedSignal(tracked, fullPath, event, listenerSet);
+
+                            String watchType = resolveWatchType(event, listenerSet);
+                            if (watchType == null || watchType.isEmpty()) {
+                                return;
+                            }
+
+                            dispatchWatchEvent(observedEndpoint, fullPath, watchType);
+                        }
+                    };
+
+                    try {
+                        observer.startWatching();
+                        tracked.observer = observer;
+                        watchObservers.add(tracked);
+                    } catch (Exception ignored) {
+                        // Best effort watcher registration.
+                    }
+                }
+            }
+        }
+    }
+
+    private void stopWatchObservers() {
+        synchronized (watchObserverLock) {
+            for (EndpointWatchObserver tracked : watchObservers) {
+                if (tracked == null || tracked.observer == null) {
+                    continue;
+                }
+                try {
+                    tracked.observer.stopWatching();
+                } catch (Exception ignored) {
+                    // Ignore watcher stop races during shutdown.
+                }
+            }
+            watchObservers.clear();
+        }
+    }
+
+    private boolean acceptsWatchType(Set<String> listeners, String watchType) {
+        return listeners == null || listeners.isEmpty() || listeners.contains(watchType);
+    }
+
+    private long resolveWatchCreatedQuietMs(long sizeBytes) {
+        if (sizeBytes >= WATCH_CREATED_LARGE_FILE_BYTES) {
+            return WATCH_CREATED_LARGE_QUIET_MS;
+        }
+        return WATCH_CREATED_QUIET_MS;
+    }
+
+    private void safeSleep(long ms) {
+        try {
+            Thread.sleep(Math.max(50L, ms));
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void handlePendingWatchCreatedSignal(EndpointWatchObserver tracked, String fullPath, int rawEventMask, Set<String> listeners) {
+        if (tracked == null || fullPath == null || fullPath.trim().isEmpty()) {
+            return;
+        }
+
+        if (!acceptsWatchType(listeners, "file:created")) {
+            return;
+        }
+
+        int eventMask = rawEventMask & FileObserver.ALL_EVENTS;
+        boolean isCreateLike = (eventMask & FileObserver.CREATE) != 0 || (eventMask & FileObserver.MOVED_TO) != 0;
+        boolean isModifyLike = (eventMask & FileObserver.MODIFY) != 0;
+        boolean isCloseWrite = (eventMask & FileObserver.CLOSE_WRITE) != 0;
+        boolean trackable = isCreateLike || isModifyLike || isCloseWrite;
+        if (!trackable) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        PendingWatchCreatedState state = tracked.pendingCreatedStates.computeIfAbsent(fullPath, key -> {
+            PendingWatchCreatedState next = new PendingWatchCreatedState();
+            next.firstSeenAtMs = now;
+            next.lastMutationAtMs = now;
+            next.lastCloseWriteAtMs = 0L;
+            next.lastSize = -1L;
+            next.lastMtimeMs = -1L;
+            return next;
+        });
+
+        if (state.firstSeenAtMs <= 0L) {
+            state.firstSeenAtMs = now;
+        }
+        state.lastMutationAtMs = now;
+        if (isCloseWrite) {
+            state.lastCloseWriteAtMs = now;
+        }
+
+        if (tracked.pendingCreatedInFlight.add(fullPath)) {
+            clientPool.execute(() -> evaluatePendingWatchCreated(tracked, fullPath, listeners));
+        }
+    }
+
+    private void evaluatePendingWatchCreated(EndpointWatchObserver tracked, String fullPath, Set<String> listeners) {
+        long startedAt = System.currentTimeMillis();
+
+        try {
+            while (System.currentTimeMillis() - startedAt <= WATCH_CREATED_TIMEOUT_MS) {
+                PendingWatchCreatedState state = tracked.pendingCreatedStates.get(fullPath);
+                if (state == null) {
+                    return;
+                }
+
+                File file = new File(fullPath);
+                if (!file.exists() || !file.isFile()) {
+                    safeSleep(WATCH_CREATED_POLL_MS);
+                    continue;
+                }
+
+                long now = System.currentTimeMillis();
+                long size = file.length();
+                long mtime = file.lastModified();
+                if (size != state.lastSize || mtime != state.lastMtimeMs) {
+                    state.lastSize = size;
+                    state.lastMtimeMs = mtime;
+                    state.lastMutationAtMs = now;
+                }
+
+                long quietMs = resolveWatchCreatedQuietMs(size);
+                boolean closeObserved = state.lastCloseWriteAtMs > 0L;
+                boolean closeSettled = !closeObserved || (now - state.lastCloseWriteAtMs) >= WATCH_CREATED_CLOSE_SETTLE_MS;
+                boolean quietReached = (now - state.lastMutationAtMs) >= quietMs;
+                boolean fallbackElapsed = (now - state.firstSeenAtMs) >= (quietMs * 2L);
+
+                if (quietReached && closeSettled && (closeObserved || fallbackElapsed)) {
+                    safeSleep(WATCH_CREATED_POLL_MS);
+
+                    PendingWatchCreatedState confirmState = tracked.pendingCreatedStates.get(fullPath);
+                    if (confirmState == null) {
+                        return;
+                    }
+
+                    File confirmFile = new File(fullPath);
+                    if (!confirmFile.exists() || !confirmFile.isFile()) {
+                        safeSleep(WATCH_CREATED_POLL_MS);
+                        continue;
+                    }
+
+                    long confirmSize = confirmFile.length();
+                    long confirmMtime = confirmFile.lastModified();
+                    if (confirmSize == confirmState.lastSize && confirmMtime == confirmState.lastMtimeMs) {
+                        tracked.pendingCreatedStates.remove(fullPath);
+                        if (acceptsWatchType(listeners, "file:created")) {
+                            dispatchWatchEvent(tracked.endpoint, fullPath, "file:created");
+                        }
+                        return;
+                    }
+
+                    confirmState.lastSize = confirmSize;
+                    confirmState.lastMtimeMs = confirmMtime;
+                    confirmState.lastMutationAtMs = System.currentTimeMillis();
+                }
+
+                safeSleep(WATCH_CREATED_POLL_MS);
+            }
+        } finally {
+            tracked.pendingCreatedInFlight.remove(fullPath);
+
+            PendingWatchCreatedState state = tracked.pendingCreatedStates.get(fullPath);
+            if (state != null) {
+                long now = System.currentTimeMillis();
+                if (state.firstSeenAtMs > 0L && (now - state.firstSeenAtMs) > WATCH_CREATED_TIMEOUT_MS) {
+                    tracked.pendingCreatedStates.remove(fullPath);
+                }
+            }
+        }
+    }
+
+    private String resolveWatchType(int eventMask, Set<String> listeners) {
+        int event = eventMask & FileObserver.ALL_EVENTS;
+        if (((event & FileObserver.DELETE) != 0 || (event & FileObserver.DELETE_SELF) != 0) && acceptsWatchType(listeners, "file:deleted")) {
+            return "file:deleted";
+        }
+
+        if ((event & FileObserver.MOVED_TO) != 0) {
+            if (acceptsWatchType(listeners, "file:moved")) {
+                return "file:moved";
+            }
+            return null;
+        }
+
+        if (((event & FileObserver.MOVED_FROM) != 0 || (event & FileObserver.MOVE_SELF) != 0) && acceptsWatchType(listeners, "file:moved")) {
+            return "file:moved";
+        }
+
+        if ((((event & FileObserver.MODIFY) != 0) || ((event & FileObserver.CLOSE_WRITE) != 0)) && acceptsWatchType(listeners, "file:changed")) {
+            return "file:changed";
+        }
+
+        return null;
+    }
+
+    private String normalizeEventPath(String rawPath) {
+        String normalized = String.valueOf(rawPath == null ? "" : rawPath).replace('\\', '/');
+        if (normalized.isEmpty()) {
+            return "";
+        }
+
+        if ("/".equals(normalized)) {
+            return normalized;
+        }
+
+        return normalized.replaceAll("/+$", "");
+    }
+
+    private void dispatchWatchEvent(MessageEndpoint endpoint, String fullPath, String watchType) {
+        if (endpoint == null || !endpoint.enabled) {
+            return;
+        }
+
+        Map<String, String> headers = new HashMap<>();
+        headers.put("x-reactor-trigger", "WATCH");
+
+        Map<String, String> eventContext = new HashMap<>();
+        eventContext.put("event.type", "WATCH");
+        eventContext.put("event.path", normalizeEventPath(fullPath));
+        eventContext.put("event.watchType", String.valueOf(watchType == null ? "" : watchType));
+
+        try {
+            writeExecutionStart(endpoint, "WATCH", "WATCH");
+            executeEndpointActions(endpoint, "", headers, eventContext);
+        } catch (Exception executionError) {
+            writeExecutionError(endpoint, "WATCH", "WATCH", executionError.getMessage());
+        }
     }
 
     private List<String> parseOnSenderList(String value, String type) {
@@ -2814,6 +3426,12 @@ public class ReactorHttpService extends Service {
             }
             fromAnySender = endpoint.streamEndFromAnySender;
             allowedSenders = endpoint.streamEndSenders;
+        } else if ("WATCH".equals(safeEvent)) {
+            if (!endpoint.hasWatchEvent) {
+                return false;
+            }
+            fromAnySender = true;
+            allowedSenders = new ArrayList<>();
         } else if ("NET_CHANGE".equals(safeEvent)) {
             if (!endpoint.hasNetChangeEvent) {
                 return false;
@@ -2998,7 +3616,7 @@ public class ReactorHttpService extends Service {
         }
     }
 
-    private void executeEndpointActions(MessageEndpoint endpoint, String messageBody, Map<String, String> incomingHeaders) {
+    private void executeEndpointActions(MessageEndpoint endpoint, String messageBody, Map<String, String> incomingHeaders, Map<String, String> eventContext) {
         Matcher directMatcher = SEND_MESSAGE_CALL_PATTERN.matcher(endpoint.source);
         while (directMatcher.find()) {
             String target = directMatcher.group(2) != null ? directMatcher.group(2).trim() : "";
@@ -3044,8 +3662,9 @@ public class ReactorHttpService extends Service {
                 ));
         }
 
+        Map<String, String> safeEventContext = eventContext != null ? eventContext : new HashMap<>();
         Map<String, String> stringVariables = extractStringVariables(endpoint.source);
-        Map<String, String> streamVariables = extractStreamVariables(endpoint.source, stringVariables);
+        Map<String, String> streamVariables = extractStreamVariables(endpoint.source, stringVariables, safeEventContext);
         Set<String> scheduledStreams = new HashSet<>();
 
         Matcher directStreamMatcher = STREAM_FILE_CALL_PATTERN.matcher(endpoint.source);
@@ -3095,8 +3714,8 @@ public class ReactorHttpService extends Service {
             String targetToken = genericDirectStreamMatcher.group(1);
             String pathToken = genericDirectStreamMatcher.group(2);
 
-            String target = resolveTokenValue(targetToken, stringVariables);
-            String streamPath = resolveTokenValue(pathToken, stringVariables);
+            String target = resolveTokenValue(targetToken, stringVariables, safeEventContext);
+            String streamPath = resolveTokenValue(pathToken, stringVariables, safeEventContext);
             if (streamPath.isEmpty()) {
                 streamPath = resolveStreamVariablePath(pathToken, streamVariables);
             }
@@ -3123,8 +3742,8 @@ public class ReactorHttpService extends Service {
             String targetToken = genericExchangeStreamMatcher.group(1);
             String pathToken = genericExchangeStreamMatcher.group(2);
 
-            String target = resolveTokenValue(targetToken, stringVariables);
-            String streamPath = resolveTokenValue(pathToken, stringVariables);
+            String target = resolveTokenValue(targetToken, stringVariables, safeEventContext);
+            String streamPath = resolveTokenValue(pathToken, stringVariables, safeEventContext);
             if (streamPath.isEmpty()) {
                 streamPath = resolveStreamVariablePath(pathToken, streamVariables);
             }
@@ -3145,6 +3764,32 @@ public class ReactorHttpService extends Service {
                 appendGlobalLog(buildExchangeLog("STREAM_EXCHANGE_ERROR", error.getMessage() != null ? error.getMessage() : "stream exchange failed"));
             }
         }
+
+        Matcher copyStreamMatcher = FILE_COPY_STREAM_CALL_PATTERN.matcher(endpoint.source);
+        while (copyStreamMatcher.find()) {
+            String sourceToken = copyStreamMatcher.group(1);
+            String destinationToken = copyStreamMatcher.group(2);
+
+            String sourcePath = resolveTokenValue(sourceToken, stringVariables, safeEventContext);
+            if (sourcePath.isEmpty()) {
+                sourcePath = resolveStreamVariablePath(sourceToken, streamVariables);
+            }
+
+            String destinationPath = resolveTokenValue(destinationToken, stringVariables, safeEventContext);
+            if (destinationPath.isEmpty()) {
+                destinationPath = resolveStreamVariablePath(destinationToken, streamVariables);
+            }
+
+            if (sourcePath.isEmpty() || destinationPath.isEmpty()) {
+                continue;
+            }
+
+            try {
+                copyResolvedStreamPath(sourcePath, destinationPath);
+            } catch (Exception error) {
+                appendGlobalLog(buildExchangeLog("STREAM_COPY_ERROR", error.getMessage() != null ? error.getMessage() : "stream copy failed"));
+            }
+        }
     }
 
     private Map<String, String> extractStringVariables(String source) {
@@ -3157,10 +3802,39 @@ public class ReactorHttpService extends Service {
                 vars.put(name, value);
             }
         }
+
+        String mobileHome;
+        try {
+            mobileHome = Environment.getExternalStorageDirectory().getAbsolutePath();
+        } catch (Exception ignored) {
+            mobileHome = "/storage/emulated/0";
+        }
+
+        Matcher homeDirMatcher = HOME_DIR_VAR_ASSIGN_PATTERN.matcher(String.valueOf(source));
+        while (homeDirMatcher.find()) {
+            String name = homeDirMatcher.group(1) != null ? homeDirMatcher.group(1).trim() : "";
+            if (!name.isEmpty()) {
+                vars.put(name, mobileHome);
+            }
+        }
+
         return vars;
     }
 
-    private Map<String, String> extractStreamVariables(String source, Map<String, String> stringVariables) {
+    private String resolveTemplateToken(String token, Map<String, String> stringVariables, Map<String, String> eventContext) {
+        String inner = token.substring(1, token.length() - 1);
+        StringBuffer out = new StringBuffer();
+        Matcher matcher = Pattern.compile("\\$\\{([^}]+)\\}").matcher(inner);
+        while (matcher.find()) {
+            String expression = matcher.group(1);
+            String resolved = resolveTokenValue(expression, stringVariables, eventContext);
+            matcher.appendReplacement(out, Matcher.quoteReplacement(String.valueOf(resolved == null ? "" : resolved)));
+        }
+        matcher.appendTail(out);
+        return out.toString();
+    }
+
+    private Map<String, String> extractStreamVariables(String source, Map<String, String> stringVariables, Map<String, String> eventContext) {
         Map<String, String> vars = new HashMap<>();
         Matcher matcher = STREAM_VAR_ASSIGN_PATTERN.matcher(String.valueOf(source));
         while (matcher.find()) {
@@ -3170,7 +3844,7 @@ public class ReactorHttpService extends Service {
                 continue;
             }
 
-            String resolvedPath = resolveTokenValue(pathToken, stringVariables);
+            String resolvedPath = resolveTokenValue(pathToken, stringVariables, eventContext);
             if (!resolvedPath.isEmpty()) {
                 vars.put(name, resolvedPath);
             }
@@ -3178,18 +3852,41 @@ public class ReactorHttpService extends Service {
         return vars;
     }
 
-    private String resolveTokenValue(String rawToken, Map<String, String> stringVariables) {
+    private String resolveTokenValue(String rawToken, Map<String, String> stringVariables, Map<String, String> eventContext) {
         String token = String.valueOf(rawToken).trim();
         if (token.isEmpty()) {
             return "";
+        }
+
+        if (token.startsWith("`") && token.endsWith("`") && token.length() >= 2) {
+            return resolveTemplateToken(token, stringVariables, eventContext);
         }
 
         if ((token.startsWith("\"") && token.endsWith("\"")) || (token.startsWith("'") && token.endsWith("'"))) {
             return token.substring(1, token.length() - 1);
         }
 
+        String normalizedToken = token.replaceAll("\\s+", "");
+        if ("event.path".equals(normalizedToken)) {
+            return String.valueOf(eventContext != null ? eventContext.getOrDefault("event.path", "") : "");
+        }
+        if ("event.watchType".equals(normalizedToken)) {
+            return String.valueOf(eventContext != null ? eventContext.getOrDefault("event.watchType", "") : "");
+        }
+        if ("event.tmpPath".equals(normalizedToken)) {
+            return String.valueOf(eventContext != null ? eventContext.getOrDefault("event.tmpPath", "") : "");
+        }
+        if (normalizedToken.startsWith("event.metadata.")) {
+            return String.valueOf(eventContext != null ? eventContext.getOrDefault(normalizedToken, "") : "");
+        }
+
         String fromVars = stringVariables.get(token);
-        return fromVars != null ? fromVars : "";
+        if (fromVars != null) {
+            return fromVars;
+        }
+
+        String normalizedFromVars = stringVariables.get(normalizedToken);
+        return normalizedFromVars != null ? normalizedFromVars : "";
     }
 
     private String resolveStreamVariablePath(String rawToken, Map<String, String> streamVariables) {
@@ -3214,6 +3911,78 @@ public class ReactorHttpService extends Service {
         }
 
         return new File(getFilesDir(), targetPath);
+    }
+
+    private void copyResolvedStreamPath(String sourcePath, String destinationPath) {
+        File sourceFile = resolveStreamFilePath(sourcePath);
+        if (sourceFile == null || !sourceFile.exists() || !sourceFile.isFile()) {
+            throw new RuntimeException("stream source file not found: " + sourcePath);
+        }
+
+        File destinationFile = resolveStreamFilePath(destinationPath);
+        if (destinationFile == null) {
+            throw new RuntimeException("invalid stream destination path");
+        }
+
+        File parent = destinationFile.getParentFile();
+        if (parent != null && !parent.exists()) {
+            parent.mkdirs();
+        }
+
+        try (FileInputStream input = new FileInputStream(sourceFile);
+             FileOutputStream output = new FileOutputStream(destinationFile, false)) {
+            byte[] buffer = new byte[DEFAULT_STREAM_CHUNK_SIZE];
+            int read;
+            while ((read = input.read(buffer)) > 0) {
+                output.write(buffer, 0, read);
+            }
+            output.flush();
+        } catch (IOException error) {
+            throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "stream copy failed");
+        }
+    }
+
+    private String resolveMobileHomePath() {
+        try {
+            String external = Environment.getExternalStorageDirectory().getAbsolutePath();
+            if (external != null && !external.trim().isEmpty()) {
+                return external.replace('\\', '/').replaceAll("/+$", "");
+            }
+        } catch (Exception ignored) {
+            // Fallback below.
+        }
+
+        return "/storage/emulated/0";
+    }
+
+    private JSONObject buildDefaultStreamMetadata(File file) {
+        JSONObject metadata = new JSONObject();
+        String fileName = file != null ? String.valueOf(file.getName()) : "";
+        String safeFileName = fileName.trim().isEmpty() ? "incoming.bin" : fileName;
+
+        String absolutePath = file != null ? String.valueOf(file.getAbsolutePath()) : "";
+        String normalizedPath = absolutePath.replace('\\', '/');
+        String mobileHome = resolveMobileHomePath();
+
+        String relativePath = safeFileName;
+        if (!normalizedPath.isEmpty() && !mobileHome.isEmpty()) {
+            String prefix = mobileHome + "/";
+            if (normalizedPath.equals(mobileHome)) {
+                relativePath = safeFileName;
+            } else if (normalizedPath.startsWith(prefix) && normalizedPath.length() > prefix.length()) {
+                relativePath = normalizedPath.substring(prefix.length());
+            }
+        }
+
+        try {
+            metadata.put("fileName", safeFileName);
+            metadata.put("relativePath", relativePath);
+            metadata.put("sourcePath", normalizedPath);
+        } catch (JSONException ignored) {
+            // Best effort metadata serialization.
+        }
+
+        return metadata;
     }
 
     private void streamFileToNode(String target, String filePath, Map<String, String> extraHeaders) {
@@ -3258,6 +4027,7 @@ public class ReactorHttpService extends Service {
             start.put("contentType", contentType);
             start.put("chunkSize", DEFAULT_STREAM_CHUNK_SIZE);
             start.put("totalBytes", totalBytes);
+            start.put("metadata", buildDefaultStreamMetadata(file));
         } catch (Exception error) {
             throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "unable to build stream start packet");
         }
@@ -3356,6 +4126,7 @@ public class ReactorHttpService extends Service {
             start.put("contentType", contentType);
             start.put("chunkSize", DEFAULT_STREAM_CHUNK_SIZE);
             start.put("totalBytes", totalBytes);
+            start.put("metadata", buildDefaultStreamMetadata(file));
         } catch (Exception error) {
             throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "unable to build exchange stream start packet");
         }
@@ -4816,6 +5587,9 @@ public class ReactorHttpService extends Service {
                     ? streamPayload.optString("phase", "").trim().toLowerCase(Locale.ROOT)
                     : "";
             String primaryEvent = streamEnvelope ? "STREAM" : "MESSAGE";
+                Map<String, String> streamEventContext = streamEnvelope
+                    ? buildIncomingStreamEventContext(String.valueOf(from).trim().toLowerCase(Locale.ROOT), streamPayload)
+                    : new HashMap<>();
                 int deliveredCount = 0;
 
             Map<String, String> headers = new HashMap<>();
@@ -4836,7 +5610,7 @@ public class ReactorHttpService extends Service {
                 if (!matchesTargetEndpoint(endpoint, targetEndpointSelector)) continue;
                 try {
                     writeExecutionStart(endpoint, primaryEvent, primaryEvent);
-                    executeEndpointActions(endpoint, content, effectiveHeaders);
+                    executeEndpointActions(endpoint, content, effectiveHeaders, streamEventContext);
                     deliveredCount += 1;
                 } catch (Exception e) {
                     writeExecutionError(endpoint, primaryEvent, primaryEvent, e.getMessage());
@@ -4850,7 +5624,7 @@ public class ReactorHttpService extends Service {
                     if (!matchesTargetEndpoint(endpoint, targetEndpointSelector)) continue;
                     try {
                         writeExecutionStart(endpoint, "STREAMEND", "STREAMEND");
-                        executeEndpointActions(endpoint, content, streamEndHeaders);
+                        executeEndpointActions(endpoint, content, streamEndHeaders, streamEventContext);
                     } catch (Exception e) {
                         writeExecutionError(endpoint, "STREAMEND", "STREAMEND", e.getMessage());
                     }
