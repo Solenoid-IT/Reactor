@@ -140,6 +140,10 @@
 				permission: 'filesystem.manage',
 				matches: (source) => /\/\/\s*@on\s+WATCH\b/i.test(String(source || '')),
 			},
+			{
+				permission: 'system.notification',
+				matches: (source) => /\bDevice\s*\.\s*notify\s*\(/i.test(String(source || '')),
+			},
 		],
 	};
 

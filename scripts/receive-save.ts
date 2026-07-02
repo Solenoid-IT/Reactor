@@ -13,6 +13,7 @@ export async function run (event : Event)
 {
 	if ( !( event instanceof StreamEndEvent ) ) return;
 
+	if ( !event.tmpPath ) return;
 
 
     const inputStream = await FileSystem.File.open( event.tmpPath );
@@ -20,7 +21,12 @@ export async function run (event : Event)
 
 
     const homeDir = await Node.getHomeDirectory();
-    const targetFilePath = `${homeDir}/Desktop/reactor-tests/${event.metadata.relativePath}`;
+    const relativePath = String( event.metadata?.relativePath || '' ).replace( /\\/g, '/' );
+    const safeRelativePath = relativePath.startsWith( '/' )
+        ? relativePath.slice( 1 )
+        : relativePath;
+    const fallbackName = event.tmpPath.split( '/' ).pop() || 'incoming.bin';
+    const targetFilePath = `${homeDir}/Desktop/reactor-tests/${safeRelativePath || fallbackName}`;
     const outputStream = await FileSystem.File.open( targetFilePath, { 'mode': 'write' } );
 
 

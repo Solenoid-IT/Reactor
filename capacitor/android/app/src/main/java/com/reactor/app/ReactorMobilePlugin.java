@@ -1,11 +1,13 @@
 package com.reactor.app;
 
 import android.app.Activity;
+import android.app.NotificationManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
@@ -20,6 +22,7 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import androidx.activity.result.ActivityResult;
+import androidx.core.app.NotificationManagerCompat;
 
 import android.util.Base64;
 
@@ -966,11 +969,48 @@ public class ReactorMobilePlugin extends Plugin {
     }
 
     private JSObject buildPermissionRequestResult(List<String> requestedPermissions, boolean granted) {
-        JSArray grantedPermissions = new JSArray();
-        JSArray deniedPermissions = new JSArray();
-
+        List<String> grantedPermissionsList = new ArrayList<>();
+        List<String> deniedPermissionsList = new ArrayList<>();
         for (String permissionName : requestedPermissions) {
             if (granted) {
+                grantedPermissionsList.add(permissionName);
+            } else {
+                deniedPermissionsList.add(permissionName);
+            }
+        }
+        return buildPermissionRequestResult(requestedPermissions, grantedPermissionsList, deniedPermissionsList);
+    }
+
+    private JSObject buildPermissionRequestResult(List<String> requestedPermissions, List<String> grantedNames, List<String> deniedNames) {
+        JSArray grantedPermissions = new JSArray();
+        JSArray deniedPermissions = new JSArray();
+        Set<String> requestedSet = new LinkedHashSet<>();
+        if (requestedPermissions != null) {
+            requestedSet.addAll(requestedPermissions);
+        }
+
+        Set<String> grantedSet = new LinkedHashSet<>();
+        if (grantedNames != null) {
+            for (String permissionName : grantedNames) {
+                String safeName = String.valueOf(permissionName == null ? "" : permissionName).trim();
+                if (!safeName.isEmpty()) {
+                    grantedSet.add(safeName);
+                }
+            }
+        }
+
+        Set<String> deniedSet = new LinkedHashSet<>();
+        if (deniedNames != null) {
+            for (String permissionName : deniedNames) {
+                String safeName = String.valueOf(permissionName == null ? "" : permissionName).trim();
+                if (!safeName.isEmpty()) {
+                    deniedSet.add(safeName);
+                }
+            }
+        }
+
+        for (String permissionName : requestedSet) {
+            if (grantedSet.contains(permissionName) && !deniedSet.contains(permissionName)) {
                 grantedPermissions.put(permissionName);
             } else {
                 deniedPermissions.put(permissionName);
@@ -982,6 +1022,84 @@ public class ReactorMobilePlugin extends Plugin {
                 .put("platform", "Android")
                 .put("granted", grantedPermissions)
                 .put("denied", deniedPermissions);
+    }
+
+    private boolean requestsNotificationPermission(List<String> permissions) {
+        if (permissions == null) {
+            return false;
+        }
+
+        for (String permissionName : permissions) {
+            String normalized = String.valueOf(permissionName == null ? "" : permissionName).trim().toLowerCase(Locale.ROOT);
+            if ("system.notification".equals(normalized)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean isNotificationPermissionGranted() {
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                return getContext().checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
+            }
+
+            NotificationManagerCompat managerCompat = NotificationManagerCompat.from(getContext());
+            return managerCompat.areNotificationsEnabled();
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private Intent buildNotificationSettingsIntent() {
+        String packageName = getContext().getPackageName();
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Intent intent = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+            intent.putExtra(Settings.EXTRA_APP_PACKAGE, packageName);
+            return intent;
+        }
+
+        Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+        intent.setData(Uri.parse("package:" + packageName));
+        return intent;
+    }
+
+    private JSObject evaluatePermissionGrantState(List<String> requestedPermissions) {
+        List<String> grantedNames = new ArrayList<>();
+        List<String> deniedNames = new ArrayList<>();
+
+        if (requestedPermissions != null) {
+            for (String permissionName : requestedPermissions) {
+                String normalized = String.valueOf(permissionName == null ? "" : permissionName).trim().toLowerCase(Locale.ROOT);
+                if (normalized.isEmpty()) {
+                    continue;
+                }
+
+                if (normalized.startsWith("filesystem.")) {
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()) {
+                        grantedNames.add(permissionName);
+                    } else {
+                        deniedNames.add(permissionName);
+                    }
+                    continue;
+                }
+
+                if ("system.notification".equals(normalized)) {
+                    if (isNotificationPermissionGranted()) {
+                        grantedNames.add(permissionName);
+                    } else {
+                        deniedNames.add(permissionName);
+                    }
+                    continue;
+                }
+
+                grantedNames.add(permissionName);
+            }
+        }
+
+        return buildPermissionRequestResult(requestedPermissions, grantedNames, deniedNames);
     }
 
     private JSObject readPermissionsConfig() throws Exception {
@@ -1064,7 +1182,18 @@ public class ReactorMobilePlugin extends Plugin {
             }
         }
 
-        call.resolve(buildPermissionRequestResult(requestedPermissions, true));
+        if (requestsNotificationPermission(requestedPermissions) && !isNotificationPermissionGranted()) {
+            try {
+                Intent intent = buildNotificationSettingsIntent();
+                startActivityForResult(call, intent, "handleNotificationPermissionResult");
+                return;
+            } catch (Exception error) {
+                call.resolve(new JSObject().put("ok", false).put("error", error.getMessage()).put("platform", "Android"));
+                return;
+            }
+        }
+
+        call.resolve(evaluatePermissionGrantState(requestedPermissions));
     }
 
     @PluginMethod
@@ -1096,6 +1225,18 @@ public class ReactorMobilePlugin extends Plugin {
                 }
             }
 
+            if (requestsNotificationPermission(requestedPermissions)) {
+                Intent notificationIntent = buildNotificationSettingsIntent();
+                notificationIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                getContext().startActivity(notificationIntent);
+                call.resolve(new JSObject()
+                        .put("ok", true)
+                        .put("opened", true)
+                        .put("platform", "Android")
+                        .put("target", "ACTION_APP_NOTIFICATION_SETTINGS"));
+                return;
+            }
+
             Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
             intent.setData(Uri.parse("package:" + getContext().getPackageName()));
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -1121,8 +1262,17 @@ public class ReactorMobilePlugin extends Plugin {
         }
 
         List<String> requestedPermissions = getRequestedPermissionNames(call);
-        boolean granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager();
-        call.resolve(buildPermissionRequestResult(requestedPermissions, granted));
+        call.resolve(evaluatePermissionGrantState(requestedPermissions));
+    }
+
+    @ActivityCallback
+    private void handleNotificationPermissionResult(PluginCall call, ActivityResult activityResult) {
+        if (call == null) {
+            return;
+        }
+
+        List<String> requestedPermissions = getRequestedPermissionNames(call);
+        call.resolve(evaluatePermissionGrantState(requestedPermissions));
     }
 
     private void appendTextFile(File file, String content) throws IOException {

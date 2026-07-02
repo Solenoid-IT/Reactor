@@ -6,6 +6,7 @@ import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.SharedPreferences;
 import android.net.ConnectivityManager;
 import android.net.LinkAddress;
@@ -71,6 +72,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -106,7 +108,9 @@ public class ReactorHttpService extends Service {
     private static final String WORKING_MODE_FILE = "working-mode.json";
 
     private static final String CHANNEL_ID = "reactor_http_channel";
+    private static final String ENDPOINT_NOTIFY_CHANNEL_ID = "reactor_endpoint_notify_channel";
     private static final int NOTIFICATION_ID = 4242;
+    private static final AtomicInteger ENDPOINT_NOTIFICATION_IDS = new AtomicInteger(5000);
     private static final String WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     private static final long WS_HEARTBEAT_INTERVAL_MS = 15000L;
     private static final long WS_HEARTBEAT_TIMEOUT_MS = 45000L;
@@ -209,10 +213,18 @@ public class ReactorHttpService extends Service {
                 "(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*=\\s*(['\"])(.*?)\\2",
                 Pattern.DOTALL
             );
+            private static final Pattern GENERIC_VAR_ASSIGN_PATTERN = Pattern.compile(
+                "(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*=\\s*([^;\\r\\n]+)",
+                Pattern.DOTALL
+            );
             private static final Pattern HOME_DIR_VAR_ASSIGN_PATTERN = Pattern.compile(
                 "(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*=\\s*(?:await\\s+)?Node\\.getHomeDirectory\\s*\\(",
                 Pattern.DOTALL
             );
+        private static final Pattern DEVICE_NOTIFY_CALL_PATTERN = Pattern.compile(
+            "Device\\.notify\\s*\\(\\s*([^\\)]+)\\)",
+            Pattern.DOTALL
+        );
         private static final Set<String> VALID_WATCH_LISTENERS = new HashSet<>(Arrays.asList(
                 "file:created",
                 "file:deleted",
@@ -937,6 +949,7 @@ public class ReactorHttpService extends Service {
         super.onCreate();
         instance = this;
         createNotificationChannel();
+        createEndpointNotificationChannel();
         ReactorServiceWatchdogWorker.schedule(getApplicationContext());
     }
 
@@ -2994,7 +3007,7 @@ public class ReactorHttpService extends Service {
                                 return;
                             }
 
-                            dispatchWatchEvent(observedEndpoint, fullPath, watchType);
+                            dispatchWatchEvent(observedEndpoint, observedRoot, fullPath, watchType);
                         }
                     };
 
@@ -3137,7 +3150,7 @@ public class ReactorHttpService extends Service {
                     if (confirmSize == confirmState.lastSize && confirmMtime == confirmState.lastMtimeMs) {
                         tracked.pendingCreatedStates.remove(fullPath);
                         if (acceptsWatchType(listeners, "file:created")) {
-                            dispatchWatchEvent(tracked.endpoint, fullPath, "file:created");
+                            dispatchWatchEvent(tracked.endpoint, tracked.resolvedPath, fullPath, "file:created");
                         }
                         return;
                     }
@@ -3199,17 +3212,45 @@ public class ReactorHttpService extends Service {
         return normalized.replaceAll("/+$", "");
     }
 
-    private void dispatchWatchEvent(MessageEndpoint endpoint, String fullPath, String watchType) {
+    private String computeWatchRelativePath(String entryPath, String watchPath) {
+        String normalizedEntryPath = normalizeEventPath(entryPath);
+        String normalizedWatchPath = normalizeEventPath(watchPath);
+
+        if (normalizedEntryPath.isEmpty()) {
+            return "";
+        }
+
+        if (normalizedWatchPath.isEmpty()) {
+            return normalizedEntryPath;
+        }
+
+        if (normalizedEntryPath.equals(normalizedWatchPath)) {
+            return "";
+        }
+
+        String prefix = normalizedWatchPath + "/";
+        if (normalizedEntryPath.startsWith(prefix) && normalizedEntryPath.length() > prefix.length()) {
+            return normalizedEntryPath.substring(prefix.length());
+        }
+
+        return normalizedEntryPath;
+    }
+
+    private void dispatchWatchEvent(MessageEndpoint endpoint, String watchPath, String entryPath, String watchType) {
         if (endpoint == null || !endpoint.enabled) {
             return;
         }
+
+        String normalizedWatchPath = normalizeEventPath(watchPath);
+        String normalizedEntryPath = normalizeEventPath(entryPath);
 
         Map<String, String> headers = new HashMap<>();
         headers.put("x-reactor-trigger", "WATCH");
 
         Map<String, String> eventContext = new HashMap<>();
         eventContext.put("event.type", "WATCH");
-        eventContext.put("event.path", normalizeEventPath(fullPath));
+        eventContext.put("event.watchPath", normalizedWatchPath);
+        eventContext.put("event.relativePath", computeWatchRelativePath(normalizedEntryPath, normalizedWatchPath));
         eventContext.put("event.watchType", String.valueOf(watchType == null ? "" : watchType));
 
         try {
@@ -3663,9 +3704,27 @@ public class ReactorHttpService extends Service {
         }
 
         Map<String, String> safeEventContext = eventContext != null ? eventContext : new HashMap<>();
-        Map<String, String> stringVariables = extractStringVariables(endpoint.source);
+        Map<String, String> stringVariables = extractStringVariables(endpoint.source, safeEventContext);
         Map<String, String> streamVariables = extractStreamVariables(endpoint.source, stringVariables, safeEventContext);
         Set<String> scheduledStreams = new HashSet<>();
+
+        Matcher notifyMatcher = DEVICE_NOTIFY_CALL_PATTERN.matcher(endpoint.source);
+        while (notifyMatcher.find()) {
+            String messageToken = notifyMatcher.group(1);
+            String message = resolveTokenValue(messageToken, stringVariables, safeEventContext);
+            if (message.isEmpty()) {
+                appendProjectLog(endpoint, buildReadableGlobalLogLine("DEVICE_NOTIFY", "message-unresolved token=" + String.valueOf(messageToken)));
+                continue;
+            }
+
+            boolean shown = sendEndpointNotification(message);
+            String notifyMessage = "shown=" + shown + " message=" + message;
+            appendProjectLog(endpoint, buildReadableGlobalLogLine("DEVICE_NOTIFY", notifyMessage));
+            appendGlobalLog(buildExchangeLog(
+                "DEVICE_NOTIFY",
+                notifyMessage
+            ));
+        }
 
         Matcher directStreamMatcher = STREAM_FILE_CALL_PATTERN.matcher(endpoint.source);
         while (directStreamMatcher.find()) {
@@ -3792,7 +3851,7 @@ public class ReactorHttpService extends Service {
         }
     }
 
-    private Map<String, String> extractStringVariables(String source) {
+    private Map<String, String> extractStringVariables(String source, Map<String, String> eventContext) {
         Map<String, String> vars = new HashMap<>();
         Matcher matcher = STRING_VAR_ASSIGN_PATTERN.matcher(String.valueOf(source));
         while (matcher.find()) {
@@ -3818,7 +3877,147 @@ public class ReactorHttpService extends Service {
             }
         }
 
+        for (int pass = 0; pass < 3; pass++) {
+            boolean changed = false;
+            Matcher genericMatcher = GENERIC_VAR_ASSIGN_PATTERN.matcher(String.valueOf(source));
+            while (genericMatcher.find()) {
+                String name = genericMatcher.group(1) != null ? genericMatcher.group(1).trim() : "";
+                String expression = genericMatcher.group(2) != null ? genericMatcher.group(2).trim() : "";
+                if (name.isEmpty() || expression.isEmpty()) {
+                    continue;
+                }
+
+                String resolvedValue = resolveTokenValue(expression, vars, eventContext);
+                if (resolvedValue.isEmpty()) {
+                    continue;
+                }
+
+                String previous = vars.put(name, resolvedValue);
+                if (!resolvedValue.equals(previous)) {
+                    changed = true;
+                }
+            }
+
+            if (!changed) {
+                break;
+            }
+        }
+
         return vars;
+    }
+
+    private String trimWrappingParentheses(String token) {
+        String current = String.valueOf(token == null ? "" : token).trim();
+        while (current.length() >= 2 && current.startsWith("(") && current.endsWith(")")) {
+            int depth = 0;
+            boolean validWrap = true;
+            for (int index = 0; index < current.length(); index++) {
+                char ch = current.charAt(index);
+                if (ch == '(') {
+                    depth += 1;
+                } else if (ch == ')') {
+                    depth -= 1;
+                    if (depth == 0 && index < current.length() - 1) {
+                        validWrap = false;
+                        break;
+                    }
+                    if (depth < 0) {
+                        validWrap = false;
+                        break;
+                    }
+                }
+            }
+
+            if (!validWrap || depth != 0) {
+                break;
+            }
+
+            current = current.substring(1, current.length() - 1).trim();
+        }
+
+        return current;
+    }
+
+    private List<String> splitConcatenationParts(String expression) {
+        List<String> parts = new ArrayList<>();
+        StringBuilder token = new StringBuilder();
+        boolean inSingle = false;
+        boolean inDouble = false;
+        boolean inTemplate = false;
+        int parenDepth = 0;
+
+        String value = String.valueOf(expression == null ? "" : expression);
+        for (int index = 0; index < value.length(); index++) {
+            char ch = value.charAt(index);
+
+            if (ch == '\'' && !inDouble && !inTemplate) {
+                inSingle = !inSingle;
+                token.append(ch);
+                continue;
+            }
+
+            if (ch == '"' && !inSingle && !inTemplate) {
+                inDouble = !inDouble;
+                token.append(ch);
+                continue;
+            }
+
+            if (ch == '`' && !inSingle && !inDouble) {
+                inTemplate = !inTemplate;
+                token.append(ch);
+                continue;
+            }
+
+            if (!inSingle && !inDouble && !inTemplate) {
+                if (ch == '(') {
+                    parenDepth += 1;
+                    token.append(ch);
+                    continue;
+                }
+
+                if (ch == ')') {
+                    parenDepth = Math.max(0, parenDepth - 1);
+                    token.append(ch);
+                    continue;
+                }
+
+                if (ch == '+' && parenDepth == 0) {
+                    String part = token.toString().trim();
+                    if (!part.isEmpty()) {
+                        parts.add(part);
+                    }
+                    token.setLength(0);
+                    continue;
+                }
+            }
+
+            token.append(ch);
+        }
+
+        String tail = token.toString().trim();
+        if (!tail.isEmpty()) {
+            parts.add(tail);
+        }
+
+        return parts;
+    }
+
+    private String resolveConcatenatedExpression(String expression, Map<String, String> stringVariables, Map<String, String> eventContext) {
+        List<String> parts = splitConcatenationParts(expression);
+        if (parts.size() < 2) {
+            return "";
+        }
+
+        StringBuilder out = new StringBuilder();
+        for (String part : parts) {
+            String resolved = resolveTokenValue(part, stringVariables, eventContext);
+            if (resolved.isEmpty()) {
+                return "";
+            }
+            out.append(resolved);
+        }
+
+        return out.toString();
     }
 
     private String resolveTemplateToken(String token, Map<String, String> stringVariables, Map<String, String> eventContext) {
@@ -3853,9 +4052,16 @@ public class ReactorHttpService extends Service {
     }
 
     private String resolveTokenValue(String rawToken, Map<String, String> stringVariables, Map<String, String> eventContext) {
-        String token = String.valueOf(rawToken).trim();
+        String token = trimWrappingParentheses(String.valueOf(rawToken));
         if (token.isEmpty()) {
             return "";
+        }
+
+        if (token.contains("+")) {
+            String resolvedConcat = resolveConcatenatedExpression(token, stringVariables, eventContext);
+            if (!resolvedConcat.isEmpty()) {
+                return resolvedConcat;
+            }
         }
 
         if (token.startsWith("`") && token.endsWith("`") && token.length() >= 2) {
@@ -3867,8 +4073,11 @@ public class ReactorHttpService extends Service {
         }
 
         String normalizedToken = token.replaceAll("\\s+", "");
-        if ("event.path".equals(normalizedToken)) {
-            return String.valueOf(eventContext != null ? eventContext.getOrDefault("event.path", "") : "");
+        if ("event.watchPath".equals(normalizedToken)) {
+            return String.valueOf(eventContext != null ? eventContext.getOrDefault("event.watchPath", "") : "");
+        }
+        if ("event.relativePath".equals(normalizedToken)) {
+            return String.valueOf(eventContext != null ? eventContext.getOrDefault("event.relativePath", "") : "");
         }
         if ("event.watchType".equals(normalizedToken)) {
             return String.valueOf(eventContext != null ? eventContext.getOrDefault("event.watchType", "") : "");
@@ -6239,6 +6448,46 @@ public class ReactorHttpService extends Service {
                 .build();
     }
 
+    private boolean hasPostNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33) {
+            return true;
+        }
+
+        return checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean sendEndpointNotification(String message) {
+        String text = String.valueOf(message == null ? "" : message).trim();
+        if (text.isEmpty()) {
+            return false;
+        }
+
+        if (!hasPostNotificationPermission()) {
+            return false;
+        }
+
+        try {
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager == null) {
+                return false;
+            }
+
+            Notification notification = new NotificationCompat.Builder(this, ENDPOINT_NOTIFY_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_notify_more)
+                .setContentTitle("Reactor")
+                .setContentText(text)
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .build();
+
+            manager.notify(ENDPOINT_NOTIFICATION_IDS.incrementAndGet(), notification);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             return;
@@ -6250,6 +6499,24 @@ public class ReactorHttpService extends Service {
                 NotificationManager.IMPORTANCE_LOW
         );
         channel.setDescription("Keeps Reactor HTTP server running in background");
+
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) {
+            manager.createNotificationChannel(channel);
+        }
+    }
+
+    private void createEndpointNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return;
+        }
+
+        NotificationChannel channel = new NotificationChannel(
+            ENDPOINT_NOTIFY_CHANNEL_ID,
+            "Reactor Endpoint Notifications",
+            NotificationManager.IMPORTANCE_DEFAULT
+        );
+        channel.setDescription("Notifications triggered by endpoint scripts");
 
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) {

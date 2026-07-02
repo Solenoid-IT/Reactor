@@ -67,6 +67,43 @@ function collectKnownEntries(rootPath, map) {
 	}
 }
 
+function normalizeWatchEventPath(rawPath) {
+	const normalized = String(rawPath || '').replace(/\\/g, '/');
+	if (!normalized) {
+		return '';
+	}
+
+	if (normalized === '/' || /^[A-Za-z]:\/$/.test(normalized)) {
+		return normalized;
+	}
+
+	return normalized.replace(/\/+$/g, '');
+}
+
+function computeWatchRelativePath(entryPath, watchPath) {
+	const normalizedEntryPath = normalizeWatchEventPath(entryPath);
+	const normalizedWatchPath = normalizeWatchEventPath(watchPath);
+
+	if (!normalizedEntryPath) {
+		return '';
+	}
+
+	if (!normalizedWatchPath) {
+		return normalizedEntryPath;
+	}
+
+	if (normalizedEntryPath === normalizedWatchPath) {
+		return '';
+	}
+
+	const prefix = `${normalizedWatchPath}/`;
+	if (normalizedEntryPath.startsWith(prefix)) {
+		return normalizedEntryPath.slice(prefix.length);
+	}
+
+	return normalizedEntryPath;
+}
+
 function isUuidV4(value) {
 	return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '').trim());
 }
@@ -3613,18 +3650,7 @@ class ReactorRuntime {
 			}),
 		};
 
-		const normalizeEventPath = (rawPath) => {
-			const normalized = String(rawPath || '').replace(/\\/g, '/');
-			if (!normalized) {
-				return '';
-			}
-
-			if (normalized === '/' || /^[A-Za-z]:\/$/.test(normalized)) {
-				return normalized;
-			}
-
-			return normalized.replace(/\/+$/, '');
-		};
+		const normalizeEventPath = (rawPath) => normalizeWatchEventPath(rawPath);
 
 		class Event {
 			constructor(type, data = {}, timestamp = new Date().toISOString()) {
@@ -3638,14 +3664,22 @@ class ReactorRuntime {
 
 		class WatchEvent extends Event {
 			constructor(data = {}, timestamp) {
+				const normalizedWatchPath = normalizeEventPath(data.watchPath);
+				const normalizedEntryPath = normalizeEventPath(data.entryPath || data.path || (normalizedWatchPath && data.relativePath ? `${normalizedWatchPath}/${data.relativePath}` : ''));
+				const resolvedRelativePath = String(data.relativePath || computeWatchRelativePath(normalizedEntryPath, normalizedWatchPath));
 				super('WATCH', {
-					path: normalizeEventPath(data.path),
+					watchPath: normalizedWatchPath,
+					relativePath: resolvedRelativePath,
 					watchType: data.watchType || null,
 				}, timestamp);
 			}
 
-			get path() {
-				return this.data.path;
+			get watchPath() {
+				return this.data.watchPath;
+			}
+
+			get relativePath() {
+				return this.data.relativePath;
 			}
 
 			get watchType() {
@@ -3769,7 +3803,8 @@ class ReactorRuntime {
 			switch (trigger) {
 				case 'WATCH':
 					return new WatchEvent({
-						path: context.watchPath || '',
+						watchPath: context.watchPath || '',
+							relativePath: context.watchRelativePath || '',
 						watchType: context.watchType || null,
 					});
 				case 'MESSAGE':
@@ -4243,6 +4278,8 @@ class ReactorRuntime {
 			event: context.event || null,
 			expression: context.expression || null,
 			watchPath: context.watchPath || null,
+			watchEntryPath: context.watchEntryPath || context.watchPath || null,
+			watchRelativePath: context.watchRelativePath || null,
 			watchType: context.watchType || null,
 			durationMs,
 			output,
@@ -4683,7 +4720,8 @@ class ReactorRuntime {
 							return;
 						}
 
-						const fullPath = path.join(resolvedWatchPath, String(filename));
+						const fullPath = normalizeWatchEventPath(path.join(resolvedWatchPath, String(filename)));
+						const normalizedWatchPath = normalizeWatchEventPath(resolvedWatchPath);
 						const watchType = detectWatchType(eventType, fullPath, knownEntries);
 						if (!watchType || !listenerSet.has(watchType)) {
 							return;
@@ -4699,11 +4737,14 @@ class ReactorRuntime {
 								if (!readyResult.ready || this.isReloading) {
 									return;
 								}
+								const relativePath = computeWatchRelativePath(fullPath, normalizedWatchPath);
 
 								this.log(`[WATCH] ${endpoint.name}: file:created at ${fullPath} (stable)`);
 								this.runEndpoint(endpoint, {
 									trigger: 'WATCH',
-									watchPath: fullPath,
+									watchPath: normalizedWatchPath,
+									watchEntryPath: fullPath,
+									watchRelativePath: relativePath,
 									watchType,
 								}).catch((error) => {
 									this.log(`Error running ${endpoint.name} on watch event: ${error.message}`);
@@ -4717,9 +4758,12 @@ class ReactorRuntime {
 						}
 
 						this.log(`[WATCH] ${endpoint.name}: ${watchType} at ${fullPath}`);
+						const relativePath = computeWatchRelativePath(fullPath, normalizedWatchPath);
 						this.runEndpoint(endpoint, {
 							trigger: 'WATCH',
-							watchPath: fullPath,
+							watchPath: normalizedWatchPath,
+							watchEntryPath: fullPath,
+							watchRelativePath: relativePath,
 							watchType,
 						}).catch((error) => {
 							this.log(`Error running ${endpoint.name} on watch event: ${error.message}`);

@@ -317,13 +317,15 @@ declare module 'core' {
 	}
 
 	export interface WatchEventData extends EventData {
-		path: string;
+		watchPath: string;
+		relativePath: string;
 		watchType: WatchEventType | null;
 	}
 
 	export class WatchEvent extends Event<'WATCH', WatchEventData> {
 		constructor(data?: Partial<WatchEventData>, timestamp?: string);
-		readonly path: string;
+		readonly watchPath: string;
+		readonly relativePath: string;
 		readonly watchType: WatchEventType | null;
 		readonly data: never;
 	}
