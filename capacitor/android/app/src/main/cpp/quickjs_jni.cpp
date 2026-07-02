@@ -4,25 +4,285 @@
 #include <quickjs-libc.h>
 #include <string.h>
 #include <stdlib.h>
+#include <pthread.h>
 
 #define LOG_TAG "QuickJsJNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+// Global JNI references for native ops callbacks
+static JavaVM *jvm = nullptr;
+static jobject opsObject = nullptr;
+static jmethodID logMethod = nullptr;
+static jmethodID deviceNotifyMethod = nullptr;
+static jmethodID copyStreamMethod = nullptr;
+static jmethodID getHomeDirectoryMethod = nullptr;
+static jmethodID getNetworkStatusMethod = nullptr;
+static jmethodID nodeStreamMethod = nullptr;
+static jmethodID nodeSendMessageMethod = nullptr;
+static jmethodID sendHttpRequestMethod = nullptr;
+static jmethodID spawnProcessMethod = nullptr;
+static pthread_mutex_t opsLock = PTHREAD_MUTEX_INITIALIZER;
+
+// Helper to get JNIEnv
+static JNIEnv* getJniEnv() {
+    JNIEnv *env = nullptr;
+    if (jvm && jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
+        jvm->AttachCurrentThread(&env, nullptr);
+    }
+    return env;
+}
+
+// Helper to release JNIEnv thread attachment
+static void releaseJniEnv(JNIEnv *env) {
+    if (jvm) {
+        jvm->DetachCurrentThread();
+    }
+}
+
+// ============ Native Functions for JavaScript ============
+
+static JSValue nativeLog(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NULL;
+    
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !logMethod) {
+        LOGE("nativeLog: Missing JNI context");
+        return JS_NULL;
+    }
+    
+    pthread_mutex_lock(&opsLock);
+    
+    const char *msg = JS_ToCString(ctx, argv[0]);
+    if (msg) {
+        jstring jmsg = env->NewStringUTF(msg);
+        env->CallVoidMethod(opsObject, logMethod, jmsg);
+        env->DeleteLocalRef(jmsg);
+        JS_FreeCString(ctx, msg);
+    }
+    
+    pthread_mutex_unlock(&opsLock);
+    return JS_NULL;
+}
+
+static JSValue nativeDeviceNotify(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_FALSE;
+    
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !deviceNotifyMethod) {
+        LOGE("nativeDeviceNotify: Missing JNI context");
+        return JS_FALSE;
+    }
+    
+    pthread_mutex_lock(&opsLock);
+    
+    const char *msg = JS_ToCString(ctx, argv[0]);
+    jboolean result = JNI_FALSE;
+    if (msg) {
+        jstring jmsg = env->NewStringUTF(msg);
+        result = env->CallBooleanMethod(opsObject, deviceNotifyMethod, jmsg);
+        env->DeleteLocalRef(jmsg);
+        JS_FreeCString(ctx, msg);
+    }
+    
+    pthread_mutex_unlock(&opsLock);
+    return result ? JS_TRUE : JS_FALSE;
+}
+
+static JSValue nativeCopyStream(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_FALSE;
+    
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !copyStreamMethod) {
+        LOGE("nativeCopyStream: Missing JNI context");
+        return JS_FALSE;
+    }
+    
+    pthread_mutex_lock(&opsLock);
+    
+    const char *src = JS_ToCString(ctx, argv[0]);
+    const char *dst = JS_ToCString(ctx, argv[1]);
+    jboolean result = JNI_FALSE;
+    
+    if (src && dst) {
+        jstring jsrc = env->NewStringUTF(src);
+        jstring jdst = env->NewStringUTF(dst);
+        result = env->CallBooleanMethod(opsObject, copyStreamMethod, jsrc, jdst);
+        env->DeleteLocalRef(jsrc);
+        env->DeleteLocalRef(jdst);
+    }
+    
+    if (src) JS_FreeCString(ctx, src);
+    if (dst) JS_FreeCString(ctx, dst);
+    
+    pthread_mutex_unlock(&opsLock);
+    return result ? JS_TRUE : JS_FALSE;
+}
+
+static JSValue nativeGetHomeDirectory(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !getHomeDirectoryMethod) {
+        LOGE("nativeGetHomeDirectory: Missing JNI context");
+        return JS_NULL;
+    }
+    
+    pthread_mutex_lock(&opsLock);
+    
+    jstring result = (jstring)env->CallObjectMethod(opsObject, getHomeDirectoryMethod);
+    const char *path = result ? env->GetStringUTFChars(result, NULL) : "";
+    JSValue ret = JS_NewString(ctx, path ? path : "");
+    
+    if (result && path) {
+        env->ReleaseStringUTFChars(result, path);
+        env->DeleteLocalRef(result);
+    }
+    
+    pthread_mutex_unlock(&opsLock);
+    return ret;
+}
+
+static JSValue nativeGetNetworkStatus(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !getNetworkStatusMethod) {
+        LOGE("nativeGetNetworkStatus: Missing JNI context");
+        return JS_NULL;
+    }
+    
+    pthread_mutex_lock(&opsLock);
+    
+    jstring result = (jstring)env->CallObjectMethod(opsObject, getNetworkStatusMethod);
+    const char *status = result ? env->GetStringUTFChars(result, NULL) : "{}";
+    JSValue ret = JS_Eval(ctx, status ? status : "{}", strlen(status ? status : "{}"), "<status>", 0);
+    
+    if (result && status) {
+        env->ReleaseStringUTFChars(result, status);
+        env->DeleteLocalRef(result);
+    }
+    
+    pthread_mutex_unlock(&opsLock);
+    return ret;
+}
+
+static JSValue nativeNodeStream(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_NULL;
+    
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !nodeStreamMethod) {
+        LOGE("nativeNodeStream: Missing JNI context");
+        return JS_NULL;
+    }
+    
+    pthread_mutex_lock(&opsLock);
+    
+    const char *target = JS_ToCString(ctx, argv[0]);
+    const char *filePath = JS_ToCString(ctx, argv[1]);
+    const char *meta = argc > 2 ? JS_ToCString(ctx, argv[2]) : "{}";
+    
+    jstring result = NULL;
+    if (target && filePath && meta) {
+        jstring jtarget = env->NewStringUTF(target);
+        jstring jfilePath = env->NewStringUTF(filePath);
+        jstring jmeta = env->NewStringUTF(meta);
+        result = (jstring)env->CallObjectMethod(opsObject, nodeStreamMethod, jtarget, jfilePath, jmeta);
+        env->DeleteLocalRef(jtarget);
+        env->DeleteLocalRef(jfilePath);
+        env->DeleteLocalRef(jmeta);
+    }
+    
+    const char *result_str = result ? env->GetStringUTFChars(result, NULL) : "{}";
+    JSValue ret = JS_Eval(ctx, result_str ? result_str : "{}", strlen(result_str ? result_str : "{}"), "<stream>", 0);
+    
+    if (result && result_str) {
+        env->ReleaseStringUTFChars(result, result_str);
+        env->DeleteLocalRef(result);
+    }
+    
+    if (target) JS_FreeCString(ctx, target);
+    if (filePath) JS_FreeCString(ctx, filePath);
+    if (meta && argc > 2) JS_FreeCString(ctx, meta);
+    
+    pthread_mutex_unlock(&opsLock);
+    return ret;
+}
+
+static JSValue nativeNodeSendMessage(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_NULL;
+    
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !nodeSendMessageMethod) {
+        LOGE("nativeNodeSendMessage: Missing JNI context");
+        return JS_NULL;
+    }
+    
+    pthread_mutex_lock(&opsLock);
+    
+    const char *target = JS_ToCString(ctx, argv[0]);
+    const char *body = JS_ToCString(ctx, argv[1]);
+    const char *contentType = argc > 2 ? JS_ToCString(ctx, argv[2]) : "text/plain";
+    
+    jstring result = NULL;
+    if (target && body && contentType) {
+        jstring jtarget = env->NewStringUTF(target);
+        jstring jbody = env->NewStringUTF(body);
+        jstring jct = env->NewStringUTF(contentType);
+        result = (jstring)env->CallObjectMethod(opsObject, nodeSendMessageMethod, jtarget, jbody, jct);
+        env->DeleteLocalRef(jtarget);
+        env->DeleteLocalRef(jbody);
+        env->DeleteLocalRef(jct);
+    }
+    
+    const char *result_str = result ? env->GetStringUTFChars(result, NULL) : "{}";
+    JSValue ret = JS_Eval(ctx, result_str ? result_str : "{}", strlen(result_str ? result_str : "{}"), "<msg>", 0);
+    
+    if (result && result_str) {
+        env->ReleaseStringUTFChars(result, result_str);
+        env->DeleteLocalRef(result);
+    }
+    
+    if (target) JS_FreeCString(ctx, target);
+    if (body) JS_FreeCString(ctx, body);
+    if (contentType && argc > 2) JS_FreeCString(ctx, contentType);
+    
+    pthread_mutex_unlock(&opsLock);
+    return ret;
+}
+
+// ============ JNI Exported Functions ============
+
 extern "C" {
+
+/**
+ * Initialize JVM reference (called once at startup)
+ */
+JNIEXPORT void JNICALL
+JNI_OnLoad_quickjs_jni(JavaVM *vm, void *reserved) {
+    jvm = vm;
+    LOGI("JVM reference initialized");
+}
 
 /**
  * Crea un nuovo runtime QuickJS
  */
 JNIEXPORT jlong JNICALL
 Java_com_reactor_app_QuickJsWrapper_createRuntime(JNIEnv *env, jobject thiz) {
+    LOGI("createRuntime: Starting...");
+    
     JSRuntime *rt = JS_NewRuntime();
+    LOGI("createRuntime: JS_NewRuntime returned %p", rt);
+    
     if (!rt) {
-        LOGE("Failed to create QuickJS runtime");
+        LOGE("createRuntime: Failed to create QuickJS runtime (rt == NULL)");
         return 0;
     }
-    LOGI("QuickJS runtime created");
-    return (jlong)rt;
+    
+    if (!jvm) {
+        env->GetJavaVM(&jvm);
+        LOGI("createRuntime: Got JavaVM reference");
+    }
+    
+    jlong result = (jlong)rt;
+    LOGI("createRuntime: Returning jlong=%lld (0x%llx)", result, (unsigned long long)result);
+    return result;
 }
 
 /**
@@ -42,11 +302,129 @@ Java_com_reactor_app_QuickJsWrapper_createContext(JNIEnv *env, jobject thiz, jlo
         return 0;
     }
     
-    // Initialize standard objects (console, etc) - commented out as quickjs-libc not compiled
-    // js_std_add_helpers(ctx, 0, NULL);
-    
     LOGI("QuickJS context created");
     return (jlong)ctx;
+}
+
+/**
+ * Inizializza il transpiler JavaScript nel context
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_reactor_app_QuickJsWrapper_initializeTranspiler(JNIEnv *env, jobject thiz, 
+                                                         jlong context_ptr, jstring transpiler_code_java) {
+    JSContext *ctx = (JSContext *)context_ptr;
+    if (!ctx) {
+        LOGE("initializeTranspiler: Invalid context pointer");
+        return false;
+    }
+    
+    const char *transpiler_code = env->GetStringUTFChars(transpiler_code_java, NULL);
+    if (!transpiler_code) {
+        LOGE("initializeTranspiler: Failed to get transpiler code");
+        return false;
+    }
+    
+    LOGI("initializeTranspiler: Loading transpiler (%zu bytes)", strlen(transpiler_code));
+    
+    // Execute the transpiler code
+    JSValue result = JS_Eval(ctx, transpiler_code, strlen(transpiler_code), "<transpiler.js>", 0);
+    
+    env->ReleaseStringUTFChars(transpiler_code_java, transpiler_code);
+    
+    bool success = false;
+    if (JS_IsException(result)) {
+        JSValue exception = JS_GetException(ctx);
+        const char *error = JS_ToCString(ctx, exception);
+        LOGE("initializeTranspiler: Error loading transpiler: %s", error ? error : "unknown");
+        if (error) JS_FreeCString(ctx, error);
+        JS_FreeValue(ctx, exception);
+    } else {
+        LOGI("initializeTranspiler: Transpiler loaded successfully");
+        success = true;
+    }
+    
+    JS_FreeValue(ctx, result);
+    return success;
+}
+
+/**
+ * Registra le funzioni native che JavaScript può richiamare
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_reactor_app_QuickJsWrapper_registerNativeOps(JNIEnv *env, jobject thiz, jlong context_ptr, jobject ops) {
+    JSContext *ctx = (JSContext *)context_ptr;
+    if (!ctx || !ops) {
+        LOGE("Invalid context or ops object");
+        return false;
+    }
+    
+    pthread_mutex_lock(&opsLock);
+    
+    // Clear previous ops
+    if (opsObject) {
+        env->DeleteGlobalRef(opsObject);
+        opsObject = nullptr;
+    }
+    
+    // Store new ops reference
+    opsObject = env->NewGlobalRef(ops);
+    if (!opsObject) {
+        LOGE("Failed to create global ref for ops");
+        pthread_mutex_unlock(&opsLock);
+        return false;
+    }
+    
+    // Get method IDs from ReactorScriptOps interface
+    jclass opsClass = env->GetObjectClass(ops);
+    
+    logMethod = env->GetMethodID(opsClass, "log", "(Ljava/lang/String;)V");
+    if (!logMethod) LOGE("Missing method: log");
+    
+    deviceNotifyMethod = env->GetMethodID(opsClass, "deviceNotify", "(Ljava/lang/String;)Z");
+    if (!deviceNotifyMethod) LOGE("Missing method: deviceNotify");
+    
+    copyStreamMethod = env->GetMethodID(opsClass, "copyStream", "(Ljava/lang/String;Ljava/lang/String;)Z");
+    if (!copyStreamMethod) LOGE("Missing method: copyStream");
+    
+    getHomeDirectoryMethod = env->GetMethodID(opsClass, "getHomeDirectory", "()Ljava/lang/String;");
+    if (!getHomeDirectoryMethod) LOGE("Missing method: getHomeDirectory");
+    
+    getNetworkStatusMethod = env->GetMethodID(opsClass, "getNetworkStatus", "()Ljava/lang/String;");
+    if (!getNetworkStatusMethod) LOGE("Missing method: getNetworkStatus");
+    
+    nodeStreamMethod = env->GetMethodID(opsClass, "nodeStream", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+    if (!nodeStreamMethod) LOGE("Missing method: nodeStream");
+    
+    nodeSendMessageMethod = env->GetMethodID(opsClass, "nodeSendMessage", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+    if (!nodeSendMessageMethod) LOGE("Missing method: nodeSendMessage");
+    
+    sendHttpRequestMethod = env->GetMethodID(opsClass, "sendHttpRequest", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;J)Ljava/lang/String;");
+    if (!sendHttpRequestMethod) LOGE("Missing method: sendHttpRequest");
+    
+    spawnProcessMethod = env->GetMethodID(opsClass, "spawnProcess", "(Ljava/lang/String;)Z");
+    if (!spawnProcessMethod) LOGE("Missing method: spawnProcess");
+    
+    env->DeleteLocalRef(opsClass);
+    
+    // Create __native object with methods
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue nativeObj = JS_NewObject(ctx);
+    
+    JS_SetPropertyStr(ctx, nativeObj, "log", JS_NewCFunction(ctx, nativeLog, "log", 1));
+    JS_SetPropertyStr(ctx, nativeObj, "deviceNotify", JS_NewCFunction(ctx, nativeDeviceNotify, "deviceNotify", 1));
+    JS_SetPropertyStr(ctx, nativeObj, "copyStream", JS_NewCFunction(ctx, nativeCopyStream, "copyStream", 2));
+    JS_SetPropertyStr(ctx, nativeObj, "getHomeDirectory", JS_NewCFunction(ctx, nativeGetHomeDirectory, "getHomeDirectory", 0));
+    JS_SetPropertyStr(ctx, nativeObj, "getNetworkStatus", JS_NewCFunction(ctx, nativeGetNetworkStatus, "getNetworkStatus", 0));
+    JS_SetPropertyStr(ctx, nativeObj, "nodeStream", JS_NewCFunction(ctx, nativeNodeStream, "nodeStream", 3));
+    JS_SetPropertyStr(ctx, nativeObj, "nodeSendMessage", JS_NewCFunction(ctx, nativeNodeSendMessage, "nodeSendMessage", 3));
+    
+    JS_SetPropertyStr(ctx, global, "__native", nativeObj);
+    JS_FreeValue(ctx, global);
+    
+    pthread_mutex_unlock(&opsLock);
+    
+    LOGI("Native ops registered successfully");
+    return true;
 }
 
 /**
@@ -57,37 +435,56 @@ Java_com_reactor_app_QuickJsWrapper_evaluateScript(JNIEnv *env, jobject thiz,
                                                    jlong context_ptr, jstring script_java) {
     JSContext *ctx = (JSContext *)context_ptr;
     if (!ctx) {
-        LOGE("Invalid context pointer");
+        LOGE("evaluateScript: Invalid context pointer");
         return NULL;
     }
     
     const char *script = env->GetStringUTFChars(script_java, NULL);
     if (!script) {
-        LOGE("Failed to get script string");
+        LOGE("evaluateScript: Failed to get script string");
         return NULL;
     }
     
-    // Evalua lo script
-    JSValue result = JS_Eval(ctx, script, strlen(script), "<script>", JS_EVAL_TYPE_MODULE);
+    size_t script_len = strlen(script);
+    LOGI("evaluateScript: Executing %zu bytes", script_len);
+    if (script_len < 200) {
+        LOGI("evaluateScript: CODE: %.200s", script);
+    }
     
+    JSValue result = JS_Eval(ctx, script, script_len, "<script>", 0);
     env->ReleaseStringUTFChars(script_java, script);
     
-    // Converti il risultato a stringa
     jstring result_str = NULL;
     if (JS_IsException(result)) {
-        // Leggi l'errore
         JSValue exception = JS_GetException(ctx);
-        const char *error = JS_ToCString(ctx, exception);
-        result_str = env->NewStringUTF(error ? error : "Unknown error");
-        JS_FreeCString(ctx, error);
+        
+        // Try to get error message
+        const char *error_msg = NULL;
+        if (JS_IsObject(exception)) {
+            JSValue msg_val = JS_GetPropertyStr(ctx, exception, "message");
+            error_msg = JS_ToCString(ctx, msg_val);
+            JS_FreeValue(ctx, msg_val);
+        }
+        if (!error_msg) {
+            error_msg = JS_ToCString(ctx, exception);
+        }
+        
+        LOGE("evaluateScript: Error: %s", error_msg ? error_msg : "unknown");
+        result_str = env->NewStringUTF(error_msg ? error_msg : "Unknown error");
+        
+        if (error_msg) JS_FreeCString(ctx, error_msg);
         JS_FreeValue(ctx, exception);
-        LOGE("Script evaluation failed");
     } else {
-        // Converti il risultato a stringa
         const char *result_cstr = JS_ToCString(ctx, result);
         result_str = env->NewStringUTF(result_cstr ? result_cstr : "undefined");
-        JS_FreeCString(ctx, result_cstr);
-        LOGI("Script executed successfully");
+        if (result_cstr) {
+            if (strlen(result_cstr) < 100) {
+                LOGI("evaluateScript: Success - result: %s", result_cstr);
+            } else {
+                LOGI("evaluateScript: Success - result length: %zu", strlen(result_cstr));
+            }
+            JS_FreeCString(ctx, result_cstr);
+        }
     }
     
     JS_FreeValue(ctx, result);
@@ -103,7 +500,7 @@ Java_com_reactor_app_QuickJsWrapper_callFunction(JNIEnv *env, jobject thiz,
                                                  jstring args_java) {
     JSContext *ctx = (JSContext *)context_ptr;
     if (!ctx) {
-        LOGE("Invalid context pointer");
+        LOGE("callFunction: Invalid context pointer");
         return NULL;
     }
     
@@ -113,48 +510,66 @@ Java_com_reactor_app_QuickJsWrapper_callFunction(JNIEnv *env, jobject thiz,
     if (!func_name || !args_json) {
         if (func_name) env->ReleaseStringUTFChars(func_name_java, func_name);
         if (args_json) env->ReleaseStringUTFChars(args_java, args_json);
-        LOGE("Failed to get function name or args");
+        LOGE("callFunction: Failed to get function name or args");
         return NULL;
     }
     
-    // Get the global object
-    JSValue global = JS_GetGlobalObject(ctx);
+    LOGI("callFunction: Calling %s with args: %.50s...", func_name, args_json);
     
-    // Get the function from global
+    JSValue global = JS_GetGlobalObject(ctx);
     JSValue func = JS_GetPropertyStr(ctx, global, func_name);
+    
+    if (!JS_IsFunction(ctx, func)) {
+        LOGE("callFunction: %s is not a function", func_name);
+        JS_FreeValue(ctx, func);
+        JS_FreeValue(ctx, global);
+        env->ReleaseStringUTFChars(func_name_java, func_name);
+        env->ReleaseStringUTFChars(args_java, args_json);
+        return env->NewStringUTF("Function not found");
+    }
+    
+    JSValue parsed_args = JS_Eval(ctx, args_json, strlen(args_json), "<args>", 0);
     
     env->ReleaseStringUTFChars(func_name_java, func_name);
     env->ReleaseStringUTFChars(args_java, args_json);
     
-    // Parse JSON args
-    JSValue parsed_args = JS_Eval(ctx, args_json, strlen(args_json), "<args>", 0);
-    
     jstring result_str = NULL;
     
-    if (JS_IsFunction(ctx, func) && !JS_IsException(parsed_args)) {
-        // Chiama la funzione con gli argomenti
+    if (JS_IsException(parsed_args)) {
+        JSValue exception = JS_GetException(ctx);
+        const char *error = JS_ToCString(ctx, exception);
+        LOGE("callFunction: Failed to parse args: %s", error ? error : "unknown");
+        result_str = env->NewStringUTF(error ? error : "Failed to parse args");
+        if (error) JS_FreeCString(ctx, error);
+        JS_FreeValue(ctx, exception);
+    } else {
         JSValue result = JS_Call(ctx, func, JS_UNDEFINED, 1, &parsed_args);
         
         if (JS_IsException(result)) {
             JSValue exception = JS_GetException(ctx);
-            const char *error = JS_ToCString(ctx, exception);
-            result_str = env->NewStringUTF(error ? error : "Function call failed");
-            JS_FreeCString(ctx, error);
+            const char *error_msg = NULL;
+            if (JS_IsObject(exception)) {
+                JSValue msg_val = JS_GetPropertyStr(ctx, exception, "message");
+                error_msg = JS_ToCString(ctx, msg_val);
+                JS_FreeValue(ctx, msg_val);
+            }
+            if (!error_msg) {
+                error_msg = JS_ToCString(ctx, exception);
+            }
+            LOGE("callFunction: Function call failed: %s", error_msg ? error_msg : "unknown");
+            result_str = env->NewStringUTF(error_msg ? error_msg : "Function call failed");
+            if (error_msg) JS_FreeCString(ctx, error_msg);
             JS_FreeValue(ctx, exception);
-            LOGE("Function call failed");
         } else {
             const char *result_cstr = JS_ToCString(ctx, result);
             result_str = env->NewStringUTF(result_cstr ? result_cstr : "undefined");
-            JS_FreeCString(ctx, result_cstr);
-            LOGI("Function called successfully");
+            LOGI("callFunction: Success - result: %.100s", result_cstr ? result_cstr : "undefined");
+            if (result_cstr) JS_FreeCString(ctx, result_cstr);
             JS_FreeValue(ctx, result);
         }
-    } else {
-        result_str = env->NewStringUTF("Function not found or invalid args");
-        LOGE("Function not found or args parsing failed");
+        JS_FreeValue(ctx, parsed_args);
     }
     
-    JS_FreeValue(ctx, parsed_args);
     JS_FreeValue(ctx, func);
     JS_FreeValue(ctx, global);
     
@@ -184,12 +599,10 @@ Java_com_reactor_app_QuickJsWrapper_injectGlobal(JNIEnv *env, jobject thiz,
         return false;
     }
     
-    // Parse JSON value
     JSValue parsed_value = JS_Eval(ctx, value_json, strlen(value_json), "<value>", 0);
     
     bool success = false;
     if (!JS_IsException(parsed_value)) {
-        // Set nella global object
         JSValue global = JS_GetGlobalObject(ctx);
         int ret = JS_SetPropertyStr(ctx, global, name, parsed_value);
         success = (ret == 1);
@@ -228,6 +641,13 @@ Java_com_reactor_app_QuickJsWrapper_freeRuntime(JNIEnv *env, jobject thiz, jlong
         JS_FreeRuntime(rt);
         LOGI("QuickJS runtime freed");
     }
+    
+    pthread_mutex_lock(&opsLock);
+    if (opsObject) {
+        // Cannot delete global ref here without JNIEnv, so just clear
+        opsObject = nullptr;
+    }
+    pthread_mutex_unlock(&opsLock);
 }
 
 }  // extern "C"

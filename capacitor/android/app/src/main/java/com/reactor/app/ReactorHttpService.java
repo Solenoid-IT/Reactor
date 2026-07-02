@@ -3691,13 +3691,17 @@ public class ReactorHttpService extends Service {
                 return shown;
             }
 
-            @Override public String nodeStream(String target, String filePath, String metaJson, String headersJson) {
+            @Override public String nodeStream(String target, String filePath, String meta) {
                 try {
                     Map<String, String> extraHeaders = new HashMap<>();
+                    // meta might contain headers as JSON, try to parse it
                     try {
-                        org.json.JSONObject hdrs = new org.json.JSONObject(headersJson);
-                        Iterator<String> keys = hdrs.keys();
-                        while (keys.hasNext()) { String k = keys.next(); extraHeaders.put(k, hdrs.getString(k)); }
+                        org.json.JSONObject metaObj = new org.json.JSONObject(meta);
+                        if (metaObj.has("headers")) {
+                            org.json.JSONObject hdrs = metaObj.getJSONObject("headers");
+                            Iterator<String> keys = hdrs.keys();
+                            while (keys.hasNext()) { String k = keys.next(); extraHeaders.put(k, hdrs.getString(k)); }
+                        }
                     } catch (Exception ignored) {}
                     streamFileToNode(target, filePath, extraHeaders);
                     appendProjectLog(endpoint, buildReadableGlobalLogLine("NODE_STREAM",
@@ -3710,15 +3714,25 @@ public class ReactorHttpService extends Service {
                 }
             }
 
-            @Override public String nodeSendMessage(String target, String body, String contentType, String headersJson) {
+            @Override public String nodeSendMessage(String target, String stream, String data) {
                 try {
                     Map<String, String> extraHeaders = new HashMap<>();
+                    // data might contain headers as JSON, try to parse it
+                    String messageBody = data;
+                    String contentType = "application/octet-stream";
                     try {
-                        org.json.JSONObject hdrs = new org.json.JSONObject(headersJson);
-                        Iterator<String> keys = hdrs.keys();
-                        while (keys.hasNext()) { String k = keys.next(); extraHeaders.put(k, hdrs.getString(k)); }
-                    } catch (Exception ignored) {}
-                    SendDeliveryResult result = sendNodeMessageWithContentType(target, body, contentType, extraHeaders);
+                        org.json.JSONObject dataObj = new org.json.JSONObject(data);
+                        if (dataObj.has("body")) messageBody = dataObj.getString("body");
+                        if (dataObj.has("contentType")) contentType = dataObj.getString("contentType");
+                        if (dataObj.has("headers")) {
+                            org.json.JSONObject hdrs = dataObj.getJSONObject("headers");
+                            Iterator<String> keys = hdrs.keys();
+                            while (keys.hasNext()) { String k = keys.next(); extraHeaders.put(k, hdrs.getString(k)); }
+                        }
+                    } catch (Exception ignored) {
+                        // If not JSON, treat entire data as message body
+                    }
+                    SendDeliveryResult result = sendNodeMessageWithContentType(target, messageBody, contentType, extraHeaders);
                     appendProjectLog(endpoint, buildReadableGlobalLogLine("NODE_SEND",
                         "target=" + target + " deliveredVia=" + result.deliveredVia + " queued=" + result.queued));
                     org.json.JSONObject resp = new org.json.JSONObject();
@@ -3754,7 +3768,7 @@ public class ReactorHttpService extends Service {
                 } catch (Exception e) { return "{\"online\":false}"; }
             }
 
-            @Override public String sendHttpRequest(String url, String method, String headersJson, String body, long timeoutMs) {
+            @Override public String sendHttpRequest(String url, String method, String headers, String body, long timeoutMs) {
                 try {
                     okhttp3.OkHttpClient client = new okhttp3.OkHttpClient.Builder()
                         .connectTimeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -3769,7 +3783,7 @@ public class ReactorHttpService extends Service {
                     }
                     okhttp3.Request.Builder rb = new okhttp3.Request.Builder().url(url).method(upperMethod, reqBody);
                     try {
-                        org.json.JSONObject hdrs = new org.json.JSONObject(headersJson);
+                        org.json.JSONObject hdrs = new org.json.JSONObject(headers);
                         Iterator<String> keys = hdrs.keys();
                         while (keys.hasNext()) { String k = keys.next(); rb.header(k, hdrs.getString(k)); }
                     } catch (Exception ignored) {}

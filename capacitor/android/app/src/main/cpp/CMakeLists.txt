@@ -6,10 +6,23 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_library(log-lib log)
 
-# Pre-built QuickJS library
-add_library(quickjs SHARED IMPORTED)
-set_target_properties(quickjs PROPERTIES
-    IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/arm64-v8a/libquickjs.so"
+# Compila QuickJS direttamente con CMake (invece di usare libquickjs.so precompilato)
+# Questo evita problemi di rpath e dipendenze esterne su Android
+add_library(quickjs STATIC
+    ../../../../quickjs/src/quickjs.c
+    ../../../../quickjs/src/quickjs-libc.c
+    ../../../../quickjs/src/cutils.c
+    ../../../../quickjs/src/libunicode.c
+    ../../../../quickjs/src/libregexp.c
+    ../../../../quickjs/src/libbf.c
+)
+
+target_include_directories(quickjs PRIVATE
+    ../../../../quickjs/src
+)
+
+target_compile_options(quickjs PRIVATE
+    -fPIC -O2 -std=c99 -D_GNU_SOURCE -DHAVE_REALLOC_BUFFER
 )
 
 # JNI wrapper
@@ -22,4 +35,7 @@ target_include_directories(quickjs_jni PRIVATE
 target_link_libraries(quickjs_jni PRIVATE
     quickjs
     ${log-lib}
+    m
 )
+
+

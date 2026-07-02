@@ -4,15 +4,22 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# NDK Configuration
-NDKDIR="${ANDROID_NDK_ROOT:-/Users/pierniccologiannelli/Library/Android/sdk/ndk/30.0.14904198}"
+# NDK Configuration - use explicit path if env var not set
+NDKDIR="${ANDROID_NDK_ROOT}"
+if [ -z "$NDKDIR" ]; then
+    NDKDIR="/Users/pierniccologiannelli/Library/Android/sdk/ndk/30.0.14904198"
+fi
+
 TOOLCHAIN="$NDKDIR/toolchains/llvm/prebuilt/darwin-x86_64"
 TARGET="aarch64-linux-android21"
-CC="$TOOLCHAIN/bin/aarch64-linux-android-clang"
+CC="$TOOLCHAIN/bin/aarch64-linux-android21-clang"
+
+echo "NDK: $NDKDIR"
+echo "Toolchain: $TOOLCHAIN"
+echo "CC: $CC"
 
 if [ ! -f "$CC" ]; then
-    echo "❌ Error: NDK toolchain not found at $NDKDIR"
-    echo "   Set ANDROID_NDK_ROOT environment variable or update script"
+    echo "❌ Error: NDK toolchain not found at $TOOLCHAIN"
     exit 1
 fi
 
@@ -26,7 +33,7 @@ make clean 2>/dev/null || true
 # Compile
 make \
     CC="$CC" \
-    CFLAGS="-fPIC -O2 -std=c99 -D_GNU_SOURCE --target=$TARGET" \
+    CFLAGS="-fPIC -O2 -std=c99 -D_GNU_SOURCE -I." \
     all
 
 if [ -f "build/arm64-v8a/libquickjs.so" ]; then

@@ -1,5 +1,7 @@
 # QuickJS Android ARM64 Build
 # Targets: arm64-v8a
+# Note: CC must be set when calling make, e.g.:
+# CC=/path/to/aarch64-linux-android21-clang make CFLAGS="..." all
 
 BUILDDIR := build/arm64-v8a
 OBJDIR := $(BUILDDIR)/obj
@@ -17,8 +19,8 @@ SOURCES := \
 OBJECTS := $(SOURCES:%.c=$(OBJDIR)/%.o)
 TARGET := $(BUILDDIR)/libquickjs.so
 
-# Compiler flags
-CFLAGS := -fPIC -O2 -std=c99 -D_GNU_SOURCE -DHAVE_REALLOC_BUFFER
+# Default compiler flags (can be overridden)
+CFLAGS ?= -fPIC -O2 -std=c99 -D_GNU_SOURCE -DHAVE_REALLOC_BUFFER
 
 all: $(TARGET)
 
@@ -30,7 +32,7 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 
 $(TARGET): $(OBJECTS)
 	mkdir -p $(BUILDDIR)
-	$(CC) -shared $(OBJECTS) -o $@
+	$(CC) -shared $(OBJECTS) -lm -lc -o $@
 
 clean:
 	rm -rf $(BUILDDIR)

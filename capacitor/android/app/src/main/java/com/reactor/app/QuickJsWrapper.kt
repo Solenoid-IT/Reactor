@@ -2,17 +2,19 @@ package com.reactor.app
 
 /**
  * Wrapper per QuickJS runtime via JNI
- * Carica libquickjs.so (compilata manualmente per arm64-v8a)
+ * Carica libquickjs_jni.so (compilata da CMake, che linka libquickjs.so)
  */
 class QuickJsWrapper {
     companion object {
         init {
-            System.loadLibrary("quickjs")
+            System.loadLibrary("quickjs_jni")
         }
     }
 
     private var runtimePtr: Long = 0
     private var contextPtr: Long = 0
+    private var ops: ReactorScriptOps? = null
+    private var context: android.content.Context? = null
 
     /**
      * Crea un nuovo runtime QuickJS
@@ -50,6 +52,20 @@ class QuickJsWrapper {
     external fun injectGlobal(contextPtr: Long, name: String, jsonValue: String): Boolean
 
     /**
+     * Registra le funzioni native che JavaScript può richiamare
+     * @param contextPtr pointer al context
+     * @param opsObject oggetto Kotlin che implementa ReactorScriptOps
+     */
+    external fun registerNativeOps(contextPtr: Long, opsObject: ReactorScriptOps): Boolean
+
+    /**
+     * Inizializza il transpiler JavaScript nel context
+     * @param contextPtr pointer al context
+     * @param transpilerCode codice JavaScript del transpiler
+     */
+    external fun initializeTranspiler(contextPtr: Long, transpilerCode: String): Boolean
+
+    /**
      * Libera il memory del context
      */
     external fun freeContext(contextPtr: Long)
@@ -62,31 +78,128 @@ class QuickJsWrapper {
     /**
      * API pubblica: esecuzione di script
      */
-    fun initialize(): Boolean {
+    fun initialize(context: android.content.Context): Boolean {
         return try {
+            this.context = context
+            android.util.Log.d("QuickJsWrapper", "INIT_STEP_1_CREATE_RUNTIME")
             runtimePtr = createRuntime()
+            
+            if (runtimePtr == 0L) {
+                android.util.Log.e("QuickJsWrapper", "INIT_STEP_1_FAILED createRuntime returned 0 (NULL)")
+                return false
+            }
+            android.util.Log.d("QuickJsWrapper", "INIT_STEP_1_SUCCESS runtimePtr=$runtimePtr (0x${runtimePtr.toString(16)})")
+            
+            android.util.Log.d("QuickJsWrapper", "INIT_STEP_2_CREATE_CONTEXT")
             contextPtr = createContext(runtimePtr)
-            runtimePtr > 0 && contextPtr > 0
+            
+            if (contextPtr == 0L) {
+                android.util.Log.e("QuickJsWrapper", "INIT_STEP_2_FAILED createContext returned 0 (NULL)")
+                return false
+            }
+            android.util.Log.d("QuickJsWrapper", "INIT_STEP_2_SUCCESS contextPtr=$contextPtr (0x${contextPtr.toString(16)})")
+            
+            android.util.Log.d("QuickJsWrapper", "INIT_STEP_3_LOAD_TRANSPILER")
+            
+            // Load and initialize transpiler
+            val transpilerCode = loadTranspilerFromAssets(context)
+            if (transpilerCode.isNullOrEmpty()) {
+                android.util.Log.e("QuickJsWrapper", "INIT_STEP_3_FAILED transpiler is null or empty")
+                return false
+            }
+            android.util.Log.d("QuickJsWrapper", "INIT_STEP_4_INIT_TRANSPILER transpiler size=${transpilerCode.length}")
+            
+            val initResult = initializeTranspiler(contextPtr, transpilerCode)
+            if (!initResult) {
+                android.util.Log.e("QuickJsWrapper", "INIT_STEP_4_FAILED initializeTranspiler returned false")
+                return false
+            }
+            
+            android.util.Log.d("QuickJsWrapper", "INIT_SUCCESS runtimePtr=$runtimePtr contextPtr=$contextPtr")
+            true  // Success - both runtime and context created
         } catch (e: Exception) {
-            android.util.Log.e("QuickJsWrapper", "Failed to initialize: ${e.message}")
+            android.util.Log.e("QuickJsWrapper", "INIT_EXCEPTION: ${e.message}", e)
+            false
+        }
+    }
+
+    private fun loadTranspilerFromAssets(context: android.content.Context): String? {
+        return try {
+            android.util.Log.d("QuickJsWrapper", "LOAD_TRANSPILER_START")
+            val assetManager = context.assets
+            val inputStream = assetManager.open("transpiler.js")
+            android.util.Log.d("QuickJsWrapper", "LOAD_TRANSPILER_OPENED")
+            val buffer = ByteArray(inputStream.available())
+            inputStream.read(buffer)
+            inputStream.close()
+            android.util.Log.d("QuickJsWrapper", "LOAD_TRANSPILER_SUCCESS size=${buffer.size}")
+            String(buffer, Charsets.UTF_8)
+        } catch (e: Exception) {
+            android.util.Log.e("QuickJsWrapper", "LOAD_TRANSPILER_FAILED: ${e.message}", e)
+            null
+        }
+    }
+
+    fun setNativeOps(newOps: ReactorScriptOps): Boolean {
+        ops = newOps
+        return if (contextPtr != 0L) {
+            registerNativeOps(contextPtr, newOps)
+        } else {
             false
         }
     }
 
     fun execute(script: String): String? {
-        return if (contextPtr > 0) evaluateScript(contextPtr, script) else null
+        return if (contextPtr != 0L) evaluateScript(contextPtr, script) else null
     }
 
     fun call(functionName: String, args: String = "{}"): String? {
-        return if (contextPtr > 0) callFunction(contextPtr, functionName, args) else null
+        return if (contextPtr != 0L) callFunction(contextPtr, functionName, args) else null
+    }
+
+    /**
+     * Transpila TypeScript code usando il transpiler JavaScript nel context
+     */
+    fun transpile(code: String): String? {
+        if (contextPtr == 0L) {
+            android.util.Log.e("QuickJsWrapper", "transpile: contextPtr is 0 (NULL)")
+            return null
+        }
+        
+        android.util.Log.d("QuickJsWrapper", "transpile: START code.length=${code.length}")
+        
+        // Escape il codice da transpilare per metterlo in una stringa JavaScript
+        val escapedCode = code
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+        
+        android.util.Log.d("QuickJsWrapper", "transpile: ESCAPED escaped.length=${escapedCode.length}")
+        
+        val transpileCall = """
+            (function() {
+                try {
+                    return transpile("$escapedCode");
+                } catch (e) {
+                    return "Error: " + e.message;
+                }
+            })()
+        """.trimIndent()
+        
+        android.util.Log.d("QuickJsWrapper", "transpile: EXECUTE")
+        val result = execute(transpileCall)
+        android.util.Log.d("QuickJsWrapper", "transpile: RESULT ${result?.take(100)}")
+        
+        return result
     }
 
     fun cleanup() {
-        if (contextPtr > 0) {
+        if (contextPtr != 0L) {
             freeContext(contextPtr)
             contextPtr = 0
         }
-        if (runtimePtr > 0) {
+        if (runtimePtr != 0L) {
             freeRuntime(runtimePtr)
             runtimePtr = 0
         }

@@ -11,12 +11,12 @@ import java.io.File
 interface ReactorScriptOps {
     fun log(message: String)
     fun deviceNotify(message: String): Boolean
-    fun nodeStream(target: String, filePath: String, metaJson: String, headersJson: String): String
-    fun nodeSendMessage(target: String, body: String, contentType: String, headersJson: String): String
+    fun nodeStream(target: String, filePath: String, meta: String): String
+    fun nodeSendMessage(target: String, stream: String, data: String): String
     fun copyStream(src: String, dst: String): Boolean
     fun getHomeDirectory(): String
     fun getNetworkStatus(): String
-    fun sendHttpRequest(url: String, method: String, headersJson: String, body: String, timeoutMs: Long): String
+    fun sendHttpRequest(url: String, method: String, headers: String, body: String, timeoutMs: Long): String
     fun spawnProcess(command: String): Boolean
 }
 
@@ -50,18 +50,8 @@ var log=__reactorCore.log;
 """.trimIndent()
     }
 
-    private fun resolveCompiledJs(source: String): String {
-        // Simple TypeScript stripping
-        return source
-            .replace(Regex("""import\s+\{[^}]*\}\s+from\s+['"][^'"]*['"];?"""), "")
-            .replace(Regex("""export\s+(async\s+)?function"""), "async function")
-            .replace(Regex("""export\s+const"""), "const")
-            .replace(Regex(""":\s*\w+(\s*[,>]|$)"""), "$1")
-            .replace(Regex("""<\w+[^>]*>"""), "")
-    }
-
     fun compileAndCache(tsFile: File) {
-        // No-op: QuickJS handles TypeScript stripping on-demand
+        // No-op: QuickJS handles TypeScript transpilation on-demand
     }
 
     fun executeBlocking(
@@ -73,30 +63,53 @@ var log=__reactorCore.log;
         return try {
             Log.d("SCRIPT_ENGINE", "BEFORE_EXECUTE_BLOCKING trigger=$trigger source.length=${source.length}")
 
-            val compiledJs = resolveCompiledJs(source)
-            Log.d("SCRIPT_ENGINE", "TYPE_SCRIPT_RESOLVED compiled.length=${compiledJs.length}")
-
-            // Create QuickJS wrapper
+            // Transpile TypeScript using QuickJS transpiler function
+            Log.d("SCRIPT_ENGINE", "STEP_1_CREATE_ENGINE")
             val engine = QuickJsWrapper()
-            if (!engine.initialize()) {
-                Log.e("SCRIPT_ENGINE", "Failed to initialize QuickJS")
+            
+            Log.d("SCRIPT_ENGINE", "STEP_2_INITIALIZE context=$context")
+            if (!engine.initialize(context)) {
+                Log.e("SCRIPT_ENGINE", "STEP_2_FAILED Failed to initialize QuickJS")
                 return Result(null, "QuickJS initialization failed")
             }
+            Log.d("SCRIPT_ENGINE", "STEP_2_SUCCESS QuickJS initialized")
+
+            Log.d("SCRIPT_ENGINE", "STEP_3_TRANSPILE source.length=${source.length}")
+            val compiledJs = engine.transpile(source)
+            Log.d("SCRIPT_ENGINE", "STEP_3_RESULT compiledJs=${compiledJs?.take(100)}")
+            
+            if (compiledJs == null || compiledJs.startsWith("Error")) {
+                Log.e("SCRIPT_ENGINE", "TRANSPILE_ERROR: $compiledJs")
+                engine.cleanup()
+                return Result(null, "Transpilation failed: $compiledJs")
+            }
+            
+            Log.d("SCRIPT_ENGINE", "TYPESCRIPT_RESOLVED compiled.length=${compiledJs.length}")
+            Log.v("SCRIPT_ENGINE", "COMPILED_CODE:\n${compiledJs.take(500)}")  // Log first 500 chars
 
             Log.d("SCRIPT_ENGINE", "QUICKJS_INITIALIZED")
 
-            // Inject native ops stub
-            engine.injectGlobal(0, "__native", "{}")
-            Log.d("SCRIPT_ENGINE", "NATIVE_BINDING_DONE")
+            // Register native operations
+            if (!engine.setNativeOps(ops)) {
+                Log.e("SCRIPT_ENGINE", "Failed to register native ops")
+                engine.cleanup()
+                return Result(null, "Failed to register native ops")
+            }
+            Log.d("SCRIPT_ENGINE", "NATIVE_OPS_REGISTERED")
 
             // Execute bootstrap
             val bootstrapResult = engine.execute(BOOTSTRAP_JS)
             if (bootstrapResult?.startsWith("Error") == true) {
-                Log.e("SCRIPT_ENGINE", "EXEC_ERROR: $bootstrapResult")
+                Log.e("SCRIPT_ENGINE", "BOOTSTRAP_ERROR: $bootstrapResult")
                 engine.cleanup()
                 return Result(null, "Bootstrap failed: $bootstrapResult")
             }
             Log.d("SCRIPT_ENGINE", "BOOTSTRAP_DONE")
+
+            // Quick sanity check - verify __native is available
+            val checkNativeCode = "__native.log('__native available'); true;"
+            val checkResult = engine.execute(checkNativeCode)
+            Log.d("SCRIPT_ENGINE", "NATIVE_CHECK: $checkResult")
 
             // Build event object
             val buildEventCode = """
@@ -131,6 +144,11 @@ if ('$trigger' === 'WATCH') {
                 return Result(null, "User script failed: $userScriptResult")
             }
             Log.d("SCRIPT_ENGINE", "USER_SCRIPT_DONE")
+
+            // Try to call run - but first check if exports.run exists
+            val checkRun = "typeof exports.run"
+            val runExists = engine.execute(checkRun)
+            Log.d("SCRIPT_ENGINE", "exports.run exists? $runExists")
 
             // Call run function
             val callResult = engine.call("exports.run", "{}")
