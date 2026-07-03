@@ -1,4 +1,4 @@
-const { app, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const fs = require('fs/promises');
 const { spawn } = require('child_process');
 const path = require('path');
@@ -78,6 +78,45 @@ function setupIpcHandlers(runtime, options = {}) {
 
 	function isEditableExtension(targetPath) {
 		return /\.(ts|js|log)$/i.test(targetPath || '');
+	}
+
+	function normalizePermissionNames(permissions) {
+		return Array.isArray(permissions)
+			? Array.from(new Set(permissions.map((permissionName) => String(permissionName || '').trim()).filter(Boolean)))
+			: [];
+	}
+
+	async function requestGeolocationPermissionFromRenderer() {
+		const activeWindow = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows().find((windowRef) => !windowRef.isDestroyed());
+		if (!activeWindow || activeWindow.isDestroyed()) {
+			return { granted: false, error: 'no active window for permission request' };
+		}
+
+		try {
+			const result = await activeWindow.webContents.executeJavaScript(
+				`(async () => {
+					if (!globalThis.navigator || !navigator.geolocation || typeof navigator.geolocation.getCurrentPosition !== 'function') {
+						return { granted: false, error: 'geolocation api unavailable in renderer' };
+					}
+
+					return await new Promise((resolve) => {
+						navigator.geolocation.getCurrentPosition(
+							() => resolve({ granted: true }),
+							(error) => {
+								const message = error && error.message ? String(error.message) : 'geolocation permission denied';
+								resolve({ granted: false, error: message });
+							},
+							{ enableHighAccuracy: false, maximumAge: 0, timeout: 10000 },
+						);
+					});
+				})()`,
+				true,
+			);
+
+			return result && typeof result === 'object' ? result : { granted: false, error: 'invalid geolocation response' };
+		} catch (error) {
+			return { granted: false, error: error.message || 'unable to request geolocation permission' };
+		}
 	}
 
 	async function applyRuntimeStateFromImportedConfig() {
@@ -176,32 +215,54 @@ function setupIpcHandlers(runtime, options = {}) {
 	});
 
 	ipcMain.handle('request-system-permissions', async (_, permissions) => {
-		const normalizedPermissions = Array.isArray(permissions)
-			? Array.from(new Set(permissions.map((permissionName) => String(permissionName || '').trim()).filter(Boolean)))
-			: [];
+		const normalizedPermissions = normalizePermissionNames(permissions);
+		const granted = [];
+		const denied = [];
+
+		for (const permissionName of normalizedPermissions) {
+			const normalizedName = String(permissionName || '').trim().toLowerCase();
+			if (normalizedName === 'system.geolocation') {
+				const geolocationResult = await requestGeolocationPermissionFromRenderer();
+				if (geolocationResult && geolocationResult.granted) {
+					granted.push(permissionName);
+				} else {
+					denied.push(permissionName);
+				}
+				continue;
+			}
+
+			granted.push(permissionName);
+		}
+
 		return {
 			ok: true,
 			platform: getCurrentPlatformName(),
-			granted: normalizedPermissions,
-			denied: [],
+			granted,
+			denied,
 		};
 	});
 
 	ipcMain.handle('open-system-permission-settings', async (_, permissions) => {
 		try {
 			const platformName = getCurrentPlatformName();
-			const normalizedPermissions = Array.isArray(permissions)
-				? Array.from(new Set(permissions.map((permissionName) => String(permissionName || '').trim()).filter(Boolean)))
-				: [];
+			const normalizedPermissions = normalizePermissionNames(permissions);
+			const hasGeolocation = normalizedPermissions.some((permissionName) => String(permissionName || '').trim().toLowerCase() === 'system.geolocation');
+			const hasFilesystem = normalizedPermissions.some((permissionName) => String(permissionName || '').trim().toLowerCase().startsWith('filesystem.'));
 
 			if (process.platform === 'darwin') {
-				const targetUrl = 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles';
+				const targetUrl = hasGeolocation
+					? 'x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices'
+					: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles';
 				await shell.openExternal(targetUrl);
 				return { ok: true, opened: true, platform: platformName, target: targetUrl, permissions: normalizedPermissions };
 			}
 
 			if (process.platform === 'win32') {
-				const targetUrl = 'ms-settings:privacy-broadfilesystemaccess';
+				const targetUrl = hasGeolocation
+					? 'ms-settings:privacy-location'
+					: hasFilesystem
+						? 'ms-settings:privacy-broadfilesystemaccess'
+						: 'ms-settings:appsfeatures-app';
 				await shell.openExternal(targetUrl);
 				return { ok: true, opened: true, platform: platformName, target: targetUrl, permissions: normalizedPermissions };
 			}
@@ -786,6 +847,18 @@ function setupIpcHandlers(runtime, options = {}) {
 		}
 	});
 
+	ipcMain.handle('reorder-endpoints', async (_, orderedPaths) => {
+		if (!runtime || typeof runtime.reorderEndpointsByPaths !== 'function') {
+			return { ok: false, error: 'runtime not ready' };
+		}
+
+		try {
+			return await runtime.reorderEndpointsByPaths(orderedPaths);
+		} catch (error) {
+			return { ok: false, error: error.message || 'unable to reorder endpoints' };
+		}
+	});
+
 	ipcMain.handle('toggle-endpoint-directive', async (_, filePath, directive) => {
 		if (!runtime || !filePath || !directive) {
 			return { ok: false, error: 'invalid request' };
@@ -1154,6 +1227,7 @@ function setupIpcHandlers(runtime, options = {}) {
 			const endpoints = runtime.endpoints.map((endpoint) => ({
 				name: endpoint.name,
 				path: endpoint.path,
+				position: Number.isInteger(endpoint.position) ? endpoint.position : null,
 				endpointId: endpoint.endpointId || null,
 				eventLogPath: endpoint.eventLogPath,
 				state: endpoint.state,

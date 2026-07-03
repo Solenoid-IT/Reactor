@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, session } = require('electron');
 const fs = require('fs/promises');
 const os = require('os');
 const path = require('path');
@@ -143,6 +143,40 @@ function configureBackgroundMode() {
 	}
 }
 
+function isTrustedRendererOrigin(urlValue) {
+	const safeUrl = String(urlValue || '').trim().toLowerCase();
+	if (!safeUrl) {
+		return false;
+	}
+
+	return safeUrl.startsWith('http://127.0.0.1:') || safeUrl.startsWith('http://localhost:');
+}
+
+function configureRendererPermissionHandlers() {
+	const defaultSession = session.defaultSession;
+	if (!defaultSession) {
+		return;
+	}
+
+	defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+		if (permission !== 'geolocation') {
+			callback(false);
+			return;
+		}
+
+		const webContentsUrl = webContents && typeof webContents.getURL === 'function' ? webContents.getURL() : '';
+		const requestingOrigin = details && details.requestingOrigin ? String(details.requestingOrigin) : '';
+		callback(isTrustedRendererOrigin(webContentsUrl) || isTrustedRendererOrigin(requestingOrigin));
+	});
+
+	defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+		if (permission !== 'geolocation') {
+			return false;
+		}
+		return isTrustedRendererOrigin(requestingOrigin);
+	});
+}
+
 async function ensureMacLaunchAgentAutostart() {
 	if (process.platform !== 'darwin' || !app.isPackaged) {
 		return;
@@ -203,6 +237,7 @@ if (!gotSingleInstanceLock) {
 
 	// Main app lifecycle
 	app.whenReady().then(async () => {
+		configureRendererPermissionHandlers();
 		await ensureMacLaunchAgentAutostart();
 		configureBackgroundMode();
 

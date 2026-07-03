@@ -73,6 +73,10 @@
     ],
     "mac": {
       "icon": "assets/logo.icns",
+      "extendInfo": {
+        "NSLocationUsageDescription": "Reactor uses your location to geolocalize active nodes.",
+        "NSLocationWhenInUseUsageDescription": "Reactor uses your location to geolocalize active nodes while the app is open."
+      },
       "target": [
         "dmg",
         "zip"

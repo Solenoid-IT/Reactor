@@ -2,6 +2,18 @@
 	export let selectedEndpoint = null;
 	export let endpointsPath = '';
 	export let status = 'Ready';
+
+	function endpointDisplayName(name, fallback = 'unknown') {
+		const rawName = String(name || '').trim();
+		const stripped = rawName.replace(/\.(ts|js)$/i, '').trim();
+		if (stripped) {
+			return stripped;
+		}
+		if (rawName) {
+			return rawName;
+		}
+		return fallback;
+	}
 </script>
 
 <aside class="detail-pane">
@@ -13,7 +25,7 @@
 	<section class="detail-card">
 		<h3><i class="fa-solid fa-file-code me-2"></i>Selected Endpoint</h3>
 		{#if selectedEndpoint}
-			<div class="detail-value"><strong>{selectedEndpoint.name}</strong></div>
+			<div class="detail-value"><strong>{endpointDisplayName(selectedEndpoint.name, 'unknown')}</strong></div>
 			<div class="detail-value">{selectedEndpoint.path}</div>
 		{:else}
 			<div class="detail-value">None</div>

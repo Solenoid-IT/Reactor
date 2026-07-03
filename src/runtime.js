@@ -4493,8 +4493,46 @@ class ReactorRuntime {
 			}
 		}
 
-		endpointFiles.sort((a, b) => a.localeCompare(b));
-		return endpointFiles;
+		const endpointEntries = await Promise.all(
+			endpointFiles.map(async (endpointPath) => ({
+				path: endpointPath,
+				position: await this.readEndpointPositionForFile(endpointPath),
+			})),
+		);
+
+		endpointEntries.sort((a, b) => {
+			const aPosition = Number.isInteger(a.position) ? a.position : Number.MAX_SAFE_INTEGER;
+			const bPosition = Number.isInteger(b.position) ? b.position : Number.MAX_SAFE_INTEGER;
+			if (aPosition !== bPosition) {
+				return aPosition - bPosition;
+			}
+			return String(a.path || '').localeCompare(String(b.path || ''));
+		});
+
+		return endpointEntries;
+	}
+
+	async readEndpointPositionForFile(endpointPath) {
+		try {
+			const normalizedEndpointsDir = path.resolve(this.endpointsDir);
+			const normalizedEndpointPath = path.resolve(endpointPath);
+			const endpointDir = path.dirname(normalizedEndpointPath);
+			const isProjectEndpoint = path.dirname(endpointDir) === normalizedEndpointsDir;
+			if (!isProjectEndpoint) {
+				return Number.MAX_SAFE_INTEGER;
+			}
+
+			const positionPath = path.join(endpointDir, 'position');
+			const raw = await fs.readFile(positionPath, 'utf8');
+			const parsed = Number.parseInt(String(raw || '').trim(), 10);
+			if (Number.isInteger(parsed) && parsed >= 0) {
+				return parsed;
+			}
+		} catch {
+			// Keep fallback ordering when position file is missing or invalid.
+		}
+
+		return Number.MAX_SAFE_INTEGER;
 	}
 
 	async discoverEndpoints() {
@@ -4510,9 +4548,10 @@ class ReactorRuntime {
 			throw error;
 		}
 
-		const endpointFiles = await this.collectEndpointFiles();
+		const endpointEntries = await this.collectEndpointFiles();
 
-		for (const endpointPath of endpointFiles) {
+		for (const endpointEntry of endpointEntries) {
+			const endpointPath = endpointEntry.path;
 			try {
 				const source = await fs.readFile(endpointPath, 'utf8');
 				const metadata = parseEndpointMetadata(source);
@@ -4541,6 +4580,11 @@ class ReactorRuntime {
 				const endpoint = {
 					path: endpointPath,
 					name: displayName,
+					position: Number.isInteger(endpointEntry.position)
+						&& endpointEntry.position >= 0
+						&& endpointEntry.position !== Number.MAX_SAFE_INTEGER
+						? endpointEntry.position
+						: null,
 					projectDir,
 					uuid: endpointId,
 					endpointId: endpointId,
@@ -4612,6 +4656,72 @@ class ReactorRuntime {
 		if (this.exchangeManager && typeof this.exchangeManager.updateClientDiscoveryEndpoints === 'function') {
 			this.exchangeManager.updateClientDiscoveryEndpoints(this.getDiscoveryEndpointEntries());
 		}
+	}
+
+	async reorderEndpointsByPaths(paths = []) {
+		if (!Array.isArray(paths)) {
+			throw new Error('invalid endpoint order payload');
+		}
+
+		const normalizedEndpointsRoot = path.resolve(this.endpointsDir);
+		const orderedPaths = paths
+			.map((value) => String(value || '').trim())
+			.filter(Boolean)
+			.map((value) => path.resolve(value))
+			.filter((value) => value.startsWith(normalizedEndpointsRoot + path.sep));
+
+		const endpointByPath = new Map();
+		for (const endpoint of this.endpoints) {
+			if (!endpoint || !endpoint.path || !endpoint.projectDir) {
+				continue;
+			}
+			endpointByPath.set(path.resolve(endpoint.path), endpoint);
+		}
+
+		const seenProjects = new Set();
+		const orderedEndpoints = [];
+
+		for (const orderedPath of orderedPaths) {
+			const endpoint = endpointByPath.get(orderedPath);
+			if (!endpoint || !endpoint.projectDir) {
+				continue;
+			}
+
+			const projectKey = path.resolve(endpoint.projectDir);
+			if (seenProjects.has(projectKey)) {
+				continue;
+			}
+
+			seenProjects.add(projectKey);
+			orderedEndpoints.push(endpoint);
+		}
+
+		for (const endpoint of this.endpoints) {
+			if (!endpoint || !endpoint.projectDir) {
+				continue;
+			}
+
+			const projectKey = path.resolve(endpoint.projectDir);
+			if (seenProjects.has(projectKey)) {
+				continue;
+			}
+
+			seenProjects.add(projectKey);
+			orderedEndpoints.push(endpoint);
+		}
+
+		await Promise.all(
+			orderedEndpoints.map(async (endpoint, index) => {
+				const positionPath = path.join(endpoint.projectDir, 'position');
+				await fs.writeFile(positionPath, `${index}\n`, 'utf8');
+			}),
+		);
+
+		await this.reloadEndpoints('ui-reorder-endpoints');
+		return {
+			ok: true,
+			updated: orderedEndpoints.length,
+		};
 	}
 
 	setupSchedules() {

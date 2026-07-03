@@ -275,6 +275,29 @@ export async function createEndpointFile(templateKey, endpointName = '') {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
+export async function reorderEndpoints(paths = []) {
+	const safePaths = Array.isArray(paths)
+		? paths.map((item) => String(item || '').trim()).filter(Boolean)
+		: [];
+
+	const bridge = getBridge();
+	if (bridge && bridge.reorderEndpoints) {
+		return bridge.reorderEndpoints(safePaths);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.reorderEndpoints) {
+		return mobile.reorderEndpoints({ paths: safePaths });
+	}
+
+	const nativeResult = await callNative('reorderEndpoints', { paths: safePaths });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
 export async function renameEndpointFile(filePath, nextName) {
 	const bridge = getBridge();
 	if (bridge && bridge.renameEndpointFile) {

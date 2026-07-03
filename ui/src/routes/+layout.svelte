@@ -374,6 +374,46 @@
 		border-color: #4f5c70;
 		color: #d6e1f3;
 	}
+	:global(.item-reorder-controls) {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		margin-top: 8px;
+	}
+	:global(.item-reorder-label) {
+		font-size: 9px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.45px;
+		color: #9db0c7;
+	}
+	:global(.item-reorder-buttons) {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+	}
+	:global(.item-reorder-btn) {
+		width: 24px;
+		height: 24px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 7px;
+		border: 1px solid #4a596e;
+		background: #2d3745;
+		color: #dfe7f5;
+		transition: transform 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+	}
+	:global(.item-reorder-btn:hover) {
+		transform: translateY(-1px);
+		background: #344356;
+		border-color: #5b6f8b;
+	}
+	:global(.item-reorder-btn:disabled) {
+		opacity: 0.45;
+		cursor: default;
+		transform: none;
+	}
 	:global(.item-actions) { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid #364151; flex-wrap: wrap; }
 	:global(.item-action-btn) {
 		height: 30px;
@@ -593,6 +633,13 @@
 		}
 		:global(.item-actions) {
 			gap: 5px;
+		}
+		:global(.item-reorder-controls) {
+			margin-top: 7px;
+		}
+		:global(.item-reorder-btn) {
+			width: 22px;
+			height: 22px;
 		}
 		:global(.item-action-btn) {
 			height: 28px;

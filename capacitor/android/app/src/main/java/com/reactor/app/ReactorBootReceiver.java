@@ -30,10 +30,14 @@ public class ReactorBootReceiver extends BroadcastReceiver {
         serviceIntent.setAction(ReactorHttpService.ACTION_START);
         serviceIntent.putExtra(ReactorHttpService.EXTRA_PORT, configuredPort);
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(serviceIntent);
-        } else {
-            context.startService(serviceIntent);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent);
+            } else {
+                context.startService(serviceIntent);
+            }
+        } catch (Exception ignored) {
+            // System may temporarily block foreground service starts; watchdog will retry.
         }
 
         ReactorServiceWatchdogWorker.schedule(context);

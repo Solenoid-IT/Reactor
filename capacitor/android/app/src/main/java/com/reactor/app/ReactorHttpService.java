@@ -4,6 +4,8 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -1010,7 +1012,17 @@ public class ReactorHttpService extends Service {
         currentPort = requestedPort;
 
         Notification notification = buildNotification(currentPort);
-        startForeground(NOTIFICATION_ID, notification);
+        try {
+            startForeground(NOTIFICATION_ID, notification);
+        } catch (Exception foregroundError) {
+            stopRequestedByUser = true;
+            appendGlobalLog(buildExchangeLog(
+                    "SERVICE_FOREGROUND_BLOCKED",
+                    foregroundError.getMessage() != null ? foregroundError.getMessage() : "startForeground blocked by system"
+            ));
+            stopSelf();
+            return START_NOT_STICKY;
+        }
 
         try {
             if (!running || currentPort != readActivePort()) {
@@ -3841,6 +3853,65 @@ public class ReactorHttpService extends Service {
                     }
                     return "{\"online\":" + online + "}";
                 } catch (Exception e) { return "{\"online\":false}"; }
+            }
+
+            @Override public String getGeoLocation() {
+                try {
+                    boolean hasFine = false;
+                    boolean hasCoarse = false;
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                        hasFine = checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+                        hasCoarse = checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+                    } else {
+                        hasFine = true;
+                        hasCoarse = true;
+                    }
+
+                    if (!hasFine && !hasCoarse) {
+                        return "{\"lat\":null,\"lon\":null,\"available\":false}";
+                    }
+
+                    android.location.LocationManager manager = (android.location.LocationManager) getSystemService(android.content.Context.LOCATION_SERVICE);
+                    if (manager == null) {
+                        return "{\"lat\":null,\"lon\":null,\"available\":false}";
+                    }
+
+                    android.location.Location best = null;
+                    String[] providers = new String[] {
+                        android.location.LocationManager.GPS_PROVIDER,
+                        android.location.LocationManager.NETWORK_PROVIDER,
+                        android.location.LocationManager.PASSIVE_PROVIDER,
+                    };
+
+                    for (String provider : providers) {
+                        android.location.Location candidate = null;
+                        try {
+                            candidate = manager.getLastKnownLocation(provider);
+                        } catch (Exception ignored) {
+                            candidate = null;
+                        }
+
+                        if (candidate == null) {
+                            continue;
+                        }
+
+                        if (best == null || candidate.getTime() > best.getTime()) {
+                            best = candidate;
+                        }
+                    }
+
+                    if (best == null) {
+                        return "{\"lat\":null,\"lon\":null,\"available\":false}";
+                    }
+
+                    org.json.JSONObject result = new org.json.JSONObject();
+                    result.put("lat", best.getLatitude());
+                    result.put("lon", best.getLongitude());
+                    result.put("available", true);
+                    return result.toString();
+                } catch (Exception e) {
+                    return "{\"lat\":null,\"lon\":null,\"available\":false}";
+                }
             }
 
             @Override public String sendHttpRequest(String url, String method, String headers, String body, long timeoutMs) {
@@ -6843,15 +6914,22 @@ public class ReactorHttpService extends Service {
     private Notification buildNotification(int port) {
         String title = "Reactor HTTP server";
         String text = "Listening on port " + port;
+        int appIconResId = resolveNotificationIconResId();
+        Bitmap largeIcon = loadNotificationLargeIcon(appIconResId);
 
-        return new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.stat_notify_sync)
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(appIconResId)
                 .setContentTitle(title)
                 .setContentText(text)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
-                .build();
+                .setPriority(NotificationCompat.PRIORITY_LOW);
+
+        if (largeIcon != null) {
+            builder.setLargeIcon(largeIcon);
+        }
+
+        return builder.build();
     }
 
     private boolean hasPostNotificationPermission() {
@@ -6878,19 +6956,50 @@ public class ReactorHttpService extends Service {
                 return false;
             }
 
-            Notification notification = new NotificationCompat.Builder(this, ENDPOINT_NOTIFY_CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.stat_notify_more)
+            int appIconResId = resolveNotificationIconResId();
+            Bitmap largeIcon = loadNotificationLargeIcon(appIconResId);
+
+            NotificationCompat.Builder builder = new NotificationCompat.Builder(this, ENDPOINT_NOTIFY_CHANNEL_ID)
+                .setSmallIcon(appIconResId)
                 .setContentTitle("Reactor")
                 .setContentText(text)
                 .setStyle(new NotificationCompat.BigTextStyle().bigText(text))
                 .setAutoCancel(true)
-                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-                .build();
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT);
+
+            if (largeIcon != null) {
+                builder.setLargeIcon(largeIcon);
+            }
+
+            Notification notification = builder.build();
 
             manager.notify(ENDPOINT_NOTIFICATION_IDS.incrementAndGet(), notification);
             return true;
         } catch (Exception ignored) {
             return false;
+        }
+    }
+
+    private int resolveNotificationIconResId() {
+        int appIcon = 0;
+        try {
+            appIcon = getApplicationInfo() != null ? getApplicationInfo().icon : 0;
+        } catch (Exception ignored) {
+            appIcon = 0;
+        }
+
+        return appIcon != 0 ? appIcon : android.R.drawable.stat_notify_more;
+    }
+
+    private Bitmap loadNotificationLargeIcon(int resourceId) {
+        if (resourceId == 0) {
+            return null;
+        }
+
+        try {
+            return BitmapFactory.decodeResource(getResources(), resourceId);
+        } catch (Exception ignored) {
+            return null;
         }
     }
 

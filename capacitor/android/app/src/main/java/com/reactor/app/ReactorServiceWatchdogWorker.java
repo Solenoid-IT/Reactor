@@ -43,7 +43,7 @@ public class ReactorServiceWatchdogWorker extends Worker {
                 context.startService(serviceIntent);
             }
             return Result.success();
-        } catch (Exception error) {
+        } catch (Throwable error) {
             return Result.retry();
         }
     }

@@ -1,7 +1,23 @@
 {
+    "Mac":
+    [
+        "system.geolocation"
+    ],
+
+    "Windows":
+    [
+        "system.geolocation"
+    ],
+
+    "Linux":
+    [
+        "system.geolocation"
+    ],
+
     "Android":
     [
         "filesystem.manage",
-        "system.notification"
+        "system.notification",
+        "system.geolocation"
     ]
 }

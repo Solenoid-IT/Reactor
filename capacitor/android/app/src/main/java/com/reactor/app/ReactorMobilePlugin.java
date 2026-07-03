@@ -1,6 +1,7 @@
 package com.reactor.app;
 
 import android.app.Activity;
+import android.Manifest;
 import android.app.NotificationManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -19,8 +20,11 @@ import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 import androidx.activity.result.ActivityResult;
 import androidx.core.app.NotificationManagerCompat;
 
@@ -49,9 +53,11 @@ import java.util.UUID;
 import java.util.stream.Stream;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
+import java.util.Map;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -70,7 +76,15 @@ import javax.net.ssl.X509TrustManager;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-@CapacitorPlugin(name = "ReactorMobile")
+@CapacitorPlugin(
+    name = "ReactorMobile",
+    permissions = {
+        @Permission(alias = "location", strings = {
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+        }),
+    }
+)
 public class ReactorMobilePlugin extends Plugin {
 
     private static final int DEFAULT_HTTP_PORT = 7070;
@@ -1059,6 +1073,33 @@ public class ReactorMobilePlugin extends Plugin {
         return false;
     }
 
+    private boolean requestsGeolocationPermission(List<String> permissions) {
+        if (permissions == null) {
+            return false;
+        }
+
+        for (String permissionName : permissions) {
+            String normalized = String.valueOf(permissionName == null ? "" : permissionName).trim().toLowerCase(Locale.ROOT);
+            if ("system.geolocation".equals(normalized)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean isBackgroundLocationPermissionGranted() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return true;
+        }
+
+        try {
+            return getContext().checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     private boolean isNotificationPermissionGranted() {
         try {
             if (Build.VERSION.SDK_INT >= 33) {
@@ -1108,6 +1149,17 @@ public class ReactorMobilePlugin extends Plugin {
 
                 if ("system.notification".equals(normalized)) {
                     if (isNotificationPermissionGranted()) {
+                        grantedNames.add(permissionName);
+                    } else {
+                        deniedNames.add(permissionName);
+                    }
+                    continue;
+                }
+
+                if ("system.geolocation".equals(normalized)) {
+                    final boolean foregroundGranted = getPermissionState("location") == PermissionState.GRANTED;
+                    final boolean backgroundGranted = isBackgroundLocationPermissionGranted();
+                    if (foregroundGranted && backgroundGranted) {
                         grantedNames.add(permissionName);
                     } else {
                         deniedNames.add(permissionName);
@@ -1184,6 +1236,23 @@ public class ReactorMobilePlugin extends Plugin {
             return;
         }
 
+        if (requestsGeolocationPermission(requestedPermissions) && getPermissionState("location") != PermissionState.GRANTED) {
+            requestPermissionForAlias("location", call, "handleLocationPermissionResult");
+            return;
+        }
+
+        if (requestsGeolocationPermission(requestedPermissions) && !isBackgroundLocationPermissionGranted()) {
+            try {
+                Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                intent.setData(Uri.parse("package:" + getContext().getPackageName()));
+                startActivityForResult(call, intent, "handleBackgroundLocationPermissionResult");
+                return;
+            } catch (Exception error) {
+                call.resolve(new JSObject().put("ok", false).put("error", error.getMessage()).put("platform", "Android"));
+                return;
+            }
+        }
+
         if (requestsFilesystemPermission(requestedPermissions) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
             try {
                 Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
@@ -1220,6 +1289,19 @@ public class ReactorMobilePlugin extends Plugin {
     public void openSystemPermissionSettings(PluginCall call) {
         List<String> requestedPermissions = getRequestedPermissionNames(call);
         try {
+            if (requestsGeolocationPermission(requestedPermissions)) {
+                Intent locationSettingsIntent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                locationSettingsIntent.setData(Uri.parse("package:" + getContext().getPackageName()));
+                locationSettingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                getContext().startActivity(locationSettingsIntent);
+                call.resolve(new JSObject()
+                        .put("ok", true)
+                        .put("opened", true)
+                        .put("platform", "Android")
+                    .put("target", "ACTION_APPLICATION_DETAILS_SETTINGS"));
+                return;
+            }
+
             if (requestsFilesystemPermission(requestedPermissions) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 try {
                     Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
@@ -1273,6 +1355,39 @@ public class ReactorMobilePlugin extends Plugin {
                     .put("platform", "Android")
                     .put("error", e.getMessage() != null ? e.getMessage() : "unable to open system permission settings"));
         }
+    }
+
+    @PermissionCallback
+    private void handleLocationPermissionResult(PluginCall call) {
+        if (call == null) {
+            return;
+        }
+
+        List<String> requestedPermissions = getRequestedPermissionNames(call);
+
+        if (requestsGeolocationPermission(requestedPermissions) && getPermissionState("location") == PermissionState.GRANTED && !isBackgroundLocationPermissionGranted()) {
+            try {
+                Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                intent.setData(Uri.parse("package:" + getContext().getPackageName()));
+                startActivityForResult(call, intent, "handleBackgroundLocationPermissionResult");
+                return;
+            } catch (Exception error) {
+                call.resolve(new JSObject().put("ok", false).put("error", error.getMessage()).put("platform", "Android"));
+                return;
+            }
+        }
+
+        call.resolve(evaluatePermissionGrantState(requestedPermissions));
+    }
+
+    @ActivityCallback
+    private void handleBackgroundLocationPermissionResult(PluginCall call, ActivityResult activityResult) {
+        if (call == null) {
+            return;
+        }
+
+        List<String> requestedPermissions = getRequestedPermissionNames(call);
+        call.resolve(evaluatePermissionGrantState(requestedPermissions));
     }
 
     @ActivityCallback
@@ -1442,10 +1557,51 @@ public class ReactorMobilePlugin extends Plugin {
         return null;
     }
 
+    private int readEndpointPosition(File projectDir) {
+        if (projectDir == null) {
+            return Integer.MAX_VALUE;
+        }
+
+        File positionFile = new File(projectDir, "position");
+        if (!positionFile.exists()) {
+            return Integer.MAX_VALUE;
+        }
+
+        try {
+            String raw = readTextFile(positionFile).trim();
+            int parsed = Integer.parseInt(raw);
+            return parsed >= 0 ? parsed : Integer.MAX_VALUE;
+        } catch (Exception ignored) {
+            return Integer.MAX_VALUE;
+        }
+    }
+
+    private void writeEndpointPosition(File projectDir, int position) throws IOException {
+        if (projectDir == null) {
+            throw new IOException("invalid endpoint project");
+        }
+        int safePosition = Math.max(0, position);
+        writeTextFile(new File(projectDir, "position"), safePosition + "\n");
+    }
+
+    private String canonicalPathKey(File file) {
+        if (file == null) {
+            return "";
+        }
+
+        try {
+            return file.getCanonicalPath();
+        } catch (Exception ignored) {
+            return file.getAbsolutePath();
+        }
+    }
+
     private JSObject buildEndpointInfo(File endpointFile, String projectName) {
         JSObject endpoint = new JSObject();
         endpoint.put("name", projectName + ".ts");
         endpoint.put("path", endpointFile.getAbsolutePath());
+        int position = readEndpointPosition(endpointFile.getParentFile());
+        endpoint.put("position", position == Integer.MAX_VALUE ? JSONObject.NULL : position);
         File uuidFile = new File(endpointFile.getParentFile(), "uuid");
         String endpointId = "";
         try {
@@ -1461,10 +1617,17 @@ public class ReactorMobilePlugin extends Plugin {
         endpoint.put("enabled", false);
         endpoint.put("schedule", "");
         endpoint.put("events", new JSArray());
+        endpoint.put("triggers", new JSArray());
         endpoint.put("messageSenders", new JSArray());
         endpoint.put("messageFromAnySender", false);
         endpoint.put("mutex", false);
         endpoint.put("watch", new JSArray());
+
+        JSArray events = endpoint.opt("events") instanceof JSArray ? (JSArray) endpoint.opt("events") : new JSArray();
+        JSArray triggers = endpoint.opt("triggers") instanceof JSArray ? (JSArray) endpoint.opt("triggers") : new JSArray();
+        endpoint.put("events", events);
+        endpoint.put("triggers", triggers);
+        Set<String> seenTriggers = new LinkedHashSet<>();
 
         try {
             List<String> lines = Files.readAllLines(endpointFile.toPath(), StandardCharsets.UTF_8);
@@ -1485,8 +1648,30 @@ public class ReactorMobilePlugin extends Plugin {
                 } else if (line.startsWith("// @schedule")) {
                     endpoint.put("schedule", line.replace("// @schedule", "").trim());
                 } else if (line.startsWith("// @watch")) {
-                    JSArray watch = (JSArray) endpoint.get("watch");
+                    JSArray watch = endpoint.opt("watch") instanceof JSArray ? (JSArray) endpoint.opt("watch") : new JSArray();
+                    endpoint.put("watch", watch);
                     watch.put(line.replace("// @watch", "").trim());
+                } else if (line.startsWith("// @on")) {
+                    String rawTrigger = line.replace("// @on", "").trim();
+                    if (rawTrigger.isEmpty()) {
+                        continue;
+                    }
+
+                    int separator = rawTrigger.indexOf('(');
+                    if (separator < 0) {
+                        separator = rawTrigger.indexOf(' ');
+                    }
+
+                    String trigger = (separator >= 0 ? rawTrigger.substring(0, separator) : rawTrigger)
+                            .trim()
+                            .toUpperCase(Locale.ROOT);
+                    if (trigger.isEmpty() || seenTriggers.contains(trigger)) {
+                        continue;
+                    }
+
+                    seenTriggers.add(trigger);
+                    events.put(trigger);
+                    triggers.put(trigger);
                 }
             }
         } catch (Exception ignored) {
@@ -1503,11 +1688,25 @@ public class ReactorMobilePlugin extends Plugin {
             JSArray endpoints = new JSArray();
             File[] children = projectsDir.listFiles();
             if (children != null) {
+                List<File> sortedProjects = new ArrayList<>();
                 for (File child : children) {
                     if (!child.isDirectory()) {
                         continue;
                     }
 
+                    sortedProjects.add(child);
+                }
+
+                sortedProjects.sort((left, right) -> {
+                    int leftPosition = readEndpointPosition(left);
+                    int rightPosition = readEndpointPosition(right);
+                    if (leftPosition != rightPosition) {
+                        return Integer.compare(leftPosition, rightPosition);
+                    }
+                    return String.valueOf(left.getName()).compareToIgnoreCase(String.valueOf(right.getName()));
+                });
+
+                for (File child : sortedProjects) {
                     File endpointFile = resolveEndpointFileFromProject(child);
                     if (endpointFile == null) {
                         continue;
@@ -1523,6 +1722,89 @@ public class ReactorMobilePlugin extends Plugin {
             call.resolve(result);
         } catch (Exception e) {
             call.reject(e.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void reorderEndpoints(PluginCall call) {
+        try {
+            JSArray inputPaths = call != null ? call.getArray("paths", new JSArray()) : new JSArray();
+            File projectsDir = getEndpointsDir();
+            File[] children = projectsDir.listFiles();
+            List<File> projectDirs = new ArrayList<>();
+            Map<String, File> projectByEndpointPath = new HashMap<>();
+
+            if (children != null) {
+                for (File child : children) {
+                    if (!child.isDirectory()) {
+                        continue;
+                    }
+
+                    File endpointFile = resolveEndpointFileFromProject(child);
+                    if (endpointFile == null) {
+                        continue;
+                    }
+
+                    projectDirs.add(child);
+                    projectByEndpointPath.put(canonicalPathKey(endpointFile), child);
+                }
+            }
+
+            List<File> orderedProjects = new ArrayList<>();
+            Set<String> seenProjectKeys = new LinkedHashSet<>();
+
+            for (int index = 0; index < inputPaths.length(); index++) {
+                String rawPath = String.valueOf(inputPaths.optString(index, "")).trim();
+                if (rawPath.isEmpty()) {
+                    continue;
+                }
+
+                File projectDir = projectByEndpointPath.get(canonicalPathKey(new File(rawPath)));
+                if (projectDir == null) {
+                    continue;
+                }
+
+                String projectKey = canonicalPathKey(projectDir);
+                if (seenProjectKeys.contains(projectKey)) {
+                    continue;
+                }
+
+                seenProjectKeys.add(projectKey);
+                orderedProjects.add(projectDir);
+            }
+
+            List<File> remainingProjects = new ArrayList<>();
+            for (File projectDir : projectDirs) {
+                String projectKey = canonicalPathKey(projectDir);
+                if (seenProjectKeys.contains(projectKey)) {
+                    continue;
+                }
+                remainingProjects.add(projectDir);
+            }
+
+            remainingProjects.sort((left, right) -> {
+                int leftPosition = readEndpointPosition(left);
+                int rightPosition = readEndpointPosition(right);
+                if (leftPosition != rightPosition) {
+                    return Integer.compare(leftPosition, rightPosition);
+                }
+                return String.valueOf(left.getName()).compareToIgnoreCase(String.valueOf(right.getName()));
+            });
+
+            for (File projectDir : remainingProjects) {
+                String projectKey = canonicalPathKey(projectDir);
+                seenProjectKeys.add(projectKey);
+                orderedProjects.add(projectDir);
+            }
+
+            for (int index = 0; index < orderedProjects.size(); index++) {
+                writeEndpointPosition(orderedProjects.get(index), index);
+            }
+
+            notifyExchangeProfileUpdated("endpoints-reordered");
+            call.resolve(new JSObject().put("ok", true).put("updated", orderedProjects.size()));
+        } catch (Exception e) {
+            call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
         }
     }
 

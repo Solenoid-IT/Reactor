@@ -10,6 +10,7 @@
 		mergePermissionsEntries,
 		normalizeSavedPermissionsConfig,
 	} from '$lib/systemPermissions';
+	import { formatUiDateTime } from '$lib/dateTime';
 	import Modal from '$lib/components/Modal.svelte';
 	import {
 		getEndpointsInfo,
@@ -26,6 +27,7 @@
 		runEndpointNow,
 		createEndpointFile,
 		renameEndpointFile,
+		reorderEndpoints,
 		confirmDeleteEndpoint,
 		deleteEndpointFile,
 		toggleEndpointDirective,
@@ -104,6 +106,7 @@
 	let networkRequestInFlight = '';
 	let networkRequestError = '';
 	let networkRuntimeStartedAt = '';
+	let networkCurrentNodeGeo = null;
 	let networkCopiedKey = '';
 	let networkCopiedTimer = null;
 	let tlsEnabled = false;
@@ -175,15 +178,72 @@
 
 	$: selectedEndpoint = selectedIndex >= 0 ? endpoints[selectedIndex] : null;
 
-	$: localDiscoveryEndpoints = (Array.isArray(endpoints) ? endpoints : [])
-		.filter((endpoint) => endpoint && endpoint.endpointId)
-		.map((endpoint) => ({
-			uuid: String(endpoint.endpointId || '').trim().toLowerCase(),
-			name: String(endpoint.name || '').trim() || 'unknown',
-			triggers: Array.isArray(endpoint.events) ? endpoint.events.map((trigger) => String(trigger || '').trim()).filter(Boolean) : [],
+	function endpointDisplayName(name, fallback = 'unknown') {
+		const rawName = String(name || '').trim();
+		const stripped = rawName.replace(/\.(ts|js)$/i, '').trim();
+		if (stripped) {
+			return stripped;
+		}
+		if (rawName) {
+			return rawName;
+		}
+		return fallback;
+	}
+
+	function normalizeNetworkEndpoint(entry) {
+		const endpoint = entry && typeof entry === 'object' ? entry : {};
+		const rawUuid = endpoint.uuid ?? endpoint.endpointId;
+		const rawName = endpoint.name ?? endpoint.endpointName;
+		const rawTriggers = Array.isArray(endpoint.triggers)
+			? endpoint.triggers
+			: Array.isArray(endpoint.events)
+				? endpoint.events
+				: [];
+
+		const triggers = Array.from(new Set(rawTriggers.map((trigger) => String(trigger || '').trim()).filter(Boolean)));
+
+		return {
+			uuid: String(rawUuid || '').trim().toLowerCase(),
+			name: endpointDisplayName(rawName, 'unknown'),
+			triggers,
 			enabled: Boolean(endpoint.enabled),
 			mutex: Boolean(endpoint.mutex),
-		}))
+		};
+	}
+
+	function resolveNodeGeoValue(node) {
+		if (!node || typeof node !== 'object') {
+			return null;
+		}
+
+		const direct = node.geo
+			?? node.location
+			?? node.geoLocation
+			?? node.coordinates
+			?? node.coordinate
+			?? node.geoCoordinates
+			?? null;
+		if (direct) {
+			return direct;
+		}
+
+		if ((node.lat ?? node.latitude) != null && (node.lon ?? node.lng ?? node.longitude) != null) {
+			return {
+				lat: node.lat ?? node.latitude,
+				lon: node.lon ?? node.lng ?? node.longitude,
+			};
+		}
+
+		if (Array.isArray(node.coords) && node.coords.length >= 2) {
+			return node.coords;
+		}
+
+		return null;
+	}
+
+	$: localDiscoveryEndpoints = (Array.isArray(endpoints) ? endpoints : [])
+		.filter((endpoint) => endpoint && endpoint.endpointId)
+		.map((endpoint) => normalizeNetworkEndpoint(endpoint))
 		.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
 
 	$: networkNodeNames = (() => {
@@ -231,7 +291,15 @@
 		const endpointsEntry = networkNodeEndpoints[peerName] || null;
 		const isCurrent = String(reactorName || '').trim().toLowerCase() === peerName;
 		const stateInfo = isCurrent ? { key: 'connected', label: 'Current Node', reason: '' } : buildNetworkStateInfo(session);
-		const geoValue = linkedNode?.geo || linkedNode?.location || linkedNode?.geoLocation || null;
+		const linkedGeoValue = resolveNodeGeoValue(linkedNode);
+		const fallbackGeoValue = isCurrent && networkCurrentNodeGeo ? networkCurrentNodeGeo : null;
+		const geoValue = linkedGeoValue || fallbackGeoValue;
+		const parsedGeo = parseNodeGeoWgs84(geoValue);
+		const geoLabel = parsedGeo
+			? parsedGeo.label
+			: typeof geoValue === 'string'
+				? String(geoValue || '').trim() || null
+				: null;
 
 		return {
 			name: peerName,
@@ -243,7 +311,9 @@
 			connectedAt: linkedNode?.connectedAt || (isCurrent ? networkRuntimeStartedAt : null),
 			ip: linkedNode?.ip || null,
 			port: Number.isFinite(Number(linkedNode?.port)) ? Number(linkedNode?.port) : Number.isFinite(Number(linkedNode?.httpPort)) ? Number(linkedNode?.httpPort) : null,
-			geo: geoValue ? String(geoValue) : null,
+			geo: geoLabel,
+			geoCoordinates: parsedGeo,
+			geoMapsUrl: parsedGeo ? buildGoogleMapsCoordinateUrl(parsedGeo.lat, parsedGeo.lon) : '',
 		};
 	});
 
@@ -256,6 +326,7 @@
 			? selectedNetworkNodeData.endpointsEntry.endpoints
 			: networkNodeEndpointsFallback(networkSelectedNode, Boolean(selectedNetworkNodeData?.isCurrent))
 	)
+		.map((endpoint) => normalizeNetworkEndpoint(endpoint))
 		.slice()
 		.sort((a, b) => {
 			const enabledA = Boolean(a?.enabled);
@@ -274,11 +345,8 @@
 	$: exchangeIndicator = (() => {
 		const state = String(exchangeStatus?.state || '').trim().toLowerCase();
 		const connectedAtRaw = String(exchangeStatus?.connectedAt || '').trim();
-		const connectedAtMs = connectedAtRaw ? Date.parse(connectedAtRaw) : NaN;
-		const connectedAtUtc = Number.isFinite(connectedAtMs)
-			? new Date(connectedAtMs).toISOString()
-			: connectedAtRaw;
-		const connectedSinceTitle = connectedAtUtc ? ` | Connected since (UTC): ${connectedAtUtc}` : '';
+		const connectedAtLocal = formatUiDateTime(connectedAtRaw, '');
+		const connectedSinceTitle = connectedAtLocal ? ` | Connected since (local): ${connectedAtLocal}` : '';
 		if (state === 'connected' || state === 'active') {
 			return {
 				level: 'green',
@@ -451,17 +519,7 @@
 	}
 
 	function formatNetworkDateTime(value) {
-		const safeValue = String(value || '').trim();
-		if (!safeValue) {
-			return '-';
-		}
-
-		const parsed = Date.parse(safeValue);
-		if (!Number.isFinite(parsed)) {
-			return safeValue;
-		}
-
-		return new Date(parsed).toLocaleString();
+		return formatUiDateTime(value, '-');
 	}
 
 	function networkSourceLabel(source) {
@@ -600,6 +658,166 @@
 		return `transform: translate(${x}px, ${y}px);`;
 	}
 
+	async function refreshCurrentNodeGeo() {
+		try {
+			let coordinates = null;
+
+			if (typeof navigator !== 'undefined' && navigator.geolocation && typeof navigator.geolocation.getCurrentPosition === 'function') {
+				coordinates = await new Promise((resolve, reject) => {
+					navigator.geolocation.getCurrentPosition(
+						(position) => resolve(position?.coords || null),
+						(error) => reject(error),
+						{ enableHighAccuracy: false, maximumAge: 30000, timeout: 8000 },
+					);
+				});
+			}
+
+			if (!coordinates) {
+				const geolocationPlugin = typeof window !== 'undefined'
+					? window?.Capacitor?.Plugins?.Geolocation
+					: null;
+				if (geolocationPlugin && typeof geolocationPlugin.getCurrentPosition === 'function') {
+					const position = await geolocationPlugin.getCurrentPosition({
+						enableHighAccuracy: false,
+						timeout: 8000,
+						maximumAge: 30000,
+					});
+					coordinates = position?.coords || null;
+				}
+			}
+
+			if (!coordinates) {
+				return;
+			}
+
+			const parsed = normalizeWgs84Coordinates(coordinates.latitude, coordinates.longitude);
+			if (!parsed) {
+				return;
+			}
+
+			networkCurrentNodeGeo = {
+				lat: parsed.lat,
+				lon: parsed.lon,
+			};
+		} catch {
+			// Best effort: keep previous local geo value when unavailable.
+		}
+	}
+
+	function toFiniteCoordinate(value) {
+		const numeric = Number(value);
+		if (!Number.isFinite(numeric)) {
+			return null;
+		}
+		return numeric;
+	}
+
+	function normalizeWgs84Coordinates(lat, lon) {
+		const safeLat = toFiniteCoordinate(lat);
+		const safeLon = toFiniteCoordinate(lon);
+		if (safeLat === null || safeLon === null) {
+			return null;
+		}
+
+		if (Math.abs(safeLat) > 90 || Math.abs(safeLon) > 180) {
+			return null;
+		}
+
+		return {
+			lat: safeLat,
+			lon: safeLon,
+			label: `${safeLat.toFixed(6)}, ${safeLon.toFixed(6)}`,
+		};
+	}
+
+	function parseNodeGeoWgs84(input) {
+		if (!input) {
+			return null;
+		}
+
+		if (Array.isArray(input)) {
+			if (input.length < 2) {
+				return null;
+			}
+
+			const first = Number(input[0]);
+			const second = Number(input[1]);
+			const asLatLon = normalizeWgs84Coordinates(first, second);
+			if (asLatLon) {
+				return asLatLon;
+			}
+
+			return normalizeWgs84Coordinates(second, first);
+		}
+
+		if (typeof input === 'object') {
+			const lat = input.lat ?? input.latitude;
+			const lon = input.lon ?? input.lng ?? input.longitude;
+			const parsed = normalizeWgs84Coordinates(lat, lon);
+			if (parsed) {
+				return parsed;
+			}
+
+			const nested = input.coords && typeof input.coords === 'object'
+				? normalizeWgs84Coordinates(input.coords.lat ?? input.coords.latitude, input.coords.lon ?? input.coords.lng ?? input.coords.longitude)
+				: null;
+			return nested;
+		}
+
+		const raw = String(input || '').trim();
+		if (!raw) {
+			return null;
+		}
+
+		const pointMatch = raw.match(/point\s*\(\s*(-?[0-9]+(?:\.[0-9]+)?)\s+(-?[0-9]+(?:\.[0-9]+)?)\s*\)/i);
+		if (pointMatch) {
+			const pointLon = Number(pointMatch[1]);
+			const pointLat = Number(pointMatch[2]);
+			const parsed = normalizeWgs84Coordinates(pointLat, pointLon);
+			if (parsed) {
+				return parsed;
+			}
+		}
+
+		const pairMatch = raw.match(/(-?[0-9]+(?:\.[0-9]+)?)\s*[,;\s]\s*(-?[0-9]+(?:\.[0-9]+)?)/);
+		if (!pairMatch) {
+			return null;
+		}
+
+		const first = Number(pairMatch[1]);
+		const second = Number(pairMatch[2]);
+
+		const asLatLon = normalizeWgs84Coordinates(first, second);
+		if (asLatLon) {
+			return asLatLon;
+		}
+
+		return normalizeWgs84Coordinates(second, first);
+	}
+
+	function buildGoogleMapsCoordinateUrl(lat, lon) {
+		const safeLat = Number(lat).toFixed(6);
+		const safeLon = Number(lon).toFixed(6);
+		return `https://www.google.com/maps?q=${encodeURIComponent(`${safeLat},${safeLon}`)}`;
+	}
+
+	async function copyNetworkGeoCoordinates(nodeData) {
+		const coordinates = nodeData?.geoCoordinates;
+		if (!coordinates) {
+			status = 'Error: node geolocation unavailable';
+			return;
+		}
+
+		const payload = `${coordinates.lat.toFixed(6)}, ${coordinates.lon.toFixed(6)}`;
+		const result = await copyTextWithFallback(payload, 'Copy WGS84 coordinates');
+		if (result === 'none') {
+			status = `WGS84 coordinates: ${payload}`;
+			return;
+		}
+
+		status = `Copied WGS84 coordinates: ${payload}`;
+	}
+
 	function openNetworkView() {
 		networkRequestError = '';
 		networkViewOpen = true;
@@ -607,6 +825,7 @@
 			networkSelectedNode = networkNodeNames[0];
 		}
 
+		refreshCurrentNodeGeo().catch(() => {});
 		refreshExchangeLinkedNodes(true).catch(() => {});
 		refreshP2PStatusOnly().catch(() => {});
 	}
@@ -635,6 +854,22 @@
 		const safeUuid = String(endpoint?.uuid || '').trim().toLowerCase();
 		const safeName = String(endpoint?.name || '').trim().toLowerCase();
 		return `${safeNode}:${safeField}:${safeUuid || safeName}`;
+	}
+
+	function networkEndpointTarget(endpoint, field) {
+		const safeField = String(field || '').trim().toLowerCase();
+		const safeNode = String(networkSelectedNode || '').trim();
+		if (!safeNode) {
+			return '';
+		}
+
+		if (safeField === 'uuid') {
+			const safeUuid = String(endpoint?.uuid || '').trim();
+			return safeUuid ? `id:${safeUuid}@${safeNode}` : '';
+		}
+
+		const safeName = String(endpoint?.name || '').trim();
+		return safeName ? `${safeName}@${safeNode}` : '';
 	}
 
 	function isNetworkEndpointCopied(endpoint, field) {
@@ -675,20 +910,20 @@
 
 	async function copyNetworkEndpointField(endpoint, field) {
 		const safeField = String(field || '').trim().toLowerCase();
-		const value = safeField === 'name' ? String(endpoint?.name || '').trim() : String(endpoint?.uuid || '').trim();
+		const value = networkEndpointTarget(endpoint, safeField);
 		if (!value) {
-			status = `Error: endpoint ${safeField || 'value'} unavailable`;
+			status = `Error: endpoint ${safeField || 'value'} target unavailable`;
 			return;
 		}
 
-		const result = await copyTextWithFallback(value, `Copy endpoint ${safeField || 'value'}`);
+		const result = await copyTextWithFallback(value, `Copy endpoint ${safeField || 'value'} target`);
 		if (result === 'none') {
-			status = `Endpoint ${safeField || 'value'}: ${value}`;
+			status = `Endpoint ${safeField || 'value'} target: ${value}`;
 			return;
 		}
 
 		showNetworkCopyFeedback(networkCopyKeyFor(endpoint, safeField));
-		status = `Copied endpoint ${safeField || 'value'}: ${value}`;
+		status = `Copied endpoint ${safeField || 'value'} target: ${value}`;
 	}
 
 	async function requestNetworkNodeEndpoints(nodeName, silent = false) {
@@ -777,6 +1012,15 @@
 		permissionsEntries = buildPermissionsEntries(permissionsConfig, permissionsPlatform);
 	}
 
+	function buildPermissionDeniedMessage(permissionName) {
+		const safePermissionName = String(permissionName || '').trim();
+		if (safePermissionName.toLowerCase() === 'system.geolocation') {
+			return 'Permission denied: system.geolocation. Location remains unavailable until you enable it from this checkbox and allow all the time in Android app settings.';
+		}
+
+		return `Permission denied: ${safePermissionName}`;
+	}
+
 	async function persistPermissionsEntries(nextEntries, successMessage) {
 		const nextConfig = mergePermissionsEntries(permissionsConfig, permissionsPlatform, nextEntries);
 		const result = await savePermissionsConfig(nextConfig);
@@ -856,7 +1100,7 @@
 					? { ...entry, checked: isGranted }
 					: entry,
 			);
-			await persistPermissionsEntries(nextEntries, isGranted ? `Permission enabled: ${safePermissionName}` : `Permission denied: ${safePermissionName}`);
+			await persistPermissionsEntries(nextEntries, isGranted ? `Permission enabled: ${safePermissionName}` : buildPermissionDeniedMessage(safePermissionName));
 			return;
 		}
 
@@ -950,6 +1194,47 @@
 		}
 
 		status = 'Data refreshed';
+	}
+
+	async function reorderEndpointItems(fromIndex, toIndex) {
+		if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex)) {
+			return;
+		}
+		if (fromIndex < 0 || toIndex < 0 || fromIndex >= endpoints.length || toIndex >= endpoints.length) {
+			return;
+		}
+		if (fromIndex === toIndex) {
+			return;
+		}
+
+		const ordered = Array.isArray(endpoints) ? [...endpoints] : [];
+		const [moved] = ordered.splice(fromIndex, 1);
+		ordered.splice(toIndex, 0, moved);
+
+		const selectedPath = selectedIndex >= 0 && endpoints[selectedIndex]
+			? String(endpoints[selectedIndex].path || '')
+			: '';
+
+		endpoints = ordered;
+		if (selectedPath) {
+			selectedIndex = endpoints.findIndex((endpoint) => String(endpoint?.path || '') === selectedPath);
+		}
+
+		const result = await reorderEndpoints(ordered.map((endpoint) => String(endpoint?.path || '')).filter(Boolean));
+		if (!result?.ok) {
+			status = `Error: ${result?.error || 'unable to reorder endpoints'}`;
+			await refreshAll();
+			if (selectedPath) {
+				selectedIndex = endpoints.findIndex((endpoint) => String(endpoint?.path || '') === selectedPath);
+			}
+			return;
+		}
+
+		await refreshAll();
+		if (selectedPath) {
+			selectedIndex = endpoints.findIndex((endpoint) => String(endpoint?.path || '') === selectedPath);
+		}
+		status = 'Endpoints reordered';
 	}
 
 	async function refreshExchangeLinkedNodes(silent = false) {
@@ -1056,7 +1341,7 @@
 			return false;
 		}
 
-		status = `Loading editor: ${fileNameFromPath(safePath)}`;
+		status = `Loading editor: ${endpointDisplayName(fileNameFromPath(safePath), 'boot')}`;
 		const ready = await ensureCodeEditorComponent();
 		if (!ready) {
 			return false;
@@ -1069,7 +1354,7 @@
 		}
 
 		editorFilePath = safePath;
-		editorFileName = String(fallbackName || fileNameFromPath(safePath));
+		editorFileName = endpointDisplayName(fallbackName || fileNameFromPath(safePath), 'boot');
 		editorLanguage = 'typescript';
 		editorContent = result.content || '';
 		editorOpen = true;
@@ -1083,7 +1368,7 @@
 			return;
 		}
 
-		status = `Loading editor: ${endpoint.name}`;
+		status = `Loading editor: ${endpointDisplayName(endpoint.name, 'endpoint')}`;
 		const ready = await ensureCodeEditorComponent();
 		if (!ready) {
 			return;
@@ -1096,11 +1381,11 @@
 		}
 
 		editorFilePath = endpoint.path;
-		editorFileName = endpoint.name;
+		editorFileName = endpointDisplayName(endpoint.name, 'endpoint');
 		editorLanguage = 'typescript';
 		editorContent = result.content || '';
 		editorOpen = true;
-		status = `Editing: ${endpoint.name}`;
+		status = `Editing: ${endpointDisplayName(endpoint.name, 'endpoint')}`;
 	}
 
 	function closeCodeEditor() {
@@ -1171,7 +1456,7 @@
 				});
 				const missingEntries = warningEntries.filter((entry) => !entry.granted);
 				if (missingEntries.length > 0) {
-					endpointPermissionsWarningFileName = editorFileName || fileNameFromPath(editorFilePath);
+					endpointPermissionsWarningFileName = endpointDisplayName(editorFileName || fileNameFromPath(editorFilePath), 'boot');
 					endpointPermissionsWarningPlatform = runtimePlatform;
 					endpointPermissionsWarningEntries = warningEntries;
 					endpointPermissionsWarningOpen = true;
@@ -1190,7 +1475,7 @@
 		}
 
 		renameEndpointPath = endpoint.path;
-		renameOriginalEndpointName = endpoint.name;
+		renameOriginalEndpointName = endpointDisplayName(endpoint.name, 'endpoint');
 		renameValue = endpoint.name.replace(/\.(ts|js)$/i, '');
 		renameOpen = true;
 
@@ -1228,12 +1513,12 @@
 		if (!endpoint) {
 			return;
 		}
-		const confirmResult = await confirmDeleteEndpoint(endpoint.name);
+		const confirmResult = await confirmDeleteEndpoint(endpointDisplayName(endpoint.name, 'endpoint'));
 		if (!confirmResult?.confirmed) {
 			return;
 		}
 		const result = await deleteEndpointFile(endpoint.path);
-		status = result?.ok ? `Endpoint deleted: ${endpoint.name}` : `Error: ${result?.error || 'unknown'}`;
+		status = result?.ok ? `Endpoint deleted: ${endpointDisplayName(endpoint.name, 'endpoint')}` : `Error: ${result?.error || 'unknown'}`;
 		await refreshAll();
 	}
 
@@ -1243,7 +1528,7 @@
 			return;
 		}
 		const result = await toggleEndpointDirective(endpoint.path, directive);
-		status = result?.ok ? `Updated ${directive} on ${endpoint.name}` : `Error: ${result?.error || 'unknown'}`;
+		status = result?.ok ? `Updated ${directive} on ${endpointDisplayName(endpoint.name, 'endpoint')}` : `Error: ${result?.error || 'unknown'}`;
 		await refreshAll();
 	}
 
@@ -1253,7 +1538,7 @@
 			return;
 		}
 		const result = await runEndpointNow(endpoint.path);
-		status = result?.ok ? `Test started: ${endpoint.name}` : `Error: ${result?.error || 'unknown'}`;
+		status = result?.ok ? `Test started: ${endpointDisplayName(endpoint.name, 'endpoint')}` : `Error: ${result?.error || 'unknown'}`;
 	}
 
 	async function saveReactorNameValue(nextName) {
@@ -1501,13 +1786,13 @@
 			return;
 		}
 
-		const copyResult = await copyTextWithFallback(endpointId, `Copy endpoint ID for ${endpoint.name}`);
+		const copyResult = await copyTextWithFallback(endpointId, `Copy endpoint ID for ${endpointDisplayName(endpoint.name, 'endpoint')}`);
 		if (copyResult === 'none') {
 			status = `Endpoint ID: ${endpointId}`;
 			return;
 		}
 
-		status = `Copied ID: ${endpoint.name}`;
+		status = `Copied ID: ${endpointDisplayName(endpoint.name, 'endpoint')}`;
 	}
 
 	onDestroy(() => {
@@ -1533,7 +1818,7 @@
 			return;
 		}
 
-		status = `Loading log: ${endpoint.name}`;
+		status = `Loading log: ${endpointDisplayName(endpoint.name, 'endpoint')}`;
 		const ready = await ensureCodeEditorComponent();
 		if (!ready) {
 			return;
@@ -1552,11 +1837,11 @@
 		}
 
 		editorFilePath = logPathResult.path;
-		editorFileName = `${endpoint.name} / activity.log`;
+		editorFileName = `${endpointDisplayName(endpoint.name, 'endpoint')} / activity.log`;
 		editorLanguage = 'log';
 		editorContent = result.content || '';
 		editorOpen = true;
-		status = `Editing log: ${endpoint.name}`;
+		status = `Editing log: ${endpointDisplayName(endpoint.name, 'endpoint')}`;
 	}
 
 	async function clearLog(index) {
@@ -1565,7 +1850,7 @@
 			return;
 		}
 		const result = await clearEventLog(endpoint.path);
-		status = result?.ok ? `Cleared activity.log for ${endpoint.name}` : `Error: ${result?.error || 'unknown'}`;
+		status = result?.ok ? `Cleared activity.log for ${endpointDisplayName(endpoint.name, 'endpoint')}` : `Error: ${result?.error || 'unknown'}`;
 	}
 
 	onMount(() => {
@@ -1675,6 +1960,7 @@
 				onOpenLog={openLog}
 				onClearLog={clearLog}
 				onCopyId={copyEndpointId}
+				onReorder={reorderEndpointItems}
 			/>
 		</section>
 		<DetailPane
@@ -1845,7 +2131,30 @@
 						<div class="network-endpoint-meta">Connection started: {formatNetworkDateTime(selectedNetworkNodeData?.connectedAt)}</div>
 						<div class="network-endpoint-meta">IP: {selectedNetworkNodeData?.ip || '-'}</div>
 						<div class="network-endpoint-meta">Port: {selectedNetworkNodeData?.port ?? '-'}</div>
-						<div class="network-endpoint-meta">Geo: {selectedNetworkNodeData?.geo || '-'}</div>
+						<div class="network-endpoint-meta">
+							Geo:
+							{#if selectedNetworkNodeData?.geoCoordinates}
+								<a
+									href={selectedNetworkNodeData.geoMapsUrl}
+									target="_blank"
+									rel="noopener noreferrer"
+									class="network-geo-link"
+									title="Open WGS84 coordinates in Google Maps"
+								>
+									WGS84 {selectedNetworkNodeData.geoCoordinates.label}
+								</a>
+								<button
+									type="button"
+									class="network-geo-copy"
+									title="Copy WGS84 coordinates"
+									on:click={() => copyNetworkGeoCoordinates(selectedNetworkNodeData)}
+								>
+									Copy
+								</button>
+							{:else}
+								<span>{selectedNetworkNodeData?.geo || '-'}</span>
+							{/if}
+						</div>
 					</div>
 
 					{#if networkRequestError}
@@ -1861,7 +2170,7 @@
 									<button
 										type="button"
 										class="network-endpoint-copy network-endpoint-name"
-										title="Copy endpoint name"
+										title="Copy endpoint target"
 										on:click={() => copyNetworkEndpointField(endpoint, 'name')}
 									>
 										<span class="network-copy-icon" aria-hidden="true"><i class="fa-solid fa-copy"></i></span>
@@ -1876,7 +2185,7 @@
 											<button
 												type="button"
 												class="network-endpoint-copy network-endpoint-inline"
-												title="Copy endpoint UUID"
+												title="Copy endpoint UUID target"
 												on:click={() => copyNetworkEndpointField(endpoint, 'uuid')}
 											>
 												<span class="network-copy-icon" aria-hidden="true"><i class="fa-solid fa-copy"></i></span>
@@ -1954,7 +2263,7 @@
 	<Modal
 		open={endpointPermissionsWarningOpen}
 		title="Required Permissions"
-		subtitle={`Endpoint ${endpointPermissionsWarningFileName || 'boot.ts'} requires additional permissions on ${endpointPermissionsWarningPlatform || getCurrentRuntimePlatform()}.`}
+		subtitle={`Endpoint ${endpointPermissionsWarningFileName || 'boot'} requires additional permissions on ${endpointPermissionsWarningPlatform || getCurrentRuntimePlatform()}.`}
 		ariaLabel="Required permissions warning"
 		onClose={closeEndpointPermissionsWarning}
 	>
@@ -2376,6 +2685,36 @@
 	.network-endpoint-meta {
 		font-size: 0.74rem;
 		opacity: 0.75;
+	}
+
+	.network-geo-link {
+		color: #86efac;
+		text-decoration: underline;
+		text-decoration-thickness: 1px;
+		text-underline-offset: 2px;
+		margin-left: 0.35rem;
+	}
+
+	.network-geo-link:hover {
+		color: #bbf7d0;
+	}
+
+	.network-geo-copy {
+		margin-left: 0.45rem;
+		padding: 0.12rem 0.45rem;
+		border: 1px solid rgba(255, 255, 255, 0.2);
+		background: rgba(255, 255, 255, 0.08);
+		color: #d1d5db;
+		border-radius: 999px;
+		font-size: 0.68rem;
+		line-height: 1.3;
+		cursor: pointer;
+	}
+
+	.network-geo-copy:hover {
+		background: rgba(134, 239, 172, 0.16);
+		border-color: rgba(134, 239, 172, 0.45);
+		color: #bbf7d0;
 	}
 
 	.network-empty {

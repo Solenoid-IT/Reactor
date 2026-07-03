@@ -211,11 +211,67 @@ class NodeOS extends OSAdapter {
 }
 
 class NodeNotify extends NotifyAdapter {
+	resolveDesktopNotificationIconPath() {
+		const candidates = [
+			path.resolve(__dirname, '../../assets/logo.png'),
+			path.resolve(process.cwd(), 'assets/logo.png'),
+			process.resourcesPath ? path.resolve(process.resourcesPath, 'assets/logo.png') : '',
+		].filter(Boolean);
+
+		for (const candidate of candidates) {
+			try {
+				if (fsNative.existsSync(candidate)) {
+					return candidate;
+				}
+			} catch {
+				// Ignore fs access issues and try next candidate.
+			}
+		}
+
+		return '';
+	}
+
+	buildWindowsToastScript(message, iconPath) {
+		const escapedMessage = String(message || '')
+			.replaceAll('&', '&amp;')
+			.replaceAll('<', '&lt;')
+			.replaceAll('>', '&gt;')
+			.replaceAll("'", '&apos;')
+			.replaceAll('"', '&quot;');
+
+		let imageBlock = '';
+		if (iconPath) {
+			const iconUri = `file:///${iconPath.replaceAll('\\', '/').replaceAll(' ', '%20')}`;
+			const safeIconUri = iconUri
+				.replaceAll('&', '&amp;')
+				.replaceAll('<', '&lt;')
+				.replaceAll('>', '&gt;')
+				.replaceAll("'", '&apos;')
+				.replaceAll('"', '&quot;');
+			imageBlock = `<image placement='appLogoOverride' src='${safeIconUri}' hint-crop='circle'/>`;
+		}
+
+		const xml = `<toast><visual><binding template='ToastGeneric'><text>Reactor</text><text>${escapedMessage}</text>${imageBlock}</binding></visual></toast>`;
+
+		return [
+			"[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null",
+			"[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null",
+			`$xmlText = ${JSON.stringify(xml)}`,
+			"$xml = New-Object Windows.Data.Xml.Dom.XmlDocument",
+			"$xml.LoadXml($xmlText)",
+			"$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)",
+			"$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Reactor')",
+			"$notifier.Show($toast)",
+		].join('; ');
+	}
+
 	async notify(message) {
 		const text = String(message || '').trim();
 		if (!text) {
 			return false;
 		}
+
+		const iconPath = this.resolveDesktopNotificationIconPath();
 
 		try {
 			if (process.platform === 'darwin') {
@@ -232,7 +288,8 @@ class NodeNotify extends NotifyAdapter {
 
 			if (process.platform === 'linux') {
 				await new Promise((resolve, reject) => {
-					const child = spawn('notify-send', ['Reactor', text]);
+					const args = iconPath ? ['-i', iconPath, 'Reactor', text] : ['Reactor', text];
+					const child = spawn('notify-send', args);
 					child.on('error', reject);
 					child.on('exit', (code) => {
 						if (code === 0) resolve();
@@ -244,10 +301,12 @@ class NodeNotify extends NotifyAdapter {
 
 			if (process.platform === 'win32') {
 				await new Promise((resolve, reject) => {
-					const script = [
+					const toastScript = this.buildWindowsToastScript(text, iconPath);
+					const fallbackMessageBoxScript = [
 						"[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms')",
 						`[System.Windows.Forms.MessageBox]::Show(${JSON.stringify(text)}, 'Reactor') | Out-Null`,
 					].join('; ');
+					const script = `try { ${toastScript} } catch { ${fallbackMessageBoxScript} }`;
 					const child = spawn('powershell', ['-NoProfile', '-Command', script]);
 					child.on('error', reject);
 					child.on('exit', (code) => {

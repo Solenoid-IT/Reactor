@@ -1,5 +1,6 @@
 <script>
 	import { onDestroy } from 'svelte';
+	import { formatUiDateTime } from '$lib/dateTime';
 	import Form from './Form.svelte';
 	import Helper from './Helper.svelte';
 	import PasswordField from './PasswordField.svelte';
@@ -117,6 +118,18 @@
 			window.prompt('Copy endpoint UUID', safeUuid);
 			showCopiedFeedback(safeUuid);
 		}
+	}
+
+	function endpointDisplayName(name, fallback = 'unknown') {
+		const rawName = String(name || '').trim();
+		const stripped = rawName.replace(/\.(ts|js)$/i, '').trim();
+		if (stripped) {
+			return stripped;
+		}
+		if (rawName) {
+			return rawName;
+		}
+		return fallback;
 	}
 
 	onDestroy(() => {
@@ -372,13 +385,13 @@
 												</span>
 												<i class="fa-solid fa-chevron-down node-accordion-icon"></i>
 											</summary>
-											<div style="opacity:0.7; margin-top:6px;">Connected: {node.connectedAt || '-'}</div>
-											<div style="opacity:0.7;">Last seen: {node.lastSeenAt || '-'}</div>
+											<div style="opacity:0.7; margin-top:6px;">Connected: {formatUiDateTime(node.connectedAt, '-')}</div>
+											<div style="opacity:0.7;">Last seen: {formatUiDateTime(node.lastSeenAt, '-')}</div>
 											{#if Array.isArray(node.endpoints) && node.endpoints.length > 0}
 												<div style="margin-top:6px; padding-left:8px; border-left:2px solid rgba(255,255,255,0.14);">
 													{#each node.endpoints as endpoint}
 														<div style="padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.06);">
-															<div><strong>{endpoint.name || 'unnamed'}</strong></div>
+															<div><strong>{endpointDisplayName(endpoint.name, 'unnamed')}</strong></div>
 															<div style="display:flex; align-items:center; gap:6px; opacity:0.78;">
 																<span>{endpoint.uuid || '-'}</span>
 																<button type="button" class="btn-secondary" style="padding:1px 6px; font-size:0.9em;" on:click={() => copyNodeEndpointUuid(endpoint.uuid)}>{copiedEndpointUuid && copiedEndpointUuid === String(endpoint.uuid || '').trim() ? 'Copied' : 'Copy'}</button>
@@ -613,7 +626,7 @@
 			</div>
 			{#if tlsEnabled}
 				{#if tlsSubject}<div class="detail-value" style="font-size:0.78em; opacity:0.7;">CN: {tlsSubject}</div>{/if}
-				{#if tlsNotAfter}<div class="detail-value" style="font-size:0.78em; opacity:0.7;">Expires: {tlsNotAfter}</div>{/if}
+				{#if tlsNotAfter}<div class="detail-value" style="font-size:0.78em; opacity:0.7;">Expires: {formatUiDateTime(tlsNotAfter, tlsNotAfter)}</div>{/if}
 				{#if tlsFingerprint}<div class="detail-value" style="font-size:0.7em; opacity:0.5; word-break:break-all;">SHA256: {tlsFingerprint}</div>{/if}
 				<button class="btn-secondary mt-2" style="color:#e57373;" on:click={onDeleteTlsCert}>
 					<i class="fa-solid fa-trash me-1"></i>Delete Certificate

@@ -1,4 +1,4 @@
-const { BrowserWindow, screen } = require('electron');
+const { BrowserWindow, screen, shell } = require('electron');
 const fsNative = require('fs');
 const http = require('http');
 const path = require('path');
@@ -131,6 +131,20 @@ function createMainWindow() {
 	} else {
 		mainWindow.loadURL('data:text/html;charset=UTF-8,' + encodeURIComponent('<!doctype html><html><body style="font-family:sans-serif;background:#111;color:#fff;padding:24px"><h2>Reactor UI non trovata</h2><p>Esegui: npm run ui:build</p></body></html>'));
 	}
+
+	mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+		const safeUrl = String(url || '').trim();
+		if (!safeUrl) {
+			return { action: 'deny' };
+		}
+
+		if (safeUrl.startsWith('http://127.0.0.1:') || safeUrl.startsWith('http://localhost:')) {
+			return { action: 'allow' };
+		}
+
+		shell.openExternal(safeUrl).catch(() => {});
+		return { action: 'deny' };
+	});
 
 	mainWindow.maximize();
 	return mainWindow;

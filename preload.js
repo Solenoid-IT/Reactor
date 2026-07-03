@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('reactor', {
 	createEndpointFile: (templateKey, scriptName) => ipcRenderer.invoke('create-endpoint-file', templateKey, scriptName),
 	deleteEndpointFile: (filePath) => ipcRenderer.invoke('delete-endpoint-file', filePath),
 	renameEndpointFile: (filePath, nextName) => ipcRenderer.invoke('rename-endpoint-file', filePath, nextName),
+	reorderEndpoints: (paths) => ipcRenderer.invoke('reorder-endpoints', paths),
 	confirmDeleteEndpoint: (scriptName) => ipcRenderer.invoke('confirm-delete-endpoint', scriptName),
 	toggleEndpointDirective: (filePath, directive) => ipcRenderer.invoke('toggle-endpoint-directive', filePath, directive),
 	getEndpointsInfo: () => ipcRenderer.invoke('get-endpoints-info'),

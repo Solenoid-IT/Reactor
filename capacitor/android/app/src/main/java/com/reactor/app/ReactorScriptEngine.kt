@@ -16,6 +16,7 @@ interface ReactorScriptOps {
     fun copyStream(src: String, dst: String): Boolean
     fun getHomeDirectory(): String
     fun getNetworkStatus(): String
+    fun getGeoLocation(): String
     fun sendHttpRequest(url: String, method: String, headers: String, body: String, timeoutMs: Long): String
     fun spawnProcess(command: String): Boolean
 }
@@ -203,7 +204,23 @@ var __reactorCore = {
         },
         Battery: function () { return { exists: function () { return false; }, getLevel: function () { return -1; } }; },
         Power: function () { return { isBattery: function () { return false; } }; },
-        Position: { get: function () { return { lat: null, lon: null, available: false }; } }
+        Position: {
+            get: function () {
+                try {
+                    var p = JSON.parse(__native.getGeoLocation());
+                    var lat = Number(p && p.lat);
+                    var lon = Number(p && p.lon);
+                    var hasCoords = Number.isFinite(lat) && Number.isFinite(lon);
+                    return {
+                        lat: hasCoords ? lat : null,
+                        lon: hasCoords ? lon : null,
+                        available: hasCoords
+                    };
+                } catch (e) {
+                    return { lat: null, lon: null, available: false };
+                }
+            }
+        }
     },
     OS: function () {
         return {

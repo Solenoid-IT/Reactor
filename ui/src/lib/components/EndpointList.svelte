@@ -12,6 +12,19 @@
 	export let onOpenLog = () => {};
 	export let onClearLog = () => {};
 	export let onCopyId = () => {};
+	export let onReorder = () => {};
+
+	let draggingIndex = -1;
+
+	function reorderEndpoints(fromIndex, toIndex) {
+		if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex)) {
+			return;
+		}
+		if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) {
+			return;
+		}
+		onReorder(fromIndex, toIndex);
+	}
 
 	function endpointTags(endpoint) {
 		const tags = [];
@@ -31,6 +44,18 @@
 			<div
 				class:selected={index === selectedIndex}
 				class="file-item"
+				draggable="true"
+				on:dragstart={() => {
+					draggingIndex = index;
+				}}
+				on:dragover|preventDefault={() => {}}
+				on:drop|preventDefault={() => {
+					reorderEndpoints(draggingIndex, index);
+					draggingIndex = -1;
+				}}
+				on:dragend={() => {
+					draggingIndex = -1;
+				}}
 				role="button"
 				tabindex="0"
 				on:click={() => onSelect(index)}
@@ -59,6 +84,23 @@
 							<span class="switch-label">Mutex</span>
 							<span class="switch-knob" aria-hidden="true"></span>
 						</button>
+					</div>
+				</div>
+				<div class="item-reorder-controls">
+					<span class="item-reorder-label">Order</span>
+					<div class="item-reorder-buttons">
+						<button
+							class="item-reorder-btn"
+							on:click|stopPropagation={() => reorderEndpoints(index, index - 1)}
+							disabled={index === 0}
+							aria-label="Move endpoint up"
+						><i class="fa-solid fa-arrow-up"></i></button>
+						<button
+							class="item-reorder-btn"
+							on:click|stopPropagation={() => reorderEndpoints(index, index + 1)}
+							disabled={index >= endpoints.length - 1}
+							aria-label="Move endpoint down"
+						><i class="fa-solid fa-arrow-down"></i></button>
 					</div>
 				</div>
 				<div class="item-actions">

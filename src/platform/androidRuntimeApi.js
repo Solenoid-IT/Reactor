@@ -308,6 +308,16 @@ class AndroidPosition extends PositionAdapter {
 			return { lat: null, lon: null, available: false };
 		}
 		try {
+			if (typeof plugins.Geolocation.checkPermissions === 'function') {
+				const permissionStatus = await plugins.Geolocation.checkPermissions();
+				const locationStatus = String(permissionStatus?.location || '').trim().toLowerCase();
+				const coarseStatus = String(permissionStatus?.coarseLocation || '').trim().toLowerCase();
+
+				if (locationStatus !== 'granted' && coarseStatus !== 'granted') {
+					return { lat: null, lon: null, available: false };
+				}
+			}
+
 			const out = await plugins.Geolocation.getCurrentPosition();
 			return {
 				lat: out.coords.latitude,
