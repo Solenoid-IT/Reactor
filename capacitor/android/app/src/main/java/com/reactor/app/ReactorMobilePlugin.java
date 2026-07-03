@@ -94,14 +94,34 @@ public class ReactorMobilePlugin extends Plugin {
             payload.put("p2p", p2pStatus != null ? p2pStatus : new JSObject());
             notifyListeners("p2pStatus", payload);
         });
+        ReactorHttpService.setExchangeConnectionStatusListener(() -> emitExchangeStatusToUi("exchange-status-changed"));
         ensureEndpointTemplatesPresent();
         ensureHttpServerRunning();
+        emitExchangeStatusToUi("plugin-load");
     }
 
     @Override
     protected void handleOnDestroy() {
         ReactorHttpService.setP2PStatusListener(null);
+        ReactorHttpService.setExchangeConnectionStatusListener(null);
         super.handleOnDestroy();
+    }
+
+    private void emitExchangeStatusToUi(String reason) {
+        try {
+            JSObject workingMode = readWorkingModeConfig();
+            String host = workingMode.getString("host", "");
+            JSObject connection = buildExchangeConnectionStatus(ReactorHttpService.getCurrentExchangeMode(), host);
+
+            JSObject payload = new JSObject();
+            payload.put("ok", true);
+            payload.put("reason", String.valueOf(reason == null ? "" : reason));
+            payload.put("connection", connection);
+            payload.put("active", Boolean.TRUE.equals(connection.getBool("connected")));
+            notifyListeners("exchangeStatus", payload);
+        } catch (Exception ignored) {
+            // Best-effort UI status update.
+        }
     }
 
     private SharedPreferences getPrefs() {
@@ -137,7 +157,7 @@ public class ReactorMobilePlugin extends Plugin {
     }
 
     private void setConfiguredReactorName(String name) {
-        getPrefs().edit().putString(ReactorHttpService.PREF_REACTOR_NAME, name).apply();
+        getPrefs().edit().putString(ReactorHttpService.PREF_REACTOR_NAME, name).commit();
         try {
             writeTextFile(getReactorNameFile(), name + "\n");
         } catch (Exception ignored) {
@@ -1357,27 +1377,24 @@ public class ReactorMobilePlugin extends Plugin {
         }
     }
 
-    private JSObject createExecutionStartEntry(String endpointName, String endpointPath, String endpointState, String scope, String trigger, String event) {
-        JSObject endpoint = new JSObject();
-        endpoint.put("name", endpointName);
-        endpoint.put("path", endpointPath);
-        endpoint.put("state", endpointState);
-
-        JSObject entry = new JSObject();
-        entry.put("timestamp", Instant.now().toString());
-        entry.put("type", "ENDPOINT_EXECUTION");
-        entry.put("scope", scope);
-        entry.put("phase", "START");
-        entry.put("endpoint", endpoint);
-        entry.put("trigger", trigger);
-        entry.put("event", event == null ? JSONObject.NULL : event);
-        entry.put("expression", JSONObject.NULL);
-        entry.put("watchPath", JSONObject.NULL);
-        entry.put("watchType", JSONObject.NULL);
-        entry.put("durationMs", JSONObject.NULL);
-        entry.put("output", JSONObject.NULL);
-        entry.put("error", JSONObject.NULL);
-        return entry;
+    private String createExecutionStartEntry(String endpointName, String endpointPath, String endpointState, String scope, String trigger, String event) {
+        String timestamp = Instant.now().toString();
+        String safeEndpointName = String.valueOf(endpointName == null ? "" : endpointName).trim();
+        if (safeEndpointName.isEmpty()) {
+            safeEndpointName = "unknown";
+        }
+        String safeTrigger = String.valueOf(trigger == null ? "" : trigger).trim();
+        if (safeTrigger.isEmpty()) {
+            safeTrigger = "unknown";
+        }
+        String safeEvent = String.valueOf(event == null ? "" : event).trim();
+        if (safeEvent.isEmpty()) {
+            safeEvent = "unknown";
+        }
+        return timestamp + " [ENDPOINT_EXECUTION] phase=START scope=" + String.valueOf(scope)
+                + " endpoint=" + safeEndpointName
+                + " trigger=" + safeTrigger
+                + " event=" + safeEvent;
     }
 
     private String detectEndpointState(File endpointFile) {
@@ -1935,7 +1952,7 @@ public class ReactorMobilePlugin extends Plugin {
 
             String endpointName = projectDir.getName();
                 String endpointState = detectEndpointState(endpointFile);
-            JSObject projectEntry = createExecutionStartEntry(
+                String projectEntry = createExecutionStartEntry(
                     endpointName,
                     endpointFile.getAbsolutePath(),
                     endpointState,
@@ -1943,11 +1960,11 @@ public class ReactorMobilePlugin extends Plugin {
                     "MANUAL_TEST",
                     "ON_DEMAND"
             );
-            appendTextFile(logFile, projectEntry.toString() + "\\n");
+                appendTextFile(logFile, projectEntry + "\\n");
 
             File globalLogFile = getGlobalLogFile();
             if (isAllowedPath(globalLogFile) && !globalLogFile.getAbsolutePath().equals(logFile.getAbsolutePath())) {
-                JSObject globalEntry = createExecutionStartEntry(
+                String globalEntry = createExecutionStartEntry(
                         endpointName,
                         endpointFile.getAbsolutePath(),
                     endpointState,
@@ -1955,7 +1972,7 @@ public class ReactorMobilePlugin extends Plugin {
                         "MANUAL_TEST",
                         "ON_DEMAND"
                 );
-                appendTextFile(globalLogFile, globalEntry.toString() + "\n");
+                appendTextFile(globalLogFile, globalEntry + "\n");
             }
 
             JSObject result = new JSObject();
@@ -2114,6 +2131,7 @@ public class ReactorMobilePlugin extends Plugin {
     public void setReactorName(PluginCall call) {
         String name = call.getString("name", "mobile-reactor");
         setConfiguredReactorName(name);
+        ReactorHttpService.refreshExchangeClientProfile("reactor-name-updated");
         ReactorHttpService.reconnectExchangeClient("reactor-name-updated");
         call.resolve(new JSObject().put("ok", true).put("name", name));
     }
@@ -2180,10 +2198,11 @@ public class ReactorMobilePlugin extends Plugin {
 
         if ("node".equals(safeMode)) {
             boolean connected = ReactorHttpService.isExchangeClientConnected();
-            connection.put("state", connected ? "connected" : (safeHost.isEmpty() ? "disconnected" : "connecting"));
+            boolean connecting = ReactorHttpService.isExchangeClientConnecting();
+            connection.put("state", connected ? "connected" : (connecting ? "connecting" : "disconnected"));
             connection.put("connected", connected);
             connection.put("authenticated", connected);
-            connection.put("reason", connected ? "" : (safeHost.isEmpty() ? "Exchange connection unavailable" : "Connecting to Exchange"));
+            connection.put("reason", connected ? "" : (connecting ? "Connecting to Exchange" : "Exchange connection unavailable"));
             return connection;
         }
 

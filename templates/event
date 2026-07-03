@@ -1,5 +1,5 @@
 // @enabled FALSE
-// @mutex TRUE
+// @mutex FALSE
 
 // @on MESSAGE
 

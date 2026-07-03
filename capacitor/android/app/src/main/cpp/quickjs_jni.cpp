@@ -152,7 +152,7 @@ static JSValue nativeGetNetworkStatus(JSContext *ctx, JSValueConst this_val, int
     
     jstring result = (jstring)env->CallObjectMethod(opsObject, getNetworkStatusMethod);
     const char *status = result ? env->GetStringUTFChars(result, NULL) : "{}";
-    JSValue ret = JS_Eval(ctx, status ? status : "{}", strlen(status ? status : "{}"), "<status>", 0);
+    JSValue ret = JS_NewString(ctx, status ? status : "{}");
     
     if (result && status) {
         env->ReleaseStringUTFChars(result, status);
@@ -190,7 +190,7 @@ static JSValue nativeNodeStream(JSContext *ctx, JSValueConst this_val, int argc,
     }
     
     const char *result_str = result ? env->GetStringUTFChars(result, NULL) : "{}";
-    JSValue ret = JS_Eval(ctx, result_str ? result_str : "{}", strlen(result_str ? result_str : "{}"), "<stream>", 0);
+    JSValue ret = JS_NewString(ctx, result_str ? result_str : "{}");
     
     if (result && result_str) {
         env->ReleaseStringUTFChars(result, result_str);
@@ -232,7 +232,7 @@ static JSValue nativeNodeSendMessage(JSContext *ctx, JSValueConst this_val, int 
     }
     
     const char *result_str = result ? env->GetStringUTFChars(result, NULL) : "{}";
-    JSValue ret = JS_Eval(ctx, result_str ? result_str : "{}", strlen(result_str ? result_str : "{}"), "<msg>", 0);
+    JSValue ret = JS_NewString(ctx, result_str ? result_str : "{}");
     
     if (result && result_str) {
         env->ReleaseStringUTFChars(result, result_str);

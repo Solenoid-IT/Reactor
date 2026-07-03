@@ -54,6 +54,7 @@
 		clearMessageQueue,
 		requestRemoteEndpointsP2P,
 		subscribeP2PStatus,
+		subscribeExchangeStatus,
 	} from '$lib/reactorApi';
 
 	let endpoints = [];
@@ -1577,6 +1578,12 @@
 		const unsubscribeP2PStatus = subscribeP2PStatus((payload) => {
 			applyP2PStatusResult(payload);
 		});
+		const unsubscribeExchangeStatus = subscribeExchangeStatus((payload) => {
+			if (payload?.connection && typeof payload.connection === 'object') {
+				exchangeStatus = payload.connection;
+				exchangeActive = Boolean(payload.connection.connected);
+			}
+		});
 
 		return () => {
 			if (typeof unsubscribe === 'function') {
@@ -1584,6 +1591,9 @@
 			}
 			if (typeof unsubscribeP2PStatus === 'function') {
 				unsubscribeP2PStatus();
+			}
+			if (typeof unsubscribeExchangeStatus === 'function') {
+				unsubscribeExchangeStatus();
 			}
 		};
 	});

@@ -19,9 +19,11 @@ function parseWatchDirective(rawValue) {
 		return null;
 	}
 
-	const withListenersMatch = trimmed.match(/^(.*?)\s*\[(.*)\]\s*$/);
+	const { value: normalizedDirective, recursive } = consumeWatchRecursiveSuffix(trimmed);
+
+	const withListenersMatch = normalizedDirective.match(/^(.*?)\s*\[(.*)\]\s*$/);
 	if (!withListenersMatch) {
-		const plainPath = stripWrappingQuotes(trimmed);
+		const plainPath = stripWrappingQuotes(normalizedDirective);
 		if (!plainPath) {
 			return null;
 		}
@@ -30,6 +32,7 @@ function parseWatchDirective(rawValue) {
 			path: plainPath,
 			listeners: null,
 			raw: trimmed,
+			recursive,
 		};
 	}
 
@@ -48,7 +51,27 @@ function parseWatchDirective(rawValue) {
 		path: watchPath,
 		listeners,
 		raw: trimmed,
+		recursive,
 	};
+}
+
+function consumeWatchRecursiveSuffix(rawDirective) {
+	const trimmed = String(rawDirective || '').trim();
+	if (!trimmed) {
+		return { value: '', recursive: false };
+	}
+
+	const recursiveMatch = trimmed.match(/^(.*?)(?:\s+R)\s*$/i);
+	if (!recursiveMatch) {
+		return { value: trimmed, recursive: false };
+	}
+
+	const value = String(recursiveMatch[1] || '').trim();
+	if (!value) {
+		return { value: trimmed, recursive: false };
+	}
+
+	return { value, recursive: true };
 }
 
 function stripWrappingQuotes(value) {
@@ -163,6 +186,7 @@ function addWatchRule(metadata, parsedWatch) {
 	metadata.watchRules.push({
 		path: parsedWatch.path,
 		listeners: parsedWatch.listeners,
+		recursive: Boolean(parsedWatch.recursive),
 	});
 }
 

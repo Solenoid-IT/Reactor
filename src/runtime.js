@@ -1507,8 +1507,11 @@ class ReactorRuntime {
 
 			const shouldInitiate = await this.shouldInitiateP2PWithPeer(target);
 			if (!shouldInitiate) {
-				this.logGlobalEvent('EXCHANGE/P2P_AUTODIAL_SKIPPED', `reason=deterministic-responder target=${target}`).catch(() => {});
-				continue;
+				if (!this.shouldForceInitiateP2PAsResponder(target, now)) {
+					this.logGlobalEvent('EXCHANGE/P2P_AUTODIAL_SKIPPED', `reason=deterministic-responder target=${target}`).catch(() => {});
+					continue;
+				}
+				this.logGlobalEvent('EXCHANGE/P2P_AUTODIAL_TAKEOVER', `reason=stale-peer-session target=${target}`).catch(() => {});
 			}
 
 			this.logGlobalEvent('EXCHANGE/P2P_PEER_DISCOVERED', `peer on exchange: ${target}`).catch(() => {});
@@ -1534,14 +1537,31 @@ class ReactorRuntime {
 							continue;
 						}
 					} else {
-						this.logGlobalEvent('EXCHANGE/P2P_AUTODIAL_SKIPPED', `reason=session-state-${state} target=${target}`).catch(() => {});
-						continue;
+						if (this.isP2PDataChannelOpenForTarget(target)) {
+							this.logGlobalEvent('EXCHANGE/P2P_AUTODIAL_SKIPPED', `reason=session-state-${state} target=${target}`).catch(() => {});
+							continue;
+						}
+
+						this.logGlobalEvent(
+							'EXCHANGE/P2P_AUTODIAL_RESTART',
+							`reason=stale-connected-session target=${target}`,
+						).catch(() => {});
+
+						if (this.p2pTransportManager && this.p2pTransportManager.closeSession) {
+							this.p2pTransportManager.closeSession(target, false);
+						}
+						this.p2pSessions.delete(target);
 					}
 				}
 			}
 
 			const lastAttemptMs = Number(this.p2pAutodialAttempts.get(target) || 0);
-			if (lastAttemptMs > 0 && now - lastAttemptMs < this.p2pAutodialCooldownMs) {
+			const stateForRetry = String((this.p2pSessions.get(target)?.state || '')).trim().toLowerCase();
+			const quickRetryStates = new Set(['idle', 'fallback-exchange', 'signaling']);
+			const effectiveCooldownMs = quickRetryStates.has(stateForRetry)
+				? Math.min(this.p2pAutodialCooldownMs, 5000)
+				: this.p2pAutodialCooldownMs;
+			if (lastAttemptMs > 0 && now - lastAttemptMs < effectiveCooldownMs) {
 				this.logGlobalEvent('EXCHANGE/P2P_AUTODIAL_SKIPPED', `reason=cooldown target=${target}`).catch(() => {});
 				continue;
 			}
@@ -1558,6 +1578,7 @@ class ReactorRuntime {
 			if (this.p2pTransportManager && this.p2pTransportManager.ensureConnected) {
 				this.p2pTransportManager.ensureConnected(target).catch((error) => {
 					this.logGlobalEvent('EXCHANGE/P2P_AUTODIAL', `failed toward ${target}: ${String(error?.message || 'p2p auto-connect failed')}`).catch(() => {});
+					this.p2pAutodialAttempts.delete(target);
 					this.upsertP2PSession(target, {
 						state: 'fallback-exchange',
 						lastSignalType: 'failed',
@@ -1585,6 +1606,53 @@ class ReactorRuntime {
 		}
 
 		return localNodeName.localeCompare(safeTarget) < 0;
+	}
+
+	isP2PDataChannelOpenForTarget(target) {
+		const safeTarget = String(target || '').trim().toLowerCase();
+		if (!safeTarget) {
+			return false;
+		}
+
+		const transportSession = this.p2pTransportManager && this.p2pTransportManager.getSession
+			? this.p2pTransportManager.getSession(safeTarget)
+			: null;
+
+		return Boolean(
+			transportSession
+			&& transportSession.dataChannel
+			&& transportSession.dataChannel.readyState === 'open'
+			&& transportSession.isOpen,
+		);
+	}
+
+	shouldForceInitiateP2PAsResponder(target, nowMs = Date.now()) {
+		const safeTarget = String(target || '').trim().toLowerCase();
+		if (!safeTarget) {
+			return false;
+		}
+
+		if (this.isP2PDataChannelOpenForTarget(safeTarget)) {
+			return false;
+		}
+
+		const tracked = this.p2pSessions.get(safeTarget);
+		if (!tracked) {
+			return true;
+		}
+
+		const state = String(tracked.state || '').trim().toLowerCase();
+		const lastUpdateMs = Number(tracked.lastUpdateMs || 0);
+
+		if (state === 'connected-p2p' || state === 'connected-turn') {
+			return true;
+		}
+
+		if (!lastUpdateMs) {
+			return true;
+		}
+
+		return nowMs - lastUpdateMs >= 8000;
 	}
 
 	getP2PRoutingEligibility() {
@@ -1725,6 +1793,10 @@ class ReactorRuntime {
 			usingRelay: signalType === 'relay' || signalType === 'failed',
 			reason: signalType === 'failed' ? String(signal?.payload?.reason || 'p2p failed') : '',
 		});
+
+		if (signalType === 'failed' || signalType === 'close') {
+			this.p2pAutodialAttempts.delete(from);
+		}
 	}
 
 	async sendP2PSignal(target, signalType, payload = null, options = {}) {
@@ -3666,9 +3738,13 @@ class ReactorRuntime {
 			constructor(data = {}, timestamp) {
 				const normalizedWatchPath = normalizeEventPath(data.watchPath);
 				const normalizedEntryPath = normalizeEventPath(data.entryPath || data.path || (normalizedWatchPath && data.relativePath ? `${normalizedWatchPath}/${data.relativePath}` : ''));
-				const resolvedRelativePath = String(data.relativePath || computeWatchRelativePath(normalizedEntryPath, normalizedWatchPath));
+				const computedRelativePath = computeWatchRelativePath(normalizedEntryPath, normalizedWatchPath);
+				const resolvedRelativePath = normalizedEntryPath
+					? computedRelativePath
+					: String(data.relativePath || computedRelativePath);
 				super('WATCH', {
 					watchPath: normalizedWatchPath,
+					entryPath: normalizedEntryPath,
 					relativePath: resolvedRelativePath,
 					watchType: data.watchType || null,
 				}, timestamp);
@@ -3804,7 +3880,8 @@ class ReactorRuntime {
 				case 'WATCH':
 					return new WatchEvent({
 						watchPath: context.watchPath || '',
-							relativePath: context.watchRelativePath || '',
+						entryPath: context.watchEntryPath || '',
+						relativePath: context.watchRelativePath || '',
 						watchType: context.watchType || null,
 					});
 				case 'MESSAGE':
@@ -4690,6 +4767,7 @@ class ReactorRuntime {
 				if (!watchPath) {
 					continue;
 				}
+				const isRecursiveWatch = Boolean(watchRule && watchRule.recursive === true);
 
 				const listenerSet = Array.isArray(watchRule.listeners)
 					? new Set(watchRule.listeners)
@@ -4715,9 +4793,16 @@ class ReactorRuntime {
 					const knownEntries = new Map();
 					collectKnownEntries(resolvedWatchPath, knownEntries);
 
-					const watcher = fsNative.watch(resolvedWatchPath, { recursive: true }, (eventType, filename) => {
+					const watcher = fsNative.watch(resolvedWatchPath, { recursive: isRecursiveWatch }, (eventType, filename) => {
 						if (this.isReloading || !filename) {
 							return;
+						}
+
+						if (!isRecursiveWatch) {
+							const rawName = String(filename);
+							if (rawName.includes('/') || rawName.includes('\\\\')) {
+								return;
+							}
 						}
 
 						const fullPath = normalizeWatchEventPath(path.join(resolvedWatchPath, String(filename)));
@@ -4771,7 +4856,7 @@ class ReactorRuntime {
 					});
 
 					this.watchers.push(watcher);
-					this.log(`Watching ${resolvedWatchPath} for endpoint ${endpoint.name} [${Array.from(listenerSet).join(', ')}]`);
+					this.log(`Watching ${resolvedWatchPath} for endpoint ${endpoint.name} [${Array.from(listenerSet).join(', ')}] recursive=${isRecursiveWatch ? 'true' : 'false'}`);
 				} catch (error) {
 					this.log(`Failed to setup watcher for ${watchPath} in ${endpoint.name}: ${error.message}`);
 				}

@@ -1,5 +1,5 @@
 // @enabled FALSE
-// @mutex TRUE
+// @mutex FALSE
 
 // @on WATCH "/Abs/Path/of/Desktop"
 // @on WATCH "/Abs/Path/of/Downloads" [file:created]

@@ -149,14 +149,19 @@ function formatWatchEntryForOnDirective(watchEntry) {
 		return '""';
 	}
 
-	const match = raw.match(/^(.*?)\s*(\[.*\])\s*$/);
+	const recursiveMatch = raw.match(/^(.*?)(?:\s+R)\s*$/i);
+	const hasRecursiveFlag = Boolean(recursiveMatch && String(recursiveMatch[1] || '').trim());
+	const baseValue = hasRecursiveFlag ? String(recursiveMatch[1] || '').trim() : raw;
+	const recursiveSuffix = hasRecursiveFlag ? ' R' : '';
+
+	const match = baseValue.match(/^(.*?)\s*(\[.*\])\s*$/);
 	if (match) {
 		const pathPart = stripWrappingQuotes(match[1]);
 		const listenersPart = match[2].trim();
-		return `"${pathPart}" ${listenersPart}`;
+		return `"${pathPart}" ${listenersPart}${recursiveSuffix}`;
 	}
 
-	return `"${stripWrappingQuotes(raw)}"`;
+	return `"${stripWrappingQuotes(baseValue)}"${recursiveSuffix}`;
 }
 
 function stripWrappingQuotes(value) {

@@ -1,5 +1,7 @@
 package com.reactor.app
 
+import org.json.JSONObject
+
 /**
  * Wrapper per QuickJS runtime via JNI
  * Carica libquickjs_jni.so (compilata da CMake, che linka libquickjs.so)
@@ -168,19 +170,14 @@ class QuickJsWrapper {
         
         android.util.Log.d("QuickJsWrapper", "transpile: START code.length=${code.length}")
         
-        // Escape il codice da transpilare per metterlo in una stringa JavaScript
-        val escapedCode = code
-            .replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
-        
-        android.util.Log.d("QuickJsWrapper", "transpile: ESCAPED escaped.length=${escapedCode.length}")
+        // Use JSON quoting to safely embed any TS source in JS code.
+        val quotedCode = JSONObject.quote(code)
+        android.util.Log.d("QuickJsWrapper", "transpile: QUOTED quoted.length=${quotedCode.length}")
         
         val transpileCall = """
             (function() {
                 try {
-                    return transpile("$escapedCode");
+                    return transpile($quotedCode);
                 } catch (e) {
                     return "Error: " + e.message;
                 }
@@ -189,9 +186,32 @@ class QuickJsWrapper {
         
         android.util.Log.d("QuickJsWrapper", "transpile: EXECUTE")
         val result = execute(transpileCall)
-        android.util.Log.d("QuickJsWrapper", "transpile: RESULT ${result?.take(100)}")
+        if (result == null) {
+            android.util.Log.e("QuickJsWrapper", "transpile: RESULT null")
+        } else {
+            android.util.Log.d("QuickJsWrapper", "transpile: RESULT_FULL len=${result.length}")
+            logLongScript("QuickJsWrapper", "TRANSPILED_JS_FULL", result)
+        }
         
         return result
+    }
+
+    private fun logLongScript(tag: String, label: String, script: String, chunkSize: Int = 1500) {
+        if (script.isEmpty()) {
+            android.util.Log.v(tag, "$label [empty]")
+            return
+        }
+
+        var offset = 0
+        var index = 1
+        val totalChunks = (script.length + chunkSize - 1) / chunkSize
+        while (offset < script.length) {
+            val end = minOf(offset + chunkSize, script.length)
+            val chunk = script.substring(offset, end)
+            android.util.Log.v(tag, "$label part $index/$totalChunks:\n$chunk")
+            offset = end
+            index += 1
+        }
     }
 
     fun cleanup() {

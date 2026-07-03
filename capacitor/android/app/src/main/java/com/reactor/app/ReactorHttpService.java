@@ -69,6 +69,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -114,6 +115,7 @@ public class ReactorHttpService extends Service {
     private static final String WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     private static final long WS_HEARTBEAT_INTERVAL_MS = 15000L;
     private static final long WS_HEARTBEAT_TIMEOUT_MS = 45000L;
+    private static final long WS_CLIENT_CONNECT_TIMEOUT_MS = 20000L;
     private static final long DEFAULT_MESSAGE_QUEUE_TTL_MS = 7L * 24L * 60L * 60L * 1000L;
     private static final long DEFAULT_MESSAGE_QUEUE_RETRY_MS = 30000L;
     private static final long DEFAULT_P2P_SESSION_TIMEOUT_MS = 2L * 60L * 1000L;
@@ -140,6 +142,7 @@ public class ReactorHttpService extends Service {
     private static final ConcurrentHashMap<String, JSONObject> p2pSessions = new ConcurrentHashMap<>();
     private static final Set<String> exchangeRemotePeers = ConcurrentHashMap.newKeySet();
     private static final ConcurrentHashMap<String, Long> p2pAutodialAttempts = new ConcurrentHashMap<>();
+    private static final ConcurrentLinkedQueue<JSONObject> pendingP2PSignals = new ConcurrentLinkedQueue<>();
     private static volatile P2PSignalListener p2pSignalListener = null;
     private static ReactorHttpService instance = null;
     private static volatile boolean stopRequestedByUser = false;
@@ -261,6 +264,7 @@ public class ReactorHttpService extends Service {
     private static class WatchRule {
         String path;
         Set<String> listeners;
+        boolean recursive;
     }
 
     private static class EndpointWatchObserver {
@@ -351,6 +355,13 @@ public class ReactorHttpService extends Service {
         return "exchange".equals(currentExchangeMode) && running;
     }
     public static boolean isExchangeClientConnected() { return wsExchangeClientSocket != null; }
+    public static boolean isExchangeClientConnecting() {
+        ReactorHttpService current = instance;
+        return current != null
+                && "node".equals(currentExchangeMode)
+                && current.wsClientRunning
+                && wsExchangeClientSocket == null;
+    }
 
     public static void refreshExchangeClientProfile(String reason) {
         ReactorHttpService current = instance;
@@ -401,14 +412,30 @@ public class ReactorHttpService extends Service {
         void onStatus(JSObject p2pStatus);
     }
 
+    public interface ExchangeConnectionStatusListener {
+        void onStatusChanged();
+    }
+
     public static void setP2PSignalListener(P2PSignalListener listener) {
         p2pSignalListener = listener;
+        ReactorHttpService current = instance;
+        if (current != null && listener != null) {
+            current.flushPendingP2PSignals();
+        }
     }
 
     private static volatile P2PStatusListener p2pStatusListener = null;
+    private static volatile ExchangeConnectionStatusListener exchangeConnectionStatusListener = null;
 
     public static void setP2PStatusListener(P2PStatusListener listener) {
         p2pStatusListener = listener;
+    }
+
+    public static void setExchangeConnectionStatusListener(ExchangeConnectionStatusListener listener) {
+        exchangeConnectionStatusListener = listener;
+        if (listener != null) {
+            emitExchangeConnectionStatusUpdate();
+        }
     }
 
     private static void emitP2PStatusUpdate() {
@@ -419,6 +446,19 @@ public class ReactorHttpService extends Service {
 
         try {
             listener.onStatus(getP2PStatus());
+        } catch (Exception ignored) {
+            // Status notifications are best-effort only.
+        }
+    }
+
+    private static void emitExchangeConnectionStatusUpdate() {
+        ExchangeConnectionStatusListener listener = exchangeConnectionStatusListener;
+        if (listener == null) {
+            return;
+        }
+
+        try {
+            listener.onStatusChanged();
         } catch (Exception ignored) {
             // Status notifications are best-effort only.
         }
@@ -1759,12 +1799,12 @@ public class ReactorHttpService extends Service {
                     }
 
                     try {
-                        writeExecutionStart(endpoint, primaryEvent, primaryEvent);
+                        writeExecutionStart(endpoint, primaryEvent, primaryEvent, streamEventContext);
                         executeEndpointActions(endpoint, bodyText, effectiveHeaders, streamEventContext);
                         deliveredEndpoints.put(endpoint.endpointName);
                         deliveredCount += 1;
                     } catch (Exception executionError) {
-                        writeExecutionError(endpoint, primaryEvent, primaryEvent, executionError.getMessage());
+                        writeExecutionError(endpoint, primaryEvent, primaryEvent, executionError.getMessage(), streamEventContext);
                     }
                 }
 
@@ -1779,12 +1819,12 @@ public class ReactorHttpService extends Service {
                         }
 
                         try {
-                            writeExecutionStart(endpoint, "STREAMEND", "STREAMEND");
+                            writeExecutionStart(endpoint, "STREAMEND", "STREAMEND", streamEventContext);
                             executeEndpointActions(endpoint, bodyText, streamEndHeaders, streamEventContext);
                             streamEndEndpoints.put(endpoint.endpointName);
                             streamEndCount += 1;
                         } catch (Exception executionError) {
-                            writeExecutionError(endpoint, "STREAMEND", "STREAMEND", executionError.getMessage());
+                            writeExecutionError(endpoint, "STREAMEND", "STREAMEND", executionError.getMessage(), streamEventContext);
                         }
                     }
                 }
@@ -2216,10 +2256,10 @@ public class ReactorHttpService extends Service {
             }
 
             try {
-                writeExecutionStart(endpoint, primaryEvent, primaryEvent);
+                writeExecutionStart(endpoint, primaryEvent, primaryEvent, streamEventContext);
                 executeEndpointActions(endpoint, parsedEnvelope.bodyText, effectiveHeaders, streamEventContext);
             } catch (Exception executionError) {
-                writeExecutionError(endpoint, primaryEvent, primaryEvent, executionError.getMessage());
+                writeExecutionError(endpoint, primaryEvent, primaryEvent, executionError.getMessage(), streamEventContext);
             }
         }
 
@@ -2239,10 +2279,10 @@ public class ReactorHttpService extends Service {
                 }
 
                 try {
-                    writeExecutionStart(endpoint, "STREAMEND", "STREAMEND");
+                    writeExecutionStart(endpoint, "STREAMEND", "STREAMEND", streamEventContext);
                     executeEndpointActions(endpoint, parsedEnvelope.bodyText, streamEndHeaders, streamEventContext);
                 } catch (Exception executionError) {
-                    writeExecutionError(endpoint, "STREAMEND", "STREAMEND", executionError.getMessage());
+                    writeExecutionError(endpoint, "STREAMEND", "STREAMEND", executionError.getMessage(), streamEventContext);
                 }
             }
         }
@@ -2888,6 +2928,16 @@ public class ReactorHttpService extends Service {
             return null;
         }
 
+        boolean recursive = false;
+        Matcher recursiveMatcher = Pattern.compile("^(.*?)(?:\\s+R)\\s*$", Pattern.CASE_INSENSITIVE | Pattern.DOTALL).matcher(withoutType);
+        if (recursiveMatcher.matches()) {
+            String withoutRecursiveToken = String.valueOf(recursiveMatcher.group(1) == null ? "" : recursiveMatcher.group(1)).trim();
+            if (!withoutRecursiveToken.isEmpty()) {
+                withoutType = withoutRecursiveToken;
+                recursive = true;
+            }
+        }
+
         String watchPath;
         Set<String> listeners = new HashSet<>();
 
@@ -2915,6 +2965,7 @@ public class ReactorHttpService extends Service {
         WatchRule rule = new WatchRule();
         rule.path = watchPath;
         rule.listeners = listeners;
+        rule.recursive = recursive;
         return rule;
     }
 
@@ -2991,6 +3042,12 @@ public class ReactorHttpService extends Service {
                         @Override
                         public void onEvent(int event, String path) {
                             String suffix = String.valueOf(path == null ? "" : path).trim();
+                            if (!observedRule.recursive && !suffix.isEmpty()) {
+                                String normalizedSuffix = suffix.replace('\\', '/');
+                                if (normalizedSuffix.contains("/")) {
+                                    return;
+                                }
+                            }
                             String fullPath = suffix.isEmpty()
                                     ? observedRoot
                                     : new File(observedRoot, suffix).getAbsolutePath();
@@ -3250,14 +3307,15 @@ public class ReactorHttpService extends Service {
         Map<String, String> eventContext = new HashMap<>();
         eventContext.put("event.type", "WATCH");
         eventContext.put("event.watchPath", normalizedWatchPath);
+        eventContext.put("event.entryPath", normalizedEntryPath);
         eventContext.put("event.relativePath", computeWatchRelativePath(normalizedEntryPath, normalizedWatchPath));
         eventContext.put("event.watchType", String.valueOf(watchType == null ? "" : watchType));
 
         try {
-            writeExecutionStart(endpoint, "WATCH", "WATCH");
+            writeExecutionStart(endpoint, "WATCH", "WATCH", eventContext);
             executeEndpointActions(endpoint, "", headers, eventContext);
         } catch (Exception executionError) {
-            writeExecutionError(endpoint, "WATCH", "WATCH", executionError.getMessage());
+            writeExecutionError(endpoint, "WATCH", "WATCH", executionError.getMessage(), eventContext);
         }
     }
 
@@ -3589,61 +3647,72 @@ public class ReactorHttpService extends Service {
     }
 
     private void writeExecutionStart(MessageEndpoint endpoint, String trigger, String event) {
-        try {
-            JSONObject entry = new JSONObject();
-            JSONObject endpointNode = new JSONObject();
-            endpointNode.put("name", endpoint.endpointName);
-            endpointNode.put("path", endpoint.endpointPath);
-            endpointNode.put("state", endpoint.endpointState);
+        writeExecutionStart(endpoint, trigger, event, null);
+    }
 
-            entry.put("timestamp", Instant.now().toString());
-            entry.put("type", "ENDPOINT_EXECUTION");
-            entry.put("scope", "PROJECT");
-            entry.put("phase", "START");
-            entry.put("endpoint", endpointNode);
-            entry.put("trigger", trigger);
-            entry.put("event", event);
-            entry.put("expression", JSONObject.NULL);
-            entry.put("watchPath", JSONObject.NULL);
-            entry.put("watchType", JSONObject.NULL);
-            entry.put("durationMs", JSONObject.NULL);
-            entry.put("output", JSONObject.NULL);
-            entry.put("error", JSONObject.NULL);
-            appendProjectLog(endpoint, entry.toString());
-
-            JSONObject globalEntry = new JSONObject(entry.toString());
-            globalEntry.put("scope", "GLOBAL");
-            appendGlobalLog(globalEntry.toString());
-        } catch (Exception ignored) {
-            // Ignore JSON logging failures.
-        }
+    private void writeExecutionStart(MessageEndpoint endpoint, String trigger, String event, Map<String, String> eventContext) {
+        String message = buildEndpointExecutionMessage(endpoint, "START", trigger, event, eventContext, null);
+        String line = buildReadableGlobalLogLine("ENDPOINT_EXECUTION", message);
+        appendProjectLog(endpoint, line);
+        appendGlobalLog(line);
     }
 
     private void writeExecutionError(MessageEndpoint endpoint, String trigger, String event, String errorMessage) {
-        try {
-            JSONObject entry = new JSONObject();
-            JSONObject endpointNode = new JSONObject();
-            endpointNode.put("name", endpoint.endpointName);
-            endpointNode.put("path", endpoint.endpointPath);
-            endpointNode.put("state", endpoint.endpointState);
+        writeExecutionError(endpoint, trigger, event, errorMessage, null);
+    }
 
-            entry.put("timestamp", Instant.now().toString());
-            entry.put("type", "ENDPOINT_EXECUTION");
-            entry.put("scope", "PROJECT");
-            entry.put("phase", "ERROR");
-            entry.put("endpoint", endpointNode);
-            entry.put("trigger", trigger);
-            entry.put("event", event);
-            entry.put("expression", JSONObject.NULL);
-            entry.put("watchPath", JSONObject.NULL);
-            entry.put("watchType", JSONObject.NULL);
-            entry.put("durationMs", JSONObject.NULL);
-            entry.put("output", JSONObject.NULL);
-            entry.put("error", String.valueOf(errorMessage));
-            appendProjectLog(endpoint, entry.toString());
-        } catch (Exception ignored) {
-            // Ignore JSON logging failures.
+    private void writeExecutionError(MessageEndpoint endpoint, String trigger, String event, String errorMessage, Map<String, String> eventContext) {
+        String message = buildEndpointExecutionMessage(endpoint, "ERROR", trigger, event, eventContext, errorMessage);
+        String line = buildReadableGlobalLogLine("ENDPOINT_EXECUTION", message);
+        appendProjectLog(endpoint, line);
+        appendGlobalLog(line);
+    }
+
+    private String buildEndpointExecutionMessage(
+            MessageEndpoint endpoint,
+            String phase,
+            String trigger,
+            String event,
+            Map<String, String> eventContext,
+            String errorMessage
+    ) {
+        String endpointName = endpoint != null ? String.valueOf(endpoint.endpointName == null ? "" : endpoint.endpointName).trim() : "";
+        if (endpointName.isEmpty()) {
+            endpointName = "unknown";
         }
+
+        String safeTrigger = String.valueOf(trigger == null ? "" : trigger).trim();
+        if (safeTrigger.isEmpty()) {
+            safeTrigger = "unknown";
+        }
+
+        String safeEvent = String.valueOf(event == null ? "" : event).trim();
+        if (safeEvent.isEmpty()) {
+            safeEvent = "unknown";
+        }
+
+        String watchPath = String.valueOf(eventContext != null ? eventContext.getOrDefault("event.watchPath", "") : "").trim();
+        String watchType = String.valueOf(eventContext != null ? eventContext.getOrDefault("event.watchType", "") : "").trim();
+
+        StringBuilder message = new StringBuilder();
+        message.append("phase=").append(String.valueOf(phase == null ? "" : phase).trim())
+                .append(" endpoint=").append(endpointName)
+                .append(" trigger=").append(safeTrigger)
+                .append(" event=").append(safeEvent);
+
+        if (!watchPath.isEmpty()) {
+            message.append(" watchPath=").append(watchPath);
+        }
+        if (!watchType.isEmpty()) {
+            message.append(" watchType=").append(watchType);
+        }
+
+        String safeError = String.valueOf(errorMessage == null ? "" : errorMessage).trim();
+        if (!safeError.isEmpty()) {
+            message.append(" error=").append(safeError);
+        }
+
+        return message.toString();
     }
 
     private void appendProjectLog(MessageEndpoint endpoint, String line) {
@@ -3694,16 +3763,22 @@ public class ReactorHttpService extends Service {
             @Override public String nodeStream(String target, String filePath, String meta) {
                 try {
                     Map<String, String> extraHeaders = new HashMap<>();
+                    org.json.JSONObject metadataOverride = null;
                     // meta might contain headers as JSON, try to parse it
                     try {
                         org.json.JSONObject metaObj = new org.json.JSONObject(meta);
+                        if (metaObj.has("metadata") && metaObj.opt("metadata") instanceof org.json.JSONObject) {
+                            metadataOverride = metaObj.optJSONObject("metadata");
+                        } else {
+                            metadataOverride = metaObj;
+                        }
                         if (metaObj.has("headers")) {
                             org.json.JSONObject hdrs = metaObj.getJSONObject("headers");
                             Iterator<String> keys = hdrs.keys();
                             while (keys.hasNext()) { String k = keys.next(); extraHeaders.put(k, hdrs.getString(k)); }
                         }
                     } catch (Exception ignored) {}
-                    streamFileToNode(target, filePath, extraHeaders);
+                    streamFileToNode(target, filePath, extraHeaders, metadataOverride);
                     appendProjectLog(endpoint, buildReadableGlobalLogLine("NODE_STREAM",
                         "target=" + target + " path=" + filePath));
                     return "{\"ok\":true}";
@@ -3909,7 +3984,7 @@ public class ReactorHttpService extends Service {
             }
 
             try {
-                streamFileToNode(target, streamPath, new HashMap<>());
+                streamFileToNode(target, streamPath, new HashMap<>(), null);
                 scheduledStreams.add(dedupeKey);
             } catch (Exception error) {
                 appendGlobalLog(buildExchangeLog("STREAM_DIRECT_ERROR", error.getMessage() != null ? error.getMessage() : "stream direct failed"));
@@ -3958,7 +4033,7 @@ public class ReactorHttpService extends Service {
             }
 
             try {
-                streamFileToNode(target, streamPath, new HashMap<>());
+                streamFileToNode(target, streamPath, new HashMap<>(), null);
                 scheduledStreams.add(dedupeKey);
             } catch (Exception error) {
                 appendGlobalLog(buildExchangeLog("STREAM_DIRECT_ERROR", error.getMessage() != null ? error.getMessage() : "stream direct failed"));
@@ -4363,7 +4438,29 @@ public class ReactorHttpService extends Service {
         return metadata;
     }
 
-    private void streamFileToNode(String target, String filePath, Map<String, String> extraHeaders) {
+    private JSONObject mergeStreamMetadata(File file, JSONObject metadataOverride) {
+        JSONObject metadata = buildDefaultStreamMetadata(file);
+        if (metadataOverride == null) {
+            return metadata;
+        }
+
+        try {
+            Iterator<String> keys = metadataOverride.keys();
+            while (keys.hasNext()) {
+                String key = String.valueOf(keys.next());
+                if (key.trim().isEmpty()) {
+                    continue;
+                }
+                metadata.put(key, metadataOverride.opt(key));
+            }
+        } catch (Exception ignored) {
+            // Keep default metadata if merge fails.
+        }
+
+        return metadata;
+    }
+
+    private void streamFileToNode(String target, String filePath, Map<String, String> extraHeaders, JSONObject metadataOverride) {
         File file = resolveStreamFilePath(filePath);
         if (file == null || !file.exists() || !file.isFile()) {
             throw new RuntimeException("stream source file not found: " + filePath);
@@ -4405,7 +4502,7 @@ public class ReactorHttpService extends Service {
             start.put("contentType", contentType);
             start.put("chunkSize", DEFAULT_STREAM_CHUNK_SIZE);
             start.put("totalBytes", totalBytes);
-            start.put("metadata", buildDefaultStreamMetadata(file));
+            start.put("metadata", mergeStreamMetadata(file, metadataOverride));
         } catch (Exception error) {
             throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "unable to build stream start packet");
         }
@@ -5409,6 +5506,7 @@ public class ReactorHttpService extends Service {
         synchronized (wsClientLifecycleLock) {
             if (wsClientRunning && wsClientThread != null && wsClientThread.isAlive()) {
                 appendGlobalLog(buildExchangeLog("CLIENT_CONNECTING", "websocket client already running"));
+                emitExchangeConnectionStatusUpdate();
                 return;
             }
 
@@ -5416,6 +5514,7 @@ public class ReactorHttpService extends Service {
             wsClientRunning = true;
             wsClientGeneration += 1L;
             final long generation = wsClientGeneration;
+            emitExchangeConnectionStatusUpdate();
 
             wsClientThread = new Thread(() -> {
                 while (wsClientRunning && generation == wsClientGeneration) {
@@ -5445,11 +5544,14 @@ public class ReactorHttpService extends Service {
                 wsClientThread.interrupt();
                 wsClientThread = null;
             }
+            emitExchangeConnectionStatusUpdate();
         }
     }
 
     private void connectToExchangeServer(final long generation) {
         final Object lock = new Object();
+        final boolean[] connected = new boolean[] { false };
+        final boolean[] done = new boolean[] { false };
         ExchangeEndpoint endpoint = normalizeExchangeEndpoint(currentExchangeHost, currentExchangePort);
         if (endpoint == null) {
             appendGlobalLog(buildExchangeLog("CLIENT_FAILURE", "invalid exchange host or port"));
@@ -5468,7 +5570,7 @@ public class ReactorHttpService extends Service {
         }
         Request request = requestBuilder.build();
 
-        okHttpClient.newWebSocket(request, new WebSocketListener() {
+        WebSocket webSocket = okHttpClient.newWebSocket(request, new WebSocketListener() {
             @Override
             public void onOpen(WebSocket webSocket, Response response) {
                 synchronized (wsClientLifecycleLock) {
@@ -5478,6 +5580,11 @@ public class ReactorHttpService extends Service {
                         return;
                     }
                     wsExchangeClientSocket = webSocket;
+                }
+                emitExchangeConnectionStatusUpdate();
+                synchronized (lock) {
+                    connected[0] = true;
+                    lock.notifyAll();
                 }
                 exchangeRemotePeers.clear();
                 String reactorName = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -5575,12 +5682,17 @@ public class ReactorHttpService extends Service {
                         wsExchangeClientSocket = null;
                     }
                 }
+                emitExchangeConnectionStatusUpdate();
                 exchangeRemotePeers.clear();
+                p2pAutodialAttempts.clear();
                 synchronized (wsClientPendingBinaryChunks) {
                     wsClientPendingBinaryChunks.clear();
                 }
                 appendGlobalLog(buildExchangeLog("CLIENT_DISCONNECTED", "disconnected from exchange"));
-                synchronized (lock) { lock.notifyAll(); }
+                synchronized (lock) {
+                    done[0] = true;
+                    lock.notifyAll();
+                }
             }
 
             @Override
@@ -5590,7 +5702,9 @@ public class ReactorHttpService extends Service {
                         wsExchangeClientSocket = null;
                     }
                 }
+                emitExchangeConnectionStatusUpdate();
                 exchangeRemotePeers.clear();
+                p2pAutodialAttempts.clear();
                 synchronized (wsClientPendingBinaryChunks) {
                     wsClientPendingBinaryChunks.clear();
                 }
@@ -5599,20 +5713,43 @@ public class ReactorHttpService extends Service {
                     detail += " (HTTP " + response.code() + ")";
                 }
                 appendGlobalLog(buildExchangeLog("CLIENT_FAILURE", detail));
-                synchronized (lock) { lock.notifyAll(); }
+                synchronized (lock) {
+                    done[0] = true;
+                    lock.notifyAll();
+                }
             }
         });
 
         synchronized (lock) {
-            try { lock.wait(); } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+            long connectDeadline = System.currentTimeMillis() + WS_CLIENT_CONNECT_TIMEOUT_MS;
+            while (!done[0]) {
+                try {
+                    if (!connected[0]) {
+                        long waitMs = connectDeadline - System.currentTimeMillis();
+                        if (waitMs <= 0L) {
+                            appendGlobalLog(buildExchangeLog("CLIENT_FAILURE", "connect timeout"));
+                            try {
+                                webSocket.cancel();
+                            } catch (Exception ignored) {
+                                // Best effort cancellation.
+                            }
+                            break;
+                        }
+                        lock.wait(waitMs);
+                    } else {
+                        lock.wait();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
         }
     }
 
     private void reconnectExchangeClientInternal(String reason) {
         synchronized (exchangeLifecycleLock) {
-            if (!"node".equals(currentExchangeMode) || !wsClientRunning) {
+            if (!"node".equals(currentExchangeMode)) {
                 return;
             }
 
@@ -5622,7 +5759,9 @@ public class ReactorHttpService extends Service {
             ));
 
             try {
-                stopWsExchangeClient();
+                if (wsClientRunning) {
+                    stopWsExchangeClient();
+                }
                 startWsExchangeClient();
             } catch (Exception error) {
                 appendGlobalLog(buildExchangeLog("CLIENT_FAILURE", "reconnect error: " + error.getMessage()));
@@ -5987,11 +6126,11 @@ public class ReactorHttpService extends Service {
                 if (!matchesEventSender(endpoint, senderCandidates, primaryEvent)) continue;
                 if (!matchesTargetEndpoint(endpoint, targetEndpointSelector)) continue;
                 try {
-                    writeExecutionStart(endpoint, primaryEvent, primaryEvent);
+                    writeExecutionStart(endpoint, primaryEvent, primaryEvent, streamEventContext);
                     executeEndpointActions(endpoint, content, effectiveHeaders, streamEventContext);
                     deliveredCount += 1;
                 } catch (Exception e) {
-                    writeExecutionError(endpoint, primaryEvent, primaryEvent, e.getMessage());
+                    writeExecutionError(endpoint, primaryEvent, primaryEvent, e.getMessage(), streamEventContext);
                 }
             }
 
@@ -6001,10 +6140,10 @@ public class ReactorHttpService extends Service {
                     if (!matchesEventSender(endpoint, senderCandidates, "STREAMEND")) continue;
                     if (!matchesTargetEndpoint(endpoint, targetEndpointSelector)) continue;
                     try {
-                        writeExecutionStart(endpoint, "STREAMEND", "STREAMEND");
+                        writeExecutionStart(endpoint, "STREAMEND", "STREAMEND", streamEventContext);
                         executeEndpointActions(endpoint, content, streamEndHeaders, streamEventContext);
                     } catch (Exception e) {
-                        writeExecutionError(endpoint, "STREAMEND", "STREAMEND", e.getMessage());
+                        writeExecutionError(endpoint, "STREAMEND", "STREAMEND", e.getMessage(), streamEventContext);
                     }
                 }
             }
@@ -6087,6 +6226,7 @@ public class ReactorHttpService extends Service {
     }
 
     private void maybeAutoStartNativeP2PSession(String target) {
+        flushPendingP2PSignals();
         String safeTarget = normalizeP2PTarget(target);
         if (safeTarget.isEmpty()) {
             return;
@@ -6099,21 +6239,51 @@ public class ReactorHttpService extends Service {
         }
 
         if (!shouldInitiateP2PWithPeer(safeTarget)) {
-            appendGlobalLog(buildExchangeLog("P2P_AUTODIAL_SKIPPED", "reason=deterministic-responder target=" + safeTarget));
-            return;
+            if (!shouldForceInitiateP2PAsResponder(safeTarget)) {
+                appendGlobalLog(buildExchangeLog("P2P_AUTODIAL_SKIPPED", "reason=deterministic-responder target=" + safeTarget));
+                return;
+            }
+            appendGlobalLog(buildExchangeLog("P2P_AUTODIAL_TAKEOVER", "reason=stale-peer-session target=" + safeTarget));
         }
 
         JSONObject existing = p2pSessions.get(safeTarget);
         if (existing != null) {
             String state = String.valueOf(existing.optString("state", "")).trim().toLowerCase(Locale.ROOT);
-            if ("connecting".equals(state) || "connected-p2p".equals(state) || "connected-turn".equals(state)) {
-                return;
+            if ("connecting".equals(state)) {
+                long lastUpdateMs = existing.optLong("lastUpdateMs", 0L);
+                if (lastUpdateMs > 0L && (System.currentTimeMillis() - lastUpdateMs) >= 4000L) {
+                    try {
+                        AndroidP2PWebRtcManager.getInstance(getApplicationContext()).closeSession(safeTarget);
+                    } catch (Exception ignored) {
+                        // Best effort reset of stale connecting session.
+                    }
+                    p2pSessions.remove(safeTarget);
+                } else {
+                    return;
+                }
+            } else if ("connected-p2p".equals(state) || "connected-turn".equals(state)) {
+                if (isNativeP2PDataChannelOpen(safeTarget)) {
+                    return;
+                }
+                try {
+                    AndroidP2PWebRtcManager.getInstance(getApplicationContext()).closeSession(safeTarget);
+                } catch (Exception ignored) {
+                    // Best effort reset when tracked state is connected but data channel is not open.
+                }
+                p2pSessions.remove(safeTarget);
             }
         }
 
         long now = System.currentTimeMillis();
         long lastAttempt = p2pAutodialAttempts.getOrDefault(safeTarget, 0L);
-        if (lastAttempt > 0L && (now - lastAttempt) < DEFAULT_P2P_AUTODIAL_COOLDOWN_MS) {
+        long effectiveCooldownMs = DEFAULT_P2P_AUTODIAL_COOLDOWN_MS;
+        if (existing != null) {
+            String state = String.valueOf(existing.optString("state", "")).trim().toLowerCase(Locale.ROOT);
+            if ("idle".equals(state) || "fallback-exchange".equals(state) || "signaling".equals(state)) {
+                effectiveCooldownMs = Math.min(DEFAULT_P2P_AUTODIAL_COOLDOWN_MS, 5000L);
+            }
+        }
+        if (lastAttempt > 0L && (now - lastAttempt) < effectiveCooldownMs) {
             return;
         }
         p2pAutodialAttempts.put(safeTarget, now);
@@ -6137,6 +6307,7 @@ public class ReactorHttpService extends Service {
                 upsertP2PSession(safeTarget, result.getString("sessionId", ""), "connecting", "offer", false, "");
                 appendGlobalLog(buildExchangeLog("P2P_AUTODIAL", "started toward " + safeTarget));
             } else {
+                p2pAutodialAttempts.remove(safeTarget);
                 String error = result != null ? String.valueOf(result.optString("error", "native startSession failed")) : "native startSession failed";
                 appendGlobalLog(buildExchangeLog("P2P_AUTODIAL", "failed toward " + safeTarget + ": " + error));
             }
@@ -6162,6 +6333,34 @@ public class ReactorHttpService extends Service {
         }
 
         return localName.compareTo(safeTarget) < 0;
+    }
+
+    private boolean shouldForceInitiateP2PAsResponder(String target) {
+        String safeTarget = normalizeP2PTarget(target);
+        if (safeTarget.isEmpty()) {
+            return false;
+        }
+
+        if (isNativeP2PDataChannelOpen(safeTarget)) {
+            return false;
+        }
+
+        JSONObject tracked = p2pSessions.get(safeTarget);
+        if (tracked == null) {
+            return true;
+        }
+
+        String state = String.valueOf(tracked.optString("state", "")).trim().toLowerCase(Locale.ROOT);
+        long lastUpdateMs = tracked.optLong("lastUpdateMs", 0L);
+        if ("connected-p2p".equals(state) || "connected-turn".equals(state)) {
+            return true;
+        }
+
+        if (lastUpdateMs <= 0L) {
+            return true;
+        }
+
+        return (System.currentTimeMillis() - lastUpdateMs) >= 8000L;
     }
 
     private void handleIncomingExchangeSignal(JSONObject packet) {
@@ -6204,29 +6403,67 @@ public class ReactorHttpService extends Service {
             appendGlobalLog(buildExchangeLog("P2P_SIGNAL", detail));
         }
 
-        P2PSignalListener listener = p2pSignalListener;
-        if (listener == null) {
+        boolean delivered = dispatchP2PSignal(from, packet.optString("sessionId", ""), signalType, payload);
+        if (!delivered) {
             try {
-                AndroidP2PWebRtcManager.getInstance(getApplicationContext()).initialize();
+                JSONObject queued = new JSONObject();
+                queued.put("from", from);
+                queued.put("sessionId", packet.optString("sessionId", ""));
+                queued.put("signalType", signalType);
+                queued.put("payload", payload != null ? payload : JSONObject.NULL);
+                pendingP2PSignals.offer(queued);
+                appendGlobalLog(buildExchangeLog("P2P_SIGNAL_QUEUED", "signal=" + signalType + " from=" + from));
             } catch (Exception ignored) {
-                // Keep signaling updates and fallback routing even if native init fails.
-            }
-            listener = p2pSignalListener;
-        }
-        if (listener != null) {
-            try {
-                listener.onSignal(
-                        from,
-                        packet.optString("sessionId", ""),
-                        signalType,
-                        payload
-                );
-            } catch (Exception ignored) {
-                // Listener failures should not break signaling updates.
+                // Best effort queueing.
             }
         }
 
         appendGlobalLog(buildExchangeLog("SIGNAL_RECEIVED", signalType + " from " + from));
+    }
+
+    private boolean dispatchP2PSignal(String from, String sessionId, String signalType, JSONObject payload) {
+        P2PSignalListener listener = p2pSignalListener;
+        if (listener != null) {
+            try {
+                listener.onSignal(from, String.valueOf(sessionId == null ? "" : sessionId), signalType, payload);
+                return true;
+            } catch (Exception ignored) {
+                // Fallback to direct native dispatch below.
+            }
+        }
+
+        try {
+            AndroidP2PWebRtcManager manager = AndroidP2PWebRtcManager.getInstance(getApplicationContext());
+            manager.initialize();
+            manager.handleExchangeSignal(from, String.valueOf(sessionId == null ? "" : sessionId), signalType, payload);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private void flushPendingP2PSignals() {
+        int flushed = 0;
+        while (flushed < 128) {
+            JSONObject queued = pendingP2PSignals.poll();
+            if (queued == null) {
+                break;
+            }
+
+            String from = normalizeP2PTarget(queued.optString("from", ""));
+            String sessionId = queued.optString("sessionId", "");
+            String signalType = String.valueOf(queued.optString("signalType", "")).trim().toLowerCase(Locale.ROOT);
+            JSONObject payload = queued.optJSONObject("payload");
+            if (from.isEmpty() || signalType.isEmpty()) {
+                continue;
+            }
+
+            if (!dispatchP2PSignal(from, sessionId, signalType, payload)) {
+                pendingP2PSignals.offer(queued);
+                break;
+            }
+            flushed += 1;
+        }
     }
 
     private JSONObject extractSignalPayload(JSONObject packet) {

@@ -271,6 +271,10 @@ public final class AndroidP2PWebRtcManager {
         return new JSObject().put("ok", true).put("sessions", all);
     }
 
+    public void handleExchangeSignal(String from, String sessionId, String signalType, JSONObject payload) {
+        handleIncomingSignal(from, sessionId, signalType, payload);
+    }
+
     public static RelayConfig fromWorkingMode(JSObject workingMode) {
         RelayConfig config = new RelayConfig();
         if (workingMode == null) {

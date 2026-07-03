@@ -1,5 +1,5 @@
 // @enabled FALSE
-// @mutex FALSE
+// @mutex TRUE
 
 // @on SCHEDULE "EVERY 30 SECOND"
 
