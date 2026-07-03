@@ -1479,15 +1479,11 @@ public class ReactorMobilePlugin extends Plugin {
         File templatesDir = getTemplatesDir();
         for (String key : ALLOWED_ENDPOINT_TEMPLATE_KEYS) {
             File target = new File(templatesDir, key);
-            if (target.exists()) {
-                continue;
-            }
-
             try {
                 String content = readEndpointTemplateFromAssets(key);
                 writeTextFile(target, content);
             } catch (Exception error) {
-                Log.w(TAG, "Unable to seed endpoint template " + key + " from assets", error);
+                Log.w(TAG, "Unable to sync endpoint template " + key + " from assets", error);
             }
         }
     }

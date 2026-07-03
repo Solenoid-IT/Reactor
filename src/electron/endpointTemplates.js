@@ -48,22 +48,45 @@ async function ensureExternalTemplatesDirectory(appRootDir) {
 	}
 
 	const externalTemplatesDir = path.resolve(appRootDir, 'templates');
-	try {
-		const stats = await fs.stat(externalTemplatesDir);
-		if (stats.isDirectory()) {
-			return;
-		}
-	} catch (error) {
-		if (!error || error.code !== 'ENOENT') {
-			return;
-		}
+	await fs.mkdir(externalTemplatesDir, { recursive: true });
+
+	const bootstrapSources = [
+		path.resolve(__dirname, '..', '..', 'templates'),
+		path.resolve(process.cwd(), 'templates'),
+		path.resolve(app.getAppPath(), 'templates'),
+		path.resolve(app.getAppPath(), 'ui', 'build', 'templates'),
+	];
+
+	if (process.resourcesPath) {
+		bootstrapSources.push(path.resolve(process.resourcesPath, 'templates'));
+		bootstrapSources.push(path.resolve(process.resourcesPath, 'app.asar.unpacked', 'templates'));
 	}
 
-	await fs.mkdir(externalTemplatesDir, { recursive: true });
+	const uniqueBootstrapSources = Array.from(new Set(bootstrapSources));
 	for (const templateKey of ALLOWED_ENDPOINT_TEMPLATE_KEYS) {
-		const template = await readEndpointTemplate(templateKey, templateKey, appRootDir);
-		const targetPath = path.join(externalTemplatesDir, template.key);
-		await fs.writeFile(targetPath, template.content, { encoding: 'utf8' });
+		let templateContent = '';
+		let loaded = false;
+		let lastReadError = '';
+
+		for (const sourceDir of uniqueBootstrapSources) {
+			const candidatePath = path.join(sourceDir, templateKey);
+			try {
+				templateContent = await fs.readFile(candidatePath, 'utf8');
+				loaded = true;
+				break;
+			} catch (error) {
+				if (error && error.code !== 'ENOENT') {
+					lastReadError = error.message || String(error);
+				}
+			}
+		}
+
+		if (!loaded) {
+			throw new Error(lastReadError || `endpoint template file not found at ./templates/${templateKey}`);
+		}
+
+		const targetPath = path.join(externalTemplatesDir, templateKey);
+		await fs.writeFile(targetPath, templateContent, { encoding: 'utf8' });
 	}
 }
 
