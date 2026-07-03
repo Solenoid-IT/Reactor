@@ -1,6 +1,6 @@
 /**
  * Parses TypeScript endpoint metadata from source code comments.
- * Extracts: @enabled, @schedule, @on, @watch
+ * Extracts: @enabled, @debug, @schedule, @on, @watch
  */
 
 const VALID_WATCH_LISTENERS = new Set([
@@ -447,6 +447,7 @@ function parseEndpointMetadata(sourceCode) {
 		streamEndSenders: [],
 		streamEndFromAnySender: false,
 		state: 'DISABLED',
+		debug: false,
 		mutex: false,
 		watch: [],
 		watchRules: [],
@@ -469,6 +470,13 @@ function parseEndpointMetadata(sourceCode) {
 		if (mutexMatch) {
 			const mutexValue = (mutexMatch[1] || 'TRUE').toUpperCase();
 			metadata.mutex = mutexValue !== 'FALSE';
+			continue;
+		}
+
+		const debugMatch = line.match(/^\s*\/\/\s*@debug\s+(TRUE|FALSE)\b/i);
+		if (debugMatch) {
+			const debugValue = debugMatch[1].trim().toUpperCase();
+			metadata.debug = debugValue === 'TRUE';
 			continue;
 		}
 

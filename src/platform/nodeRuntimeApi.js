@@ -1,5 +1,6 @@
 const fs = require('fs/promises');
 const fsNative = require('fs');
+const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
@@ -15,6 +16,73 @@ const {
 	NotifyAdapter,
 	ProcessAdapter,
 } = require('./runtimeApiContracts');
+const { withDefaultUserAgent } = require('./httpUserAgent');
+
+function getChunkByteLength(chunk) {
+	if (Buffer.isBuffer(chunk)) {
+		return chunk.length;
+	}
+
+	if (chunk instanceof Uint8Array) {
+		return chunk.byteLength;
+	}
+
+	if (typeof chunk === 'string') {
+		return Buffer.byteLength(chunk);
+	}
+
+	if (chunk && typeof chunk === 'object' && Number.isFinite(Number(chunk.byteLength))) {
+		return Number(chunk.byteLength) || 0;
+	}
+
+	return Buffer.byteLength(String(chunk ?? ''));
+}
+
+function resolveStatusText(statusCode, fallback = '') {
+	const code = Number(statusCode);
+	const text = String(fallback || '').trim();
+	if (text) {
+		return text;
+	}
+
+	if (code >= 200 && code < 300) {
+		return 'OK';
+	}
+
+	if (code >= 400 && code < 500) {
+		return 'Client Error';
+	}
+
+	if (code >= 500 && code < 600) {
+		return 'Server Error';
+	}
+
+	return 'Unknown';
+}
+
+async function writeHttpResponseBodyToTempFile(payloadBuffer) {
+	const baseDir = path.join(os.tmpdir(), 'reactor', 'http-responses');
+	await fs.mkdir(baseDir, { recursive: true });
+
+	const now = Date.now();
+	const random = crypto.randomBytes(6).toString('hex');
+	const filePath = path.join(baseDir, `response-${now}-${random}.bin`);
+	await fs.writeFile(filePath, payloadBuffer);
+	return filePath;
+}
+
+function normalizeEpochSeconds(value) {
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric) || numeric <= 0) {
+		return undefined;
+	}
+
+	if (numeric > 1e10) {
+		return Math.floor(numeric / 1000);
+	}
+
+	return Math.floor(numeric);
+}
 
 class NodeFile extends FileAdapter {
 	constructor(filePath) {
@@ -63,8 +131,8 @@ class NodeFile extends FileAdapter {
 			return {
 				path: this.filePath,
 				size: stats.size,
-				mtimeMs: stats.mtimeMs,
-				ctimeMs: stats.ctimeMs,
+				mTime: normalizeEpochSeconds(stats.mtimeMs),
+				cTime: normalizeEpochSeconds(stats.ctimeMs),
 				exists: true,
 			};
 		} catch {
@@ -74,14 +142,13 @@ class NodeFile extends FileAdapter {
 }
 
 class NodeDirectory extends DirectoryAdapter {
-	constructor(dirPath) {
-		super(dirPath);
-		this.dirPath = dirPath;
+	constructor(path) {
+		super(path);
 	}
 
 	async create(permission = 0o755) {
 		try {
-			await fs.mkdir(this.dirPath, { recursive: true, mode: permission });
+			await fs.mkdir(this.path, { recursive: true, mode: permission });
 			return true;
 		} catch {
 			return false;
@@ -90,20 +157,54 @@ class NodeDirectory extends DirectoryAdapter {
 
 	async delete() {
 		try {
-			await fs.rm(this.dirPath, { recursive: true, force: true });
+			await fs.rm(this.path, { recursive: true, force: true });
 			return true;
 		} catch {
 			return false;
 		}
 	}
 
+	async calcSize() {
+		let totalSize = 0;
+
+		const walk = async (currentDirPath) => {
+			const entries = await fs.readdir(currentDirPath, { withFileTypes: true });
+			for (const entry of entries) {
+				const fullPath = path.join(currentDirPath, entry.name);
+
+				if (entry.isDirectory()) {
+					await walk(fullPath);
+					continue;
+				}
+
+				if (!entry.isFile()) {
+					continue;
+				}
+
+				const stream = fsNative.createReadStream(fullPath);
+				for await (const chunk of stream) {
+					totalSize += getChunkByteLength(chunk);
+				}
+			}
+		};
+
+		try {
+			await walk(path.resolve(this.path));
+			return totalSize;
+		} catch {
+			return 0;
+		}
+	}
+
 	async list(recursive = false) {
 		const out = [];
+		const baseDir = path.resolve(this.path);
 		const walk = async (baseDir) => {
 			const entries = await fs.readdir(baseDir, { withFileTypes: true });
 			for (const entry of entries) {
 				const full = path.join(baseDir, entry.name);
-				out.push(full);
+				const relativePath = path.relative(path.resolve(this.path), full).replace(/\\/g, '/');
+				out.push(relativePath);
 				if (recursive && entry.isDirectory()) {
 					await walk(full);
 				}
@@ -111,7 +212,7 @@ class NodeDirectory extends DirectoryAdapter {
 		};
 
 		try {
-			await walk(this.dirPath);
+			await walk(baseDir);
 			return out;
 		} catch {
 			return [];
@@ -120,44 +221,68 @@ class NodeDirectory extends DirectoryAdapter {
 
 	async getMeta() {
 		try {
-			const stats = await fs.stat(this.dirPath);
+			const stats = await fs.stat(this.path);
 			return {
-				path: this.dirPath,
-				mtimeMs: stats.mtimeMs,
-				ctimeMs: stats.ctimeMs,
+				path: this.path,
+				mTime: normalizeEpochSeconds(stats.mtimeMs),
+				cTime: normalizeEpochSeconds(stats.ctimeMs),
 				exists: true,
 			};
 		} catch {
-			return { path: this.dirPath, exists: false };
+			return { path: this.path, exists: false };
 		}
 	}
 }
 
 class NodeHttpRequest extends HttpRequestAdapter {
-	constructor(arg1 = 'GET', arg2 = null, arg3 = {}, arg4 = '') {
-		let method = 'GET';
-		let body = null;
-		let headers = {};
-		let url = '';
-
-		if (arg1 && typeof arg1 === 'object' && !Array.isArray(arg1)) {
-			method = String(arg1.method || 'GET').toUpperCase();
-			body = arg1.body ?? null;
-			headers = arg1.headers || {};
-			url = String(arg1.url || '');
-		} else {
-			method = String(arg1 || 'GET').toUpperCase();
-			body = arg2;
-			headers = arg3 || {};
-			url = String(arg4 || '');
+	constructor(method = 'GET', url = '', body = null, headers = {}) {
+		if (method && typeof method === 'object' && !Array.isArray(method)) {
+			const legacy = method;
+			method = legacy.method || 'GET';
+			url = legacy.url || '';
+			body = legacy.body ?? null;
+			headers = legacy.headers || {};
 		}
 
-		super(method, body, headers);
-		this.method = method;
-		this.body = body;
-		this.headers = headers;
-		this.url = url;
+		const safeMethod = String(method || 'GET').trim().toUpperCase() || 'GET';
+		const safeUrl = String(url || '').trim();
+		const safeHeaders = headers && typeof headers === 'object' ? headers : {};
+		const safeBody = body == null ? null : body;
+
+		super(safeMethod, safeBody, safeHeaders);
+		this.method = safeMethod;
+		this.body = safeBody;
+		this.headers = safeHeaders;
+		this.url = safeUrl;
 	}
+}
+
+function isStreamLikeBody(body) {
+	if (!body || typeof body === 'string') {
+		return false;
+	}
+
+	if (typeof ReadableStream !== 'undefined' && body instanceof ReadableStream) {
+		return true;
+	}
+
+	return typeof body.pipe === 'function' || typeof body[Symbol.asyncIterator] === 'function';
+}
+
+function resolveNodeHttpRequestBody(body) {
+	if (body == null || typeof body === 'string') {
+		return body;
+	}
+
+	if (body && typeof body === 'object' && String(body.__type || '') === 'FileHandle') {
+		const filePath = String(body.__path || '').trim();
+		if (!filePath) {
+			throw new Error('Invalid FileHandle body: missing path');
+		}
+		return fsNative.createReadStream(filePath);
+	}
+
+	return body;
 }
 
 class NodeNetwork extends NetworkAdapter {
@@ -352,28 +477,46 @@ function createNodeRuntimeApi() {
 		},
 		HttpClient: {
 			Request: NodeHttpRequest,
-			sendRequest: async (request, timeout = 30000) => {
+			sendRequest: async (request, timeout = null) => {
 				if (!request || typeof request !== 'object') {
 					throw new Error('HttpClient.sendRequest requires a request object');
 				}
 
 				const controller = new AbortController();
-				const timer = setTimeout(() => controller.abort(), timeout);
+				const timeoutSeconds = timeout == null ? null : Number(timeout);
+				const timeoutMs = Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
+					? Math.floor(timeoutSeconds * 1000)
+					: null;
+				const timer = timeoutMs == null
+					? null
+					: setTimeout(() => controller.abort(), timeoutMs);
+
+				const body = resolveNodeHttpRequestBody(request.body ?? null);
+				const init = {
+					method: String(request.method || 'GET').toUpperCase(),
+					headers: withDefaultUserAgent(request.headers),
+					body,
+					signal: controller.signal,
+				};
+
+				if (isStreamLikeBody(body)) {
+					init.duplex = 'half';
+				}
+
 				try {
-					const response = await fetch(String(request.url || ''), {
-						method: String(request.method || 'GET').toUpperCase(),
-						headers: request.headers || {},
-						body: request.body ?? null,
-						signal: controller.signal,
-					});
-					const body = await response.text();
+					const response = await fetch(String(request.url || ''), init);
+					const bodyBytes = new Uint8Array(await response.arrayBuffer());
+					const bodyPath = await writeHttpResponseBodyToTempFile(Buffer.from(bodyBytes));
 					return {
-						status: response.status,
+						statusCode: response.status,
+						statusText: resolveStatusText(response.status, response.statusText),
 						headers: Object.fromEntries(response.headers.entries()),
-						body,
+						body: bodyPath,
 					};
 				} finally {
-					clearTimeout(timer);
+					if (timer) {
+						clearTimeout(timer);
+					}
 				}
 			},
 		},

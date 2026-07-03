@@ -22,6 +22,9 @@ static jmethodID nodeStreamMethod = nullptr;
 static jmethodID nodeSendMessageMethod = nullptr;
 static jmethodID sendHttpRequestMethod = nullptr;
 static jmethodID spawnProcessMethod = nullptr;
+static jmethodID fsStatMethod = nullptr;
+static jmethodID fsListMethod = nullptr;
+static jmethodID fsCalcSizeMethod = nullptr;
 static pthread_mutex_t opsLock = PTHREAD_MUTEX_INITIALIZER;
 
 // Helper to get JNIEnv
@@ -247,6 +250,169 @@ static JSValue nativeNodeSendMessage(JSContext *ctx, JSValueConst this_val, int 
     return ret;
 }
 
+static JSValue nativeSendHttpRequest(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 5) return JS_NewString(ctx, "{\"status\":0,\"headers\":{},\"body\":\"invalid request\"}");
+
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !sendHttpRequestMethod) {
+        LOGE("nativeSendHttpRequest: Missing JNI context");
+        return JS_NewString(ctx, "{\"status\":0,\"headers\":{},\"body\":\"native unavailable\"}");
+    }
+
+    pthread_mutex_lock(&opsLock);
+
+    const char *url = JS_ToCString(ctx, argv[0]);
+    const char *method = JS_ToCString(ctx, argv[1]);
+    const char *headers = JS_ToCString(ctx, argv[2]);
+    const char *body = JS_ToCString(ctx, argv[3]);
+    int64_t timeoutMs = 0;
+    JS_ToInt64(ctx, &timeoutMs, argv[4]);
+
+    jstring result = NULL;
+    if (url && method && headers && body) {
+        jstring jurl = env->NewStringUTF(url);
+        jstring jmethod = env->NewStringUTF(method);
+        jstring jheaders = env->NewStringUTF(headers);
+        jstring jbody = env->NewStringUTF(body);
+        result = (jstring)env->CallObjectMethod(opsObject, sendHttpRequestMethod, jurl, jmethod, jheaders, jbody, (jlong)timeoutMs);
+        env->DeleteLocalRef(jurl);
+        env->DeleteLocalRef(jmethod);
+        env->DeleteLocalRef(jheaders);
+        env->DeleteLocalRef(jbody);
+    }
+
+    const char *result_str = result ? env->GetStringUTFChars(result, NULL) : "{\"status\":0,\"headers\":{},\"body\":\"request failed\"}";
+    JSValue ret = JS_NewString(ctx, result_str ? result_str : "{\"status\":0,\"headers\":{},\"body\":\"request failed\"}");
+
+    if (result && result_str) {
+        env->ReleaseStringUTFChars(result, result_str);
+        env->DeleteLocalRef(result);
+    }
+
+    if (url) JS_FreeCString(ctx, url);
+    if (method) JS_FreeCString(ctx, method);
+    if (headers) JS_FreeCString(ctx, headers);
+    if (body) JS_FreeCString(ctx, body);
+
+    pthread_mutex_unlock(&opsLock);
+    return ret;
+}
+
+static JSValue nativeSpawnProcess(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_FALSE;
+
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !spawnProcessMethod) {
+        LOGE("nativeSpawnProcess: Missing JNI context");
+        return JS_FALSE;
+    }
+
+    pthread_mutex_lock(&opsLock);
+
+    const char *command = JS_ToCString(ctx, argv[0]);
+    jboolean result = JNI_FALSE;
+    if (command) {
+        jstring jcommand = env->NewStringUTF(command);
+        result = env->CallBooleanMethod(opsObject, spawnProcessMethod, jcommand);
+        env->DeleteLocalRef(jcommand);
+        JS_FreeCString(ctx, command);
+    }
+
+    pthread_mutex_unlock(&opsLock);
+    return result ? JS_TRUE : JS_FALSE;
+}
+
+static JSValue nativeFsStat(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NewString(ctx, "{}");
+
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !fsStatMethod) {
+        LOGE("nativeFsStat: Missing JNI context");
+        return JS_NewString(ctx, "{}");
+    }
+
+    pthread_mutex_lock(&opsLock);
+
+    const char *path = JS_ToCString(ctx, argv[0]);
+    jstring result = NULL;
+    if (path) {
+        jstring jpath = env->NewStringUTF(path);
+        result = (jstring)env->CallObjectMethod(opsObject, fsStatMethod, jpath);
+        env->DeleteLocalRef(jpath);
+    }
+
+    const char *result_str = result ? env->GetStringUTFChars(result, NULL) : "{}";
+    JSValue ret = JS_NewString(ctx, result_str ? result_str : "{}");
+
+    if (result && result_str) {
+        env->ReleaseStringUTFChars(result, result_str);
+        env->DeleteLocalRef(result);
+    }
+
+    if (path) JS_FreeCString(ctx, path);
+
+    pthread_mutex_unlock(&opsLock);
+    return ret;
+}
+
+static JSValue nativeFsList(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_NewString(ctx, "[]");
+
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !fsListMethod) {
+        LOGE("nativeFsList: Missing JNI context");
+        return JS_NewString(ctx, "[]");
+    }
+
+    pthread_mutex_lock(&opsLock);
+
+    const char *path = JS_ToCString(ctx, argv[0]);
+    int recursive = JS_ToBool(ctx, argv[1]);
+    jstring result = NULL;
+    if (path) {
+        jstring jpath = env->NewStringUTF(path);
+        result = (jstring)env->CallObjectMethod(opsObject, fsListMethod, jpath, recursive ? JNI_TRUE : JNI_FALSE);
+        env->DeleteLocalRef(jpath);
+    }
+
+    const char *result_str = result ? env->GetStringUTFChars(result, NULL) : "[]";
+    JSValue ret = JS_NewString(ctx, result_str ? result_str : "[]");
+
+    if (result && result_str) {
+        env->ReleaseStringUTFChars(result, result_str);
+        env->DeleteLocalRef(result);
+    }
+
+    if (path) JS_FreeCString(ctx, path);
+
+    pthread_mutex_unlock(&opsLock);
+    return ret;
+}
+
+static JSValue nativeFsCalcSize(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NewInt64(ctx, 0);
+
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !fsCalcSizeMethod) {
+        LOGE("nativeFsCalcSize: Missing JNI context");
+        return JS_NewInt64(ctx, 0);
+    }
+
+    pthread_mutex_lock(&opsLock);
+
+    const char *path = JS_ToCString(ctx, argv[0]);
+    jlong size = 0;
+    if (path) {
+        jstring jpath = env->NewStringUTF(path);
+        size = env->CallLongMethod(opsObject, fsCalcSizeMethod, jpath);
+        env->DeleteLocalRef(jpath);
+        JS_FreeCString(ctx, path);
+    }
+
+    pthread_mutex_unlock(&opsLock);
+    return JS_NewInt64(ctx, (int64_t)size);
+}
+
 // ============ JNI Exported Functions ============
 
 extern "C" {
@@ -403,6 +569,15 @@ Java_com_reactor_app_QuickJsWrapper_registerNativeOps(JNIEnv *env, jobject thiz,
     
     spawnProcessMethod = env->GetMethodID(opsClass, "spawnProcess", "(Ljava/lang/String;)Z");
     if (!spawnProcessMethod) LOGE("Missing method: spawnProcess");
+
+    fsStatMethod = env->GetMethodID(opsClass, "fsStat", "(Ljava/lang/String;)Ljava/lang/String;");
+    if (!fsStatMethod) LOGE("Missing method: fsStat");
+
+    fsListMethod = env->GetMethodID(opsClass, "fsList", "(Ljava/lang/String;Z)Ljava/lang/String;");
+    if (!fsListMethod) LOGE("Missing method: fsList");
+
+    fsCalcSizeMethod = env->GetMethodID(opsClass, "fsCalcSize", "(Ljava/lang/String;)J");
+    if (!fsCalcSizeMethod) LOGE("Missing method: fsCalcSize");
     
     env->DeleteLocalRef(opsClass);
     
@@ -417,6 +592,11 @@ Java_com_reactor_app_QuickJsWrapper_registerNativeOps(JNIEnv *env, jobject thiz,
     JS_SetPropertyStr(ctx, nativeObj, "getNetworkStatus", JS_NewCFunction(ctx, nativeGetNetworkStatus, "getNetworkStatus", 0));
     JS_SetPropertyStr(ctx, nativeObj, "nodeStream", JS_NewCFunction(ctx, nativeNodeStream, "nodeStream", 3));
     JS_SetPropertyStr(ctx, nativeObj, "nodeSendMessage", JS_NewCFunction(ctx, nativeNodeSendMessage, "nodeSendMessage", 3));
+    JS_SetPropertyStr(ctx, nativeObj, "sendHttpRequest", JS_NewCFunction(ctx, nativeSendHttpRequest, "sendHttpRequest", 5));
+    JS_SetPropertyStr(ctx, nativeObj, "spawnProcess", JS_NewCFunction(ctx, nativeSpawnProcess, "spawnProcess", 1));
+    JS_SetPropertyStr(ctx, nativeObj, "fsStat", JS_NewCFunction(ctx, nativeFsStat, "fsStat", 1));
+    JS_SetPropertyStr(ctx, nativeObj, "fsList", JS_NewCFunction(ctx, nativeFsList, "fsList", 2));
+    JS_SetPropertyStr(ctx, nativeObj, "fsCalcSize", JS_NewCFunction(ctx, nativeFsCalcSize, "fsCalcSize", 1));
     
     JS_SetPropertyStr(ctx, global, "__native", nativeObj);
     JS_FreeValue(ctx, global);

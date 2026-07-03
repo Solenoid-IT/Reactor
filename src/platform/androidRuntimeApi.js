@@ -10,10 +10,31 @@ const {
 	NotifyAdapter,
 	ProcessAdapter,
 } = require('./runtimeApiContracts');
+const { withDefaultUserAgent } = require('./httpUserAgent');
+
+let androidAppInfoPromise = null;
 
 function getCapacitorPlugins() {
 	const capacitor = globalThis && globalThis.Capacitor ? globalThis.Capacitor : null;
 	return capacitor && capacitor.Plugins ? capacitor.Plugins : null;
+}
+
+async function getAndroidAppVersion() {
+	if (!androidAppInfoPromise) {
+		androidAppInfoPromise = (async () => {
+			const plugins = getCapacitorPlugins();
+			const mobile = plugins ? plugins.ReactorMobile : null;
+			if (!mobile || typeof mobile.getAppInfo !== 'function') {
+				return null;
+			}
+
+			const result = await mobile.getAppInfo();
+			const appVersion = String(result && result.version ? result.version : '').trim();
+			return appVersion || null;
+		})().catch(() => null);
+	}
+
+	return androidAppInfoPromise;
 }
 
 function joinAndroidPath(basePath, childName) {
@@ -26,6 +47,25 @@ function joinAndroidPath(basePath, childName) {
 		return normalizedBase;
 	}
 	return `${normalizedBase}/${normalizedChild}`;
+}
+
+function toRelativeAndroidPath(basePath, childPath) {
+	const normalizedBase = String(basePath || '').replace(/\\/g, '/').replace(/\/+$/g, '');
+	const normalizedChild = String(childPath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+	if (!normalizedBase) {
+		return normalizedChild;
+	}
+
+	if (normalizedChild === normalizedBase) {
+		return '';
+	}
+
+	const prefix = `${normalizedBase}/`;
+	if (normalizedChild.startsWith(prefix)) {
+		return normalizedChild.slice(prefix.length);
+	}
+
+	return normalizedChild;
 }
 
 function getAndroidDirEntryName(entry) {
@@ -45,6 +85,100 @@ function isAndroidDirectoryEntry(entry) {
 
 	const typeValue = String(entry.type || '').trim().toLowerCase();
 	return typeValue === 'directory' || typeValue === 'dir';
+}
+
+function getChunkByteLength(chunk) {
+	if (typeof chunk === 'string') {
+		return new TextEncoder().encode(chunk).length;
+	}
+
+	if (chunk instanceof Uint8Array) {
+		return chunk.byteLength;
+	}
+
+	if (chunk && typeof chunk === 'object' && Number.isFinite(Number(chunk.byteLength))) {
+		return Number(chunk.byteLength) || 0;
+	}
+
+	return new TextEncoder().encode(String(chunk ?? '')).length;
+}
+
+function normalizeEpochSeconds(value) {
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric) || numeric <= 0) {
+		return undefined;
+	}
+
+	if (numeric > 1e10) {
+		return Math.floor(numeric / 1000);
+	}
+
+	return Math.floor(numeric);
+}
+
+function resolveMetaTimeSeconds(out, type) {
+	const source = out && typeof out === 'object' ? out : {};
+	const keys = type === 'mTime'
+		? ['mTime', 'mtime', 'mtimeMs', 'modified', 'lastModified', 'modificationTime']
+		: ['cTime', 'ctime', 'ctimeMs', 'created', 'creationTime'];
+
+	for (const key of keys) {
+		const value = normalizeEpochSeconds(source[key]);
+		if (value !== undefined) {
+			return value;
+		}
+	}
+
+	return undefined;
+}
+
+function resolveStatusText(statusCode, fallback = '') {
+	const code = Number(statusCode);
+	const text = String(fallback || '').trim();
+	if (text) {
+		return text;
+	}
+
+	if (code >= 200 && code < 300) {
+		return 'OK';
+	}
+
+	if (code >= 400 && code < 500) {
+		return 'Client Error';
+	}
+
+	if (code >= 500 && code < 600) {
+		return 'Server Error';
+	}
+
+	return 'Unknown';
+}
+
+function serializeHttpResponseDataToText(data) {
+	if (typeof data === 'string') {
+		return data;
+	}
+
+	if (data == null) {
+		return '';
+	}
+
+	try {
+		return JSON.stringify(data);
+	} catch {
+		return String(data);
+	}
+}
+
+async function writeHttpResponseBodyToTempFile(filesystem, responseData) {
+	const random = Math.floor(Math.random() * 1e9).toString(36);
+	const filePath = `reactor/http-responses/response-${Date.now()}-${random}.txt`;
+	await filesystem.writeFile({
+		path: filePath,
+		data: serializeHttpResponseDataToText(responseData),
+		recursive: true,
+	});
+	return filePath;
 }
 
 class AndroidFile extends FileAdapter {
@@ -134,7 +268,14 @@ class AndroidFile extends FileAdapter {
 		}
 		try {
 			const out = await plugins.Filesystem.stat({ path: this.filePath });
-			return { path: this.filePath, exists: true, ...out };
+			const size = Number(out && out.size);
+			return {
+				path: this.filePath,
+				exists: true,
+				size: Number.isFinite(size) && size >= 0 ? size : undefined,
+				mTime: resolveMetaTimeSeconds(out, 'mTime'),
+				cTime: resolveMetaTimeSeconds(out, 'cTime'),
+			};
 		} catch {
 			return { path: this.filePath, exists: false };
 		}
@@ -142,9 +283,8 @@ class AndroidFile extends FileAdapter {
 }
 
 class AndroidDirectory extends DirectoryAdapter {
-	constructor(dirPath) {
-		super(dirPath);
-		this.dirPath = dirPath;
+	constructor(path) {
+		super(path);
 	}
 
 	async create(_permission = 0o755) {
@@ -153,7 +293,7 @@ class AndroidDirectory extends DirectoryAdapter {
 			return false;
 		}
 		try {
-			await plugins.Filesystem.mkdir({ path: this.dirPath, recursive: true });
+			await plugins.Filesystem.mkdir({ path: this.path, recursive: true });
 			return true;
 		} catch {
 			return false;
@@ -166,10 +306,66 @@ class AndroidDirectory extends DirectoryAdapter {
 			return false;
 		}
 		try {
-			await plugins.Filesystem.rmdir({ path: this.dirPath, recursive: true });
+			await plugins.Filesystem.rmdir({ path: this.path, recursive: true });
 			return true;
 		} catch {
 			return false;
+		}
+	}
+
+	async calcSize() {
+		const plugins = getCapacitorPlugins();
+		if (!plugins || !plugins.Filesystem) {
+			return 0;
+		}
+
+		let totalSize = 0;
+
+		const walk = async (dirPath) => {
+			const out = await plugins.Filesystem.readdir({ path: dirPath });
+			const entries = Array.isArray(out?.files) ? out.files : [];
+
+			for (const entry of entries) {
+				const name = getAndroidDirEntryName(entry);
+				if (!name) {
+					continue;
+				}
+
+				const childPath = joinAndroidPath(dirPath, name);
+				let traversed = false;
+
+				if (isAndroidDirectoryEntry(entry)) {
+					await walk(childPath);
+					traversed = true;
+				} else if (entry && typeof entry === 'object' && !String(entry.type || '').trim()) {
+					try {
+						await walk(childPath);
+						traversed = true;
+					} catch {
+						traversed = false;
+					}
+				}
+
+				if (traversed) {
+					continue;
+				}
+
+				try {
+					const file = new AndroidFile(childPath);
+					for await (const chunk of file.open()) {
+						totalSize += getChunkByteLength(chunk);
+					}
+				} catch {
+					// Ignore unreadable entries while keeping traversal best-effort.
+				}
+			}
+		};
+
+		try {
+			await walk(this.path);
+			return totalSize;
+		} catch {
+			return 0;
 		}
 	}
 
@@ -178,6 +374,8 @@ class AndroidDirectory extends DirectoryAdapter {
 		if (!plugins || !plugins.Filesystem) {
 			return [];
 		}
+
+		const baseDirPath = String(this.path || '').replace(/\\/g, '/').replace(/\/+$/g, '');
 
 		const walk = async (dirPath, recursive, output) => {
 			const out = await plugins.Filesystem.readdir({ path: dirPath });
@@ -190,7 +388,10 @@ class AndroidDirectory extends DirectoryAdapter {
 				}
 
 				const childPath = joinAndroidPath(dirPath, name);
-				output.push(childPath);
+				const relativePath = toRelativeAndroidPath(baseDirPath, childPath);
+				if (relativePath) {
+					output.push(relativePath);
+				}
 
 				if (!recursive) {
 					continue;
@@ -215,7 +416,7 @@ class AndroidDirectory extends DirectoryAdapter {
 
 		try {
 			const output = [];
-			await walk(this.dirPath, Boolean(_recursive), output);
+			await walk(this.path, Boolean(_recursive), output);
 			return output;
 		} catch {
 			return [];
@@ -225,41 +426,42 @@ class AndroidDirectory extends DirectoryAdapter {
 	async getMeta() {
 		const plugins = getCapacitorPlugins();
 		if (!plugins || !plugins.Filesystem) {
-			return { path: this.dirPath, exists: false };
+			return { path: this.path, exists: false };
 		}
 		try {
-			const out = await plugins.Filesystem.stat({ path: this.dirPath });
-			return { path: this.dirPath, exists: true, ...out };
+			const out = await plugins.Filesystem.stat({ path: this.path });
+			return {
+				path: this.path,
+				exists: true,
+				mTime: resolveMetaTimeSeconds(out, 'mTime'),
+				cTime: resolveMetaTimeSeconds(out, 'cTime'),
+			};
 		} catch {
-			return { path: this.dirPath, exists: false };
+			return { path: this.path, exists: false };
 		}
 	}
 }
 
 class AndroidHttpRequest extends HttpRequestAdapter {
-	constructor(arg1 = 'GET', arg2 = null, arg3 = {}, arg4 = '') {
-		let method = 'GET';
-		let body = null;
-		let headers = {};
-		let url = '';
-
-		if (arg1 && typeof arg1 === 'object' && !Array.isArray(arg1)) {
-			method = String(arg1.method || 'GET').toUpperCase();
-			body = arg1.body ?? null;
-			headers = arg1.headers || {};
-			url = String(arg1.url || '');
-		} else {
-			method = String(arg1 || 'GET').toUpperCase();
-			body = arg2;
-			headers = arg3 || {};
-			url = String(arg4 || '');
+	constructor(method = 'GET', url = '', body = null, headers = {}) {
+		if (method && typeof method === 'object' && !Array.isArray(method)) {
+			const legacy = method;
+			method = legacy.method || 'GET';
+			url = legacy.url || '';
+			body = legacy.body ?? null;
+			headers = legacy.headers || {};
 		}
 
-		super(method, body, headers);
-		this.method = method;
-		this.body = body;
-		this.headers = headers;
-		this.url = url;
+		const safeMethod = String(method || 'GET').trim().toUpperCase() || 'GET';
+		const safeUrl = String(url || '').trim();
+		const safeHeaders = headers && typeof headers === 'object' ? headers : {};
+		const safeBody = body == null ? null : body;
+
+		super(safeMethod, safeBody, safeHeaders);
+		this.method = safeMethod;
+		this.body = safeBody;
+		this.headers = safeHeaders;
+		this.url = safeUrl;
 	}
 }
 
@@ -420,30 +622,51 @@ function createAndroidRuntimeApi() {
 		},
 		HttpClient: {
 			Request: AndroidHttpRequest,
-			sendRequest: async (request, timeout = 30000) => {
-			if (!request || typeof request !== 'object') {
-				throw new Error('HttpClient.sendRequest requires a request object');
+			sendRequest: async (request, timeout = null) => {
+				if (!request || typeof request !== 'object') {
+					throw new Error('HttpClient.sendRequest requires a request object');
 				}
 
-			const plugins = getCapacitorPlugins();
-			if (!plugins || !plugins.Http) {
-				throw new Error('Capacitor Http plugin unavailable');
-			}
+				const plugins = getCapacitorPlugins();
+				if (!plugins || !plugins.Http) {
+					throw new Error('Capacitor Http plugin unavailable');
+				}
 
-			const response = await plugins.Http.request({
-				url: String(request.url || ''),
-				method: String(request.method || 'GET').toUpperCase(),
-				headers: request.headers || {},
-				data: request.body ?? null,
-				connectTimeout: timeout,
-				readTimeout: timeout,
-			});
+				const timeoutSeconds = timeout == null ? null : Number(timeout);
+				const timeoutMs = Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
+					? Math.floor(timeoutSeconds * 1000)
+					: undefined;
+				const appVersion = await getAndroidAppVersion();
 
-			return {
-				status: response.status,
-				headers: response.headers || {},
-				body: typeof response.data === 'string' ? response.data : JSON.stringify(response.data || {}),
-			};
+				let data = null;
+				if (request.body && typeof request.body === 'object' && String(request.body.__type || '') === 'FileHandle') {
+					data = `@file:${String(request.body.__path || '')}`;
+				} else {
+					data = request.body ?? null;
+				}
+
+				const response = await plugins.Http.request({
+					url: String(request.url || ''),
+					method: String(request.method || 'GET').toUpperCase(),
+					headers: withDefaultUserAgent(request.headers, appVersion),
+					data,
+					connectTimeout: timeoutMs,
+					readTimeout: timeoutMs,
+				});
+
+				const filesystem = plugins.Filesystem;
+				if (!filesystem || typeof filesystem.writeFile !== 'function') {
+					throw new Error('Capacitor Filesystem plugin unavailable');
+				}
+
+				const bodyPath = await writeHttpResponseBodyToTempFile(filesystem, response.data);
+
+				return {
+					statusCode: Number(response.status || 0),
+					statusText: resolveStatusText(response.status, response.statusText),
+					headers: response.headers || {},
+					body: bodyPath,
+				};
 			},
 		},
 		Device: {

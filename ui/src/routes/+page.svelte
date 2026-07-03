@@ -1955,6 +1955,7 @@
 				onRename={renameEndpoint}
 				onDelete={deleteEndpoint}
 				onToggleState={(index) => toggleDirective(index, 'state')}
+				onToggleDebug={(index) => toggleDirective(index, 'debug')}
 				onToggleMutex={(index) => toggleDirective(index, 'mutex')}
 				onRun={runNow}
 				onOpenLog={openLog}

@@ -22,12 +22,17 @@ class FileAdapter {
 }
 
 class DirectoryAdapter {
-	constructor(_dirPath) {}
+	constructor(_path) {
+		this.path = _path;
+	}
 	async create(_permission = 0o755) {
 		throw new Error('DirectoryAdapter.create not implemented');
 	}
 	async delete() {
 		throw new Error('DirectoryAdapter.delete not implemented');
+	}
+	async calcSize() {
+		throw new Error('DirectoryAdapter.calcSize not implemented');
 	}
 	async list(_recursive = false) {
 		throw new Error('DirectoryAdapter.list not implemented');

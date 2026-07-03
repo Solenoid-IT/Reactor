@@ -54,6 +54,7 @@ import java.net.UnknownHostException;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
@@ -249,6 +250,7 @@ public class ReactorHttpService extends Service {
         String endpointState;
         String source;
         boolean enabled;
+        boolean debug;
         boolean hasMessageEvent;
         boolean messageFromAnySender;
         List<String> messageSenders;
@@ -2226,6 +2228,115 @@ public class ReactorHttpService extends Service {
         current.handleIncomingP2PEnvelopeInternal(fromNode, rawPayload);
     }
 
+    public static JSObject runEndpointNowByPath(String filePath) {
+        ReactorHttpService current = instance;
+        if (current == null) {
+            return new JSObject().put("ok", false).put("error", "runtime not ready");
+        }
+
+        return current.runEndpointNowByPathInternal(filePath);
+    }
+
+    private JSObject runEndpointNowByPathInternal(String filePath) {
+        String normalizedPath = String.valueOf(filePath == null ? "" : filePath).trim();
+        if (normalizedPath.isEmpty()) {
+            return new JSObject().put("ok", false).put("error", "invalid request");
+        }
+
+        File endpointFile = new File(normalizedPath);
+        if (!endpointFile.exists() || !endpointFile.isFile()) {
+            return new JSObject().put("ok", false).put("error", "endpoint file not found");
+        }
+
+        File projectDir = endpointFile.getParentFile();
+        if (projectDir == null || !projectDir.exists() || !projectDir.isDirectory()) {
+            return new JSObject().put("ok", false).put("error", "invalid endpoint project");
+        }
+
+        File resolvedEndpointFile = resolveEndpointFileFromProject(projectDir);
+        if (resolvedEndpointFile == null || !resolvedEndpointFile.exists()) {
+            return new JSObject().put("ok", false).put("error", "endpoint file not found");
+        }
+
+        MessageEndpoint endpoint = parseMessageEndpoint(resolvedEndpointFile, projectDir.getName());
+        if (endpoint == null) {
+            endpoint = buildManualRunnableEndpoint(resolvedEndpointFile, projectDir.getName());
+        }
+        if (endpoint == null) {
+            return new JSObject().put("ok", false).put("error", "endpoint parse failed");
+        }
+
+        Map<String, String> headers = new HashMap<>();
+        headers.put("x-reactor-trigger", "MANUAL_TEST");
+        final MessageEndpoint endpointToRun = endpoint;
+        final Map<String, String> executionHeaders = headers;
+
+        clientPool.execute(() -> {
+            try {
+                writeExecutionStart(endpointToRun, "MANUAL_TEST", "ON_DEMAND");
+                executeEndpointActions(endpointToRun, "", executionHeaders, null);
+            } catch (Exception executionError) {
+                writeExecutionError(endpointToRun, "MANUAL_TEST", "ON_DEMAND", executionError.getMessage());
+            }
+        });
+
+        File projectLogFile = new File(projectDir, "activity.log");
+        return new JSObject()
+                .put("ok", true)
+                .put("started", true)
+                .put("endpoint", endpoint.endpointName)
+                .put("eventLogPath", projectLogFile.getAbsolutePath());
+    }
+
+    private MessageEndpoint buildManualRunnableEndpoint(File endpointFile, String projectName) {
+        try {
+            String source = readTextFile(endpointFile);
+            String[] lines = source.split("\\r?\\n", -1);
+
+            boolean enabled = false;
+            boolean debug = false;
+            String state = "DISABLED";
+
+            for (String rawLine : lines) {
+                String line = String.valueOf(rawLine).trim();
+                if (line.startsWith("// @enabled")) {
+                    enabled = line.toUpperCase(Locale.ROOT).contains("TRUE");
+                    state = enabled ? "ENABLED" : "DISABLED";
+                    continue;
+                }
+
+                if (line.startsWith("// @debug")) {
+                    debug = line.toUpperCase(Locale.ROOT).contains("TRUE");
+                }
+            }
+
+            MessageEndpoint endpoint = new MessageEndpoint();
+            endpoint.endpointFile = endpointFile;
+            endpoint.endpointName = projectName;
+            endpoint.endpointPath = endpointFile.getAbsolutePath();
+            endpoint.endpointId = readProjectEndpointId(endpointFile.getParentFile());
+            endpoint.endpointState = state;
+            endpoint.source = source;
+            endpoint.enabled = enabled;
+            endpoint.debug = debug;
+            endpoint.hasMessageEvent = false;
+            endpoint.messageFromAnySender = true;
+            endpoint.messageSenders = new ArrayList<>();
+            endpoint.hasStreamEvent = false;
+            endpoint.streamFromAnySender = true;
+            endpoint.streamSenders = new ArrayList<>();
+            endpoint.hasStreamEndEvent = false;
+            endpoint.streamEndFromAnySender = true;
+            endpoint.streamEndSenders = new ArrayList<>();
+            endpoint.hasNetChangeEvent = false;
+            endpoint.hasWatchEvent = false;
+            endpoint.watchRules = new ArrayList<>();
+            return endpoint;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     private void handleIncomingP2PEnvelopeInternal(String fromNode, String rawPayload) {
         String safeFromNode = normalizeP2PTarget(fromNode);
         if (safeFromNode.isEmpty()) {
@@ -2668,6 +2779,7 @@ public class ReactorHttpService extends Service {
 
             String state = "DISABLED";
             boolean enabled = false;
+            boolean debug = false;
             boolean hasMessageEvent = false;
             boolean messageFromAnySender = false;
             List<String> messageSenders = new ArrayList<>();
@@ -2691,6 +2803,11 @@ public class ReactorHttpService extends Service {
                     boolean isEnabled = line.toUpperCase(Locale.ROOT).contains("TRUE");
                     state = isEnabled ? "ENABLED" : "DISABLED";
                     enabled = isEnabled;
+                    continue;
+                }
+
+                if (line.startsWith("// @debug")) {
+                    debug = line.toUpperCase(Locale.ROOT).contains("TRUE");
                     continue;
                 }
 
@@ -2839,6 +2956,7 @@ public class ReactorHttpService extends Service {
             endpoint.endpointState = state;
             endpoint.source = source;
             endpoint.enabled = enabled;
+            endpoint.debug = debug;
             endpoint.hasMessageEvent = hasMessageEvent;
             endpoint.messageFromAnySender = messageFromAnySender || messageSenders.isEmpty();
             endpoint.messageSenders = messageSenders;
@@ -3772,6 +3890,109 @@ public class ReactorHttpService extends Service {
                 return shown;
             }
 
+            @Override public String fsStat(String path) {
+                try {
+                    File target = new File(String.valueOf(path == null ? "" : path));
+                    org.json.JSONObject out = new org.json.JSONObject();
+                    out.put("path", target.getAbsolutePath());
+                    out.put("exists", target.exists());
+                    out.put("isFile", target.isFile());
+                    out.put("isDirectory", target.isDirectory());
+                    out.put("size", target.isFile() ? target.length() : 0L);
+
+                    long mTimeSeconds = 0L;
+                    try {
+                        long lastModifiedMs = target.lastModified();
+                        if (lastModifiedMs > 0L) {
+                            mTimeSeconds = lastModifiedMs / 1000L;
+                        }
+                    } catch (Exception ignored) {}
+
+                    out.put("mTime", mTimeSeconds);
+                    out.put("cTime", mTimeSeconds);
+                    return out.toString();
+                } catch (Exception error) {
+                    return "{\"exists\":false,\"isFile\":false,\"isDirectory\":false,\"size\":0,\"mTime\":0,\"cTime\":0}";
+                }
+            }
+
+            @Override public String fsList(String path, boolean recursive) {
+                try {
+                    File root = new File(String.valueOf(path == null ? "" : path));
+                    org.json.JSONArray out = new org.json.JSONArray();
+                    if (!root.exists() || !root.isDirectory()) {
+                        return out.toString();
+                    }
+
+                    java.nio.file.Path rootPath = root.toPath();
+                    if (!recursive) {
+                        File[] children = root.listFiles();
+                        if (children == null) {
+                            return out.toString();
+                        }
+                        for (File child : children) {
+                            if (child == null) {
+                                continue;
+                            }
+                            out.put(child.getName());
+                        }
+                        return out.toString();
+                    }
+
+                    try (java.util.stream.Stream<java.nio.file.Path> walk = Files.walk(rootPath)) {
+                        walk.forEach((candidate) -> {
+                            try {
+                                if (candidate == null || candidate.equals(rootPath)) {
+                                    return;
+                                }
+                                java.nio.file.Path relative = rootPath.relativize(candidate);
+                                String normalized = relative.toString().replace('\\', '/').trim();
+                                if (!normalized.isEmpty()) {
+                                    out.put(normalized);
+                                }
+                            } catch (Exception ignored) {
+                                // Best effort listing.
+                            }
+                        });
+                    }
+
+                    return out.toString();
+                } catch (Exception error) {
+                    return "[]";
+                }
+            }
+
+            @Override public long fsCalcSize(String path) {
+                try {
+                    File root = new File(String.valueOf(path == null ? "" : path));
+                    if (!root.exists()) {
+                        return 0L;
+                    }
+
+                    if (root.isFile()) {
+                        return root.length();
+                    }
+
+                    final long[] total = new long[] { 0L };
+                    try (java.util.stream.Stream<java.nio.file.Path> walk = Files.walk(root.toPath())) {
+                        walk.forEach((candidate) -> {
+                            try {
+                                if (candidate == null || !Files.isRegularFile(candidate)) {
+                                    return;
+                                }
+                                total[0] += Files.size(candidate);
+                            } catch (Exception ignored) {
+                                // Ignore unreadable files.
+                            }
+                        });
+                    }
+
+                    return Math.max(0L, total[0]);
+                } catch (Exception error) {
+                    return 0L;
+                }
+            }
+
             @Override public String nodeStream(String target, String filePath, String meta) {
                 try {
                     Map<String, String> extraHeaders = new HashMap<>();
@@ -3916,23 +4137,52 @@ public class ReactorHttpService extends Service {
 
             @Override public String sendHttpRequest(String url, String method, String headers, String body, long timeoutMs) {
                 try {
-                    okhttp3.OkHttpClient client = new okhttp3.OkHttpClient.Builder()
-                        .connectTimeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
-                        .readTimeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
-                        .build();
+                    okhttp3.OkHttpClient.Builder clientBuilder = new okhttp3.OkHttpClient.Builder();
+                    if (timeoutMs > 0L) {
+                        clientBuilder
+                            .connectTimeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                            .readTimeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    }
+                    okhttp3.OkHttpClient client = clientBuilder.build();
                     okhttp3.RequestBody reqBody = null;
                     String upperMethod = method.toUpperCase(Locale.ROOT);
-                    if (!body.isEmpty() && !"GET".equals(upperMethod) && !"HEAD".equals(upperMethod)) {
+
+                    byte[] requestBodyBytes = null;
+                    if (body != null && body.startsWith("@file:")) {
+                        String filePath = body.substring("@file:".length()).trim();
+                        if (!filePath.isEmpty()) {
+                            File sourceFile = new File(filePath);
+                            if (sourceFile.exists() && sourceFile.isFile()) {
+                                requestBodyBytes = Files.readAllBytes(sourceFile.toPath());
+                            }
+                        }
+                    }
+
+                    if (requestBodyBytes == null && body != null) {
+                        requestBodyBytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    }
+
+                    if (requestBodyBytes != null && requestBodyBytes.length > 0 && !"GET".equals(upperMethod) && !"HEAD".equals(upperMethod)) {
                         reqBody = okhttp3.RequestBody.create(
-                            body.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                            requestBodyBytes,
                             okhttp3.MediaType.parse("application/octet-stream"));
                     }
                     okhttp3.Request.Builder rb = new okhttp3.Request.Builder().url(url).method(upperMethod, reqBody);
+                    boolean hasUserAgent = false;
                     try {
                         org.json.JSONObject hdrs = new org.json.JSONObject(headers);
                         Iterator<String> keys = hdrs.keys();
-                        while (keys.hasNext()) { String k = keys.next(); rb.header(k, hdrs.getString(k)); }
+                        while (keys.hasNext()) {
+                            String k = keys.next();
+                            if ("user-agent".equalsIgnoreCase(k)) {
+                                hasUserAgent = true;
+                            }
+                            rb.header(k, hdrs.getString(k));
+                        }
                     } catch (Exception ignored) {}
+                    if (!hasUserAgent) {
+                        rb.header("User-Agent", "ReactorClient/" + BuildConfig.REACTOR_APP_VERSION);
+                    }
                     try (okhttp3.Response resp = client.newCall(rb.build()).execute()) {
                         org.json.JSONObject result = new org.json.JSONObject();
                         result.put("status", resp.code());
@@ -3962,9 +4212,18 @@ public class ReactorHttpService extends Service {
                 ops
             );
             ops.log("AFTER_EXECUTE_BLOCKING result="+(result.getError() != null ? "ERROR: "+result.getError() : "SUCCESS"));
+            if (endpoint.debug && result.getError() != null) {
+                String debugError = String.valueOf(result.getError()).trim();
+                if (!debugError.isEmpty()) {
+                    ops.deviceNotify(debugError);
+                }
+            }
         } catch (Exception e) {
             String msg = e.getMessage() != null ? e.getMessage() : "execution failed";
             ops.log("EXECUTE_ERROR: "+msg);
+            if (endpoint.debug) {
+                ops.deviceNotify(msg);
+            }
             appendProjectLog(endpoint, buildReadableGlobalLogLine("SCRIPT_ERROR", msg));
             throw new RuntimeException(msg);
         }

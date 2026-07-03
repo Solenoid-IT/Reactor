@@ -870,7 +870,7 @@ function setupIpcHandlers(runtime, options = {}) {
 			return { ok: false, error: 'path not allowed' };
 		}
 
-		if (directive !== 'state' && directive !== 'mutex') {
+		if (directive !== 'state' && directive !== 'mutex' && directive !== 'debug') {
 			return { ok: false, error: 'invalid directive' };
 		}
 
@@ -888,15 +888,27 @@ function setupIpcHandlers(runtime, options = {}) {
 				return { ok: true, directive: 'state', value: next };
 			}
 
+			if (directive === 'mutex') {
+				const currentValues = parseDirectiveHeader(source);
+				const currentMutex = currentValues.mutex ? currentValues.mutex !== 'FALSE' : false;
+				const nextMutex = !currentMutex;
+				const nextValue = nextMutex ? 'TRUE' : 'FALSE';
+				source = rebuildDirectiveHeader(source, { mutex: nextValue });
+
+				await fs.writeFile(normalizedFilePath, source, 'utf8');
+				await runtime.reloadEndpoints('ui-toggle-mutex');
+				return { ok: true, directive: 'mutex', value: nextValue };
+			}
+
 			const currentValues = parseDirectiveHeader(source);
-			const currentMutex = currentValues.mutex ? currentValues.mutex !== 'FALSE' : false;
-			const nextMutex = !currentMutex;
-			const nextValue = nextMutex ? 'TRUE' : 'FALSE';
-			source = rebuildDirectiveHeader(source, { mutex: nextValue });
+			const currentDebug = String(currentValues.debug || 'FALSE').toUpperCase() === 'TRUE';
+			const nextDebug = !currentDebug;
+			const nextValue = nextDebug ? 'TRUE' : 'FALSE';
+			source = rebuildDirectiveHeader(source, { debug: nextValue });
 
 			await fs.writeFile(normalizedFilePath, source, 'utf8');
-			await runtime.reloadEndpoints('ui-toggle-mutex');
-			return { ok: true, directive: 'mutex', value: nextValue };
+			await runtime.reloadEndpoints('ui-toggle-debug');
+			return { ok: true, directive: 'debug', value: nextValue };
 		} catch (error) {
 			return { ok: false, error: error.message };
 		}
@@ -1236,6 +1248,7 @@ function setupIpcHandlers(runtime, options = {}) {
 				events: endpoint.events,
 				messageSenders: endpoint.messageSenders || [],
 				messageFromAnySender: Boolean(endpoint.messageFromAnySender),
+				debug: Boolean(endpoint.debug),
 				mutex: endpoint.mutex,
 				watch: endpoint.watch || [],
 			}));

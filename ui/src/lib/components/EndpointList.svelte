@@ -3,6 +3,7 @@
 	export let selectedIndex = -1;
 	export let onSelect = () => {};
 	export let onToggleState = () => {};
+	export let onToggleDebug = () => {};
 	export let onToggleMutex = () => {};
 	export let onRun = () => {};
 	export let onOpen = () => {};
@@ -68,7 +69,17 @@
 			>
 				<div class="file-header">
 					<div class="file-header-main">
-						<div class="file-name"><span class="file-name-label">{endpoint.name.replace(/\.(ts|js)$/i, '')}</span></div>
+						<div class="file-name-row">
+							<div class="file-name"><span class="file-name-label">{endpoint.name.replace(/\.(ts|js)$/i, '')}</span></div>
+							<button
+								class={`debug-icon-toggle ${endpoint.debug ? 'debug-on' : 'debug-off'}`}
+								title={endpoint.debug ? 'Disable debug' : 'Enable debug'}
+								aria-label={endpoint.debug ? 'Disable debug' : 'Enable debug'}
+								on:click|stopPropagation={() => onToggleDebug(index)}
+							>
+								<i class="fa-solid fa-bug" aria-hidden="true"></i>
+							</button>
+						</div>
 						<div class="file-tags">
 							{#each endpointTags(endpoint) as tag}
 								<span class={`tag ${tag.cls}`}>{tag.label}</span>

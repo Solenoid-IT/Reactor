@@ -11,6 +11,9 @@ import java.io.File
 interface ReactorScriptOps {
     fun log(message: String)
     fun deviceNotify(message: String): Boolean
+    fun fsStat(path: String): String
+    fun fsList(path: String, recursive: Boolean): String
+    fun fsCalcSize(path: String): Long
     fun nodeStream(target: String, filePath: String, meta: String): String
     fun nodeSendMessage(target: String, stream: String, data: String): String
     fun copyStream(src: String, dst: String): Boolean
@@ -148,6 +151,37 @@ function ManualEvent(data, ts) {
 }
 ManualEvent.prototype = Object.create(Event.prototype);
 
+function __parseUnitExpression(input, unitTable) {
+    var raw = String(input == null ? '' : input).trim();
+    if (!raw) throw new Error('Unit conversion requires a value');
+    var compact = raw.replace(/,/g, '.').replace(/\s+/g, ' ').trim();
+    var tokenMatcher = /([+-]?\d+(?:\.\d+)?)\s*([a-zA-Z]+)/g;
+    var total = 0;
+    var matched = false;
+    var match;
+
+    while ((match = tokenMatcher.exec(compact)) !== null) {
+        var amount = Number(match[1]);
+        var unit = String(match[2] || '').toLowerCase();
+        var multiplier = unitTable[unit];
+        if (!Number.isFinite(amount) || !Number.isFinite(multiplier)) {
+            throw new Error('Invalid unit token: ' + match[0]);
+        }
+        total += amount * multiplier;
+        matched = true;
+    }
+
+    if (matched) {
+        var leftover = compact.replace(tokenMatcher, '').replace(/\s+/g, '');
+        if (leftover) throw new Error('Invalid unit expression: ' + raw);
+        return total;
+    }
+
+    var numeric = Number(compact);
+    if (Number.isFinite(numeric)) return numeric;
+    throw new Error('Invalid unit expression: ' + raw);
+}
+
 var __reactorCore = {
     Event: Event,
     WatchEvent: WatchEvent,
@@ -166,7 +200,20 @@ var __reactorCore = {
                 return __native.copyStream(s, d);
             }
         }),
-        Directory: function ReactorDir(p) { this.__path = String(p || ''); }
+        Entry: {
+            isFile: function (p) {
+                try {
+                    var stat = JSON.parse(__native.fsStat(String(p || '')) || '{}');
+                    return !!stat.isFile;
+                } catch (e) {
+                    return false;
+                }
+            }
+        },
+        Directory: function ReactorDir(p) {
+            this.__path = String(p || '');
+            this.path = this.__path;
+        }
     },
     Node: {
         getHomeDirectory: function () { return __native.getHomeDirectory(); },
@@ -232,28 +279,89 @@ var __reactorCore = {
         };
     },
     HttpClient: {
-        Request: function (r, body, hdrs, url) {
-            if (typeof r === 'string') {
-                this.url = r;
-                this.method = 'GET';
-                this.body = null;
-                this.headers = {};
-            } else {
-                this.url = r.url || url || '';
-                this.method = (r.method || 'GET').toUpperCase();
-                this.body = r.body !== undefined ? r.body : (body !== undefined ? body : null);
-                this.headers = r.headers || hdrs || {};
-            }
+        Request: function (method, url, body, headers) {
+            this.method = String(method == null ? 'GET' : method).trim().toUpperCase() || 'GET';
+            this.url = String(url == null ? '' : url).trim();
+            this.body = body == null ? null : body;
+            this.headers = headers && typeof headers === 'object' ? headers : {};
         },
         sendRequest: function (req, timeout) {
+            var normalizedBody = '';
+            if (req && req.body && typeof req.body === 'object' && req.body.__type === 'FileHandle') {
+                normalizedBody = '@file:' + String(req.body.__path || '');
+            } else if (req && req.body != null) {
+                normalizedBody = String(typeof req.body === 'object' ? JSON.stringify(req.body) : req.body);
+            }
+
+            var timeoutSeconds = timeout == null ? null : Number(timeout);
+            var timeoutMs = Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
+                ? Math.floor(timeoutSeconds * 1000)
+                : 0;
+
             var r = __native.sendHttpRequest(
                 String(req.url || ''),
                 String(req.method || 'GET'),
                 JSON.stringify(req.headers || {}),
-                req.body != null ? String(typeof req.body === 'object' ? JSON.stringify(req.body) : req.body) : '',
-                timeout != null ? Number(timeout) : 30000
+                normalizedBody,
+                timeoutMs
             );
-            try { return JSON.parse(r); } catch (e) { return { status: 0, headers: {}, body: '' }; }
+            try {
+                var out = JSON.parse(r);
+                var status = Number(out && (out.statusCode != null ? out.statusCode : out.status));
+                if (!Number.isFinite(status)) status = 0;
+                return {
+                    statusCode: status,
+                    statusText: String(out && out.statusText != null ? out.statusText : ''),
+                    headers: out && out.headers ? out.headers : {},
+                    body: out && out.body != null ? out.body : ''
+                };
+            } catch (e) {
+                return { statusCode: 0, statusText: '', headers: {}, body: '' };
+            }
+        }
+    },
+    Time: {
+        now: function () {
+            return Math.floor(Date.now() / 1000);
+        }
+    },
+    Unit: {
+        Byte: {
+            conv: function (value) {
+                return __parseUnitExpression(value, {
+                    b: 1,
+                    byte: 1,
+                    bytes: 1,
+                    kb: 1024,
+                    mb: 1024 * 1024,
+                    gb: 1024 * 1024 * 1024,
+                    tb: 1024 * 1024 * 1024 * 1024
+                });
+            }
+        },
+        Second: {
+            conv: function (value) {
+                return __parseUnitExpression(value, {
+                    s: 1,
+                    sec: 1,
+                    secs: 1,
+                    second: 1,
+                    seconds: 1,
+                    m: 60,
+                    min: 60,
+                    mins: 60,
+                    minute: 60,
+                    minutes: 60,
+                    h: 3600,
+                    hr: 3600,
+                    hrs: 3600,
+                    hour: 3600,
+                    hours: 3600,
+                    d: 86400,
+                    day: 86400,
+                    days: 86400
+                });
+            }
         }
     },
     System: {
@@ -270,8 +378,40 @@ var Node = __reactorCore.Node;
 var Device = __reactorCore.Device;
 var OS = __reactorCore.OS;
 var HttpClient = __reactorCore.HttpClient;
+var Time = __reactorCore.Time;
+var Unit = __reactorCore.Unit;
 var System = __reactorCore.System;
 var log = __reactorCore.log;
+
+FileSystem.File.prototype.path = '';
+FileSystem.File.prototype.getMeta = function () {
+    try {
+        var stat = JSON.parse(__native.fsStat(String(this.__path || '')) || '{}');
+        return {
+            path: String(this.__path || ''),
+            exists: !!stat.exists,
+            size: Number(stat.size || 0),
+            mTime: Number(stat.mTime || 0),
+            cTime: Number(stat.cTime || 0)
+        };
+    } catch (e) {
+        return { path: String(this.__path || ''), exists: false, size: 0, mTime: 0, cTime: 0 };
+    }
+};
+
+FileSystem.Directory.prototype.calcSize = function () {
+    var result = Number(__native.fsCalcSize(String(this.__path || '')) || 0);
+    return Number.isFinite(result) ? result : 0;
+};
+
+FileSystem.Directory.prototype.list = function (recursive) {
+    try {
+        var out = JSON.parse(__native.fsList(String(this.__path || ''), !!recursive) || '[]');
+        return Array.isArray(out) ? out : [];
+    } catch (e) {
+        return [];
+    }
+};
 """.trimIndent()
     }
 

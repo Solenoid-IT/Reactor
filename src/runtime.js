@@ -3373,7 +3373,8 @@ class ReactorRuntime {
 				return {
 					target: targetId,
 					endpoint,
-					status: response.status,
+					statusCode: response.statusCode,
+					statusText: response.statusText,
 					headers: response.headers,
 					body: response.body,
 				};
@@ -3628,7 +3629,13 @@ class ReactorRuntime {
 			const req = https.request(options, (res) => {
 				let data = '';
 				res.on('data', (chunk) => { data += chunk; });
-				res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+				res.on('end', () => {
+					const statusCode = Number(res.statusCode || 0);
+					const statusText = statusCode >= 200 && statusCode < 300
+						? 'OK'
+						: (statusCode >= 500 ? 'Server Error' : (statusCode >= 400 ? 'Client Error' : 'Unknown'));
+					resolve({ statusCode, statusText, headers: res.headers, body: data });
+				});
 			});
 
 			req.setTimeout(timeoutMs, () => req.destroy(new Error('HTTPS request timeout')));
@@ -3642,14 +3649,141 @@ class ReactorRuntime {
 		const requestCtor = this.runtimeApi.HttpClient && this.runtimeApi.HttpClient.Request;
 		const sendRequest = this.runtimeApi.HttpClient && this.runtimeApi.HttpClient.sendRequest;
 
-		function RequestFactory(...args) {
-			return new requestCtor(...args);
+		function RequestFactory(method, url, body = null, headers = {}) {
+			return new requestCtor(method, url, body, headers);
 		}
+
+		const parseUnitExpression = (input, unitTable) => {
+			const raw = String(input == null ? '' : input).trim();
+			if (!raw) {
+				throw new Error('Unit conversion requires a value');
+			}
+
+			const compact = raw.replace(/,/g, '.').replace(/\s+/g, ' ').trim();
+			const tokenMatcher = /([+-]?\d+(?:\.\d+)?)\s*([a-zA-Z]+)/g;
+			let total = 0;
+			let matched = false;
+			let match = null;
+
+			while ((match = tokenMatcher.exec(compact)) !== null) {
+				const amount = Number(match[1]);
+				const unit = String(match[2] || '').toLowerCase();
+				const multiplier = unitTable[unit];
+				if (!Number.isFinite(amount) || !Number.isFinite(multiplier)) {
+					throw new Error(`Invalid unit token: ${match[0]}`);
+				}
+				total += amount * multiplier;
+				matched = true;
+			}
+
+			if (matched) {
+				const leftover = compact.replace(tokenMatcher, '').replace(/\s+/g, '');
+				if (leftover) {
+					throw new Error(`Invalid unit expression: ${raw}`);
+				}
+				return total;
+			}
+
+			const numeric = Number(compact);
+			if (Number.isFinite(numeric)) {
+				return numeric;
+			}
+
+			throw new Error(`Invalid unit expression: ${raw}`);
+		};
+
+		const unitApi = {
+			Byte: {
+				conv: (value) => parseUnitExpression(value, {
+					b: 1,
+					byte: 1,
+					bytes: 1,
+					kb: 1024,
+					mb: 1024 * 1024,
+					gb: 1024 * 1024 * 1024,
+					tb: 1024 * 1024 * 1024 * 1024,
+				}),
+			},
+			Second: {
+				conv: (value) => parseUnitExpression(value, {
+					s: 1,
+					sec: 1,
+					secs: 1,
+					second: 1,
+					seconds: 1,
+					m: 60,
+					min: 60,
+					mins: 60,
+					minute: 60,
+					minutes: 60,
+					h: 3600,
+					hr: 3600,
+					hrs: 3600,
+					hour: 3600,
+					hours: 3600,
+					d: 86400,
+					day: 86400,
+					days: 86400,
+				}),
+			},
+		}
+
+		const timeApi = {
+			at: (expression = 'now') => {
+				const nowSeconds = Math.floor(Date.now() / 1000);
+				const raw = String(expression == null ? '' : expression).trim();
+				const normalized = raw.replace(/\s+/g, ' ');
+				const match = normalized.match(/^now(?:\s*([+-])\s*(.+))?$/i);
+
+				if (!match) {
+					throw new Error(`Invalid Time.at expression: ${raw}`);
+				}
+
+				const operator = match[1] || '';
+				const deltaExpression = String(match[2] || '').trim();
+				if (!operator) {
+					return nowSeconds;
+				}
+
+				if (!deltaExpression) {
+					throw new Error(`Invalid Time.at expression: ${raw}`);
+				}
+
+				const deltaSeconds = parseUnitExpression(deltaExpression, {
+					s: 1,
+					sec: 1,
+					secs: 1,
+					second: 1,
+					seconds: 1,
+					m: 60,
+					min: 60,
+					mins: 60,
+					minute: 60,
+					minutes: 60,
+					h: 3600,
+					hr: 3600,
+					hrs: 3600,
+					hour: 3600,
+					hours: 3600,
+					d: 86400,
+					day: 86400,
+					days: 86400,
+				});
+
+				if (!Number.isFinite(deltaSeconds) || deltaSeconds < 0) {
+					throw new Error(`Invalid Time.at expression: ${raw}`);
+				}
+
+				const signedDelta = operator === '-' ? -deltaSeconds : deltaSeconds;
+				return Math.floor(nowSeconds + signedDelta);
+			},
+			now: () => timeApi.at('now'),
+		};
 
 		const httpClient = {
 			...(this.runtimeApi.HttpClient || {}),
 			Request: RequestFactory,
-			sendRequest: (request, timeout) => sendRequest(request, timeout),
+			sendRequest: (request, timeout = null) => sendRequest(request, timeout),
 		};
 
 		const fileFacade = {
@@ -3674,22 +3808,40 @@ class ReactorRuntime {
 					});
 				}
 
-				const fileInstance = new this.runtimeApi.FileSystem.File(safePath);
-				if (fileInstance && typeof fileInstance.open === 'function') {
-					const readOptions = { ...safeOptions };
-					delete readOptions.mode;
-					delete readOptions.append;
-					return fileInstance.open(readOptions);
-				}
+				const runtimeFileCtor = this.runtimeApi.FileSystem.File;
+				const readHandle = {
+					__type: 'FileHandle',
+					__path: safePath,
+					[Symbol.asyncIterator]: async function* () {
+						const fileInstance = new runtimeFileCtor(safePath);
+						const readOptions = { ...safeOptions };
+						delete readOptions.mode;
+						delete readOptions.append;
 
-				if (fsNative && typeof fsNative.createReadStream === 'function') {
-					const readOptions = { ...safeOptions };
-					delete readOptions.mode;
-					delete readOptions.append;
-					return fsNative.createReadStream(safePath, readOptions);
-				}
+						if (fileInstance && typeof fileInstance.open === 'function') {
+							const opened = fileInstance.open(readOptions);
+							if (opened && typeof opened[Symbol.asyncIterator] === 'function') {
+								for await (const chunk of opened) {
+									yield chunk;
+								}
+								return;
+							}
+						}
 
-				throw new Error('File.open not supported on this platform');
+						if (fsNative && typeof fsNative.createReadStream === 'function') {
+							const fallbackStream = fsNative.createReadStream(safePath, readOptions);
+							for await (const chunk of fallbackStream) {
+								yield chunk;
+							}
+							return;
+						}
+
+						throw new Error('File.open not supported on this platform');
+					},
+				};
+
+				readHandle.open = () => readHandle;
+				return readHandle;
 			},
 			copyStream: async (inputStream, outputStream) => {
 				if (!inputStream || !outputStream) {
@@ -4017,6 +4169,8 @@ class ReactorRuntime {
 			api: this.runtimeApi,
 			FileSystem: fileSystemFacade,
 			HttpClient: httpClient,
+			Unit: unitApi,
+			Time: timeApi,
 			Device: this.runtimeApi.Device,
 			System: this.runtimeApi.System,
 			log: async (message) => {
@@ -4603,6 +4757,7 @@ class ReactorRuntime {
 					streamEndFromAnySender: Boolean(metadata.streamEndFromAnySender),
 					state: metadata.state,
 					enabled: metadata.state !== 'DISABLED',
+					debug: Boolean(metadata.debug),
 					mutex: metadata.mutex,
 					watch: metadata.watch || [], // Existing watch property
 					watchRules: metadata.watchRules || [], // New watchRules property
@@ -4631,7 +4786,7 @@ class ReactorRuntime {
 								? '*'
 								: endpoint.streamEndSenders.join(', ')
 							: 'none'
-					} @watch=${endpoint.watch.length > 0 ? endpoint.watch.join(', ') : 'none'} @mutex=${endpoint.mutex ? 'TRUE' : 'FALSE'} (from ${this.endpointsDir})`,
+					} @watch=${endpoint.watch.length > 0 ? endpoint.watch.join(', ') : 'none'} @debug=${endpoint.debug ? 'TRUE' : 'FALSE'} @mutex=${endpoint.mutex ? 'TRUE' : 'FALSE'} (from ${this.endpointsDir})`,
 				);
 
 				if (!endpoint.enabled) {
@@ -4847,6 +5002,14 @@ class ReactorRuntime {
 			this.log(`Completed ${endpoint.name}`);
 		} catch (error) {
 			this.log(`Error in ${endpoint.name}: ${error.stack || error.message}`);
+			if (endpoint && endpoint.debug && this.runtimeApi && this.runtimeApi.Device && typeof this.runtimeApi.Device.notify === 'function') {
+				try {
+					const message = String((error && error.message) || 'Unknown error');
+					await Promise.resolve(this.runtimeApi.Device.notify(message));
+				} catch (notifyError) {
+					this.log(`Debug notify failed in ${endpoint.name}: ${notifyError.message}`);
+				}
+			}
 		} finally {
 			if (endpoint.mutex) {
 				endpoint.isRunning = false;

@@ -435,6 +435,28 @@ Runtime APIs must be imported from `core`:
 - `import { Node } from 'core'` then `Node.sendMessage(...)`
 - `import { HttpClient, FileSystem, Device, System, api } from 'core'`
 
+Core API examples are available in:
+- `docs/core-api-examples.md`
+
+FileSystem directory APIs are asynchronous on desktop and mobile. Always use `await`:
+
+```ts
+import { FileSystem, Unit } from 'core';
+
+const directory = new FileSystem.Directory('/a/b/c/d/e');
+const maxSizeBytes = Unit.Byte.conv('2 GB');
+
+const totalSize = await directory.calcSize();
+if (totalSize > maxSizeBytes)
+{
+  const relativePaths = await directory.list(true);
+  for (const relativePath of relativePaths)
+  {
+    // Handle each relative path
+  }
+}
+```
+
 WATCH example with listener filter:
 
 ```ts

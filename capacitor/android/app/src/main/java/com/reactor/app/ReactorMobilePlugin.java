@@ -231,6 +231,15 @@ public class ReactorMobilePlugin extends Plugin {
         }
     }
 
+    @PluginMethod
+    public void getAppInfo(PluginCall call) {
+        JSObject result = new JSObject();
+        result.put("ok", true);
+        result.put("version", BuildConfig.REACTOR_APP_VERSION);
+        result.put("packageName", getContext().getPackageName());
+        call.resolve(result);
+    }
+
     private String readConfiguredReactorNameFile() {
         try {
             File file = getReactorNameFile();
@@ -1616,6 +1625,7 @@ public class ReactorMobilePlugin extends Plugin {
         endpoint.put("triggers", new JSArray());
         endpoint.put("messageSenders", new JSArray());
         endpoint.put("messageFromAnySender", false);
+        endpoint.put("debug", false);
         endpoint.put("mutex", false);
         endpoint.put("watch", new JSArray());
 
@@ -1641,6 +1651,9 @@ public class ReactorMobilePlugin extends Plugin {
                     String mutexUpper = line.toUpperCase();
                     boolean mutex = mutexUpper.contains("TRUE");
                     endpoint.put("mutex", mutex);
+                } else if (line.startsWith("// @debug")) {
+                    boolean debug = line.toUpperCase().contains("TRUE");
+                    endpoint.put("debug", debug);
                 } else if (line.startsWith("// @schedule")) {
                     endpoint.put("schedule", line.replace("// @schedule", "").trim());
                 } else if (line.startsWith("// @watch")) {
@@ -2183,6 +2196,32 @@ public class ReactorMobilePlugin extends Plugin {
                 return;
             }
 
+            if ("debug".equals(directive)) {
+                nextValue = "TRUE";
+                for (int i = 0; i < lines.length; i++) {
+                    String trimmed = lines[i].trim();
+                    if (trimmed.startsWith("// @debug")) {
+                        found = true;
+                        String debugUpper = trimmed.toUpperCase();
+                        boolean on = debugUpper.contains("TRUE");
+                        nextValue = on ? "FALSE" : "TRUE";
+                        lines[i] = "// @debug " + nextValue;
+                        break;
+                    }
+                }
+                if (!found) {
+                    source = "// @debug TRUE\n" + source;
+                    nextValue = "TRUE";
+                } else {
+                    source = String.join("\n", lines);
+                }
+
+                writeTextFile(endpointFile, source);
+                notifyExchangeProfileUpdated("endpoint-directive-toggled");
+                call.resolve(new JSObject().put("ok", true).put("directive", "debug").put("value", nextValue));
+                return;
+            }
+
             call.resolve(new JSObject().put("ok", false).put("error", "invalid directive"));
         } catch (Exception e) {
             call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
@@ -2215,50 +2254,8 @@ public class ReactorMobilePlugin extends Plugin {
                 call.resolve(new JSObject().put("ok", false).put("error", "endpoint file not found"));
                 return;
             }
-
-            File projectDir = endpointFile.getParentFile();
-            if (projectDir == null) {
-                call.resolve(new JSObject().put("ok", false).put("error", "invalid endpoint project"));
-                return;
-            }
-
-            File logFile = new File(projectDir, "activity.log");
-            if (!isAllowedPath(logFile)) {
-                call.resolve(new JSObject().put("ok", false).put("error", "path not allowed"));
-                return;
-            }
-
-            String endpointName = projectDir.getName();
-                String endpointState = detectEndpointState(endpointFile);
-                String projectEntry = createExecutionStartEntry(
-                    endpointName,
-                    endpointFile.getAbsolutePath(),
-                    endpointState,
-                    "PROJECT",
-                    "MANUAL_TEST",
-                    "ON_DEMAND"
-            );
-                appendTextFile(logFile, projectEntry + "\\n");
-
-            File globalLogFile = getGlobalLogFile();
-            if (isAllowedPath(globalLogFile) && !globalLogFile.getAbsolutePath().equals(logFile.getAbsolutePath())) {
-                String globalEntry = createExecutionStartEntry(
-                        endpointName,
-                        endpointFile.getAbsolutePath(),
-                    endpointState,
-                        "GLOBAL",
-                        "MANUAL_TEST",
-                        "ON_DEMAND"
-                );
-                appendTextFile(globalLogFile, globalEntry + "\n");
-            }
-
-            JSObject result = new JSObject();
-            result.put("ok", true);
-            result.put("started", true);
-            result.put("endpoint", endpointName);
-            result.put("eventLogPath", logFile.getAbsolutePath());
-            call.resolve(result);
+            JSObject result = ReactorHttpService.runEndpointNowByPath(endpointFile.getAbsolutePath());
+            call.resolve(result != null ? result : new JSObject().put("ok", false).put("error", "runtime not ready"));
         } catch (Exception e) {
             call.resolve(new JSObject().put("ok", false).put("error", e.getMessage()));
         }

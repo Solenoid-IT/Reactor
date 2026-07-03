@@ -307,7 +307,36 @@
 	}
 	:global(.file-header) { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
 	:global(.file-header-main) { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+	:global(.file-name-row) { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 	:global(.file-name) { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+	:global(.debug-icon-toggle) {
+		width: 28px;
+		height: 28px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 8px;
+		border: 1px solid #5d4a32;
+		background: linear-gradient(170deg, #352915, #2a2112);
+		color: #f2c26b;
+		transition: transform 0.16s ease, background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+	}
+	:global(.debug-icon-toggle:hover) {
+		transform: translateY(-1px);
+		border-color: #9a7640;
+		background: linear-gradient(170deg, #43331b, #352a18);
+	}
+	:global(.debug-icon-toggle.debug-on) {
+		border-color: #d08a2f;
+		background: linear-gradient(165deg, #5a4018, #4a3415);
+		color: #ffd78a;
+		box-shadow: 0 0 0 1px rgba(255, 188, 88, 0.22) inset;
+	}
+	:global(.debug-icon-toggle.debug-off) {
+		border-color: #4e5663;
+		background: linear-gradient(170deg, #29313d, #232a35);
+		color: #8a96a9;
+	}
 	:global(.file-tags) { display: flex; gap: 6px; flex-wrap: wrap; }
 	:global(.tag) {
 		font-size: 10px;
@@ -359,17 +388,17 @@
 		box-shadow: 0 2px 5px rgba(7, 11, 18, 0.35);
 		transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease;
 	}
-	:global(.switch-toggle.state-on), :global(.switch-toggle.mutex-on) {
+	:global(.switch-toggle.state-on), :global(.switch-toggle.debug-on), :global(.switch-toggle.mutex-on) {
 		background: linear-gradient(135deg, #1d573f, #267052);
 		border-color: #359169;
 		color: #e8fff0;
 	}
-	:global(.switch-toggle.state-on .switch-knob), :global(.switch-toggle.mutex-on .switch-knob) {
+	:global(.switch-toggle.state-on .switch-knob), :global(.switch-toggle.debug-on .switch-knob), :global(.switch-toggle.mutex-on .switch-knob) {
 		transform: translateX(1px);
 		background: linear-gradient(180deg, #f2fff7, #d8f0e2);
 		border-color: #95c9ae;
 	}
-	:global(.switch-toggle.state-off), :global(.switch-toggle.mutex-off) {
+	:global(.switch-toggle.state-off), :global(.switch-toggle.debug-off), :global(.switch-toggle.mutex-off) {
 		background: linear-gradient(165deg, #2b3442, #27303d);
 		border-color: #4f5c70;
 		color: #d6e1f3;

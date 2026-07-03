@@ -8,6 +8,7 @@ function parseDirectiveHeader(source) {
 
 	const values = {
 		state: null,
+		debug: null,
 		schedule: null,
 		on: [],
 		mutex: null,
@@ -26,6 +27,13 @@ function parseDirectiveHeader(source) {
 		const scheduleMatch = line.match(/^\s*\/\/\s*@schedule\s+(.+)$/i);
 		if (scheduleMatch) {
 			values.schedule = scheduleMatch[1].trim();
+			continue;
+		}
+
+		const debugMatch = line.match(/^\s*\/\/\s*@debug\s+(TRUE|FALSE)\b/i);
+		if (debugMatch) {
+			const parsedDebug = debugMatch[1].toUpperCase();
+			values.debug = parsedDebug === 'TRUE' ? 'TRUE' : 'FALSE';
 			continue;
 		}
 
@@ -84,7 +92,7 @@ function rebuildDirectiveHeader(source, overrides = {}) {
 	let bodyStart = index;
 	for (; bodyStart < lines.length; bodyStart += 1) {
 		const line = lines[bodyStart];
-		if (/^\s*\/\/\s*@(enabled|mutex|on|schedule|watch)\b/i.test(line) || line.trim() === '') {
+		if (/^\s*\/\/\s*@(enabled|debug|mutex|on|schedule|watch)\b/i.test(line) || line.trim() === '') {
 			continue;
 		}
 		break;
@@ -97,6 +105,11 @@ function rebuildDirectiveHeader(source, overrides = {}) {
 	if (nextValues.state) {
 		const enabledValue = String(nextValues.state).toUpperCase() === 'ENABLED' ? 'TRUE' : 'FALSE';
 		leadingHeaderLines.push(`// @enabled ${enabledValue}`);
+	}
+
+	if (nextValues.debug) {
+		const debugValue = String(nextValues.debug).toUpperCase();
+		leadingHeaderLines.push(`// @debug ${debugValue === 'TRUE' ? 'TRUE' : 'FALSE'}`);
 	}
 
 	if (nextValues.mutex) {
