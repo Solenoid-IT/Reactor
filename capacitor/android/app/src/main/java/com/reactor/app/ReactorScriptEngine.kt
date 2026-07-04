@@ -16,6 +16,7 @@ interface ReactorScriptOps {
     fun fsList(path: String, recursive: Boolean): String
     fun fsCalcSize(path: String): Long
     fun encryptFile(filePath: String, publicKey: String): String
+    fun decryptFile(filePath: String, crypto: String, privateKey: String): String
     fun nodeStream(target: String, filePath: String, meta: String): String
     fun nodeSendMessage(target: String, stream: String, data: String): String
     fun copyStream(src: String, dst: String): Boolean
@@ -404,6 +405,31 @@ var __reactorCore = {
                 content: encryptedContent,
                 crypto: payload.crypto || {}
             };
+        },
+        decryptFile: function (stream, crypto, privateKey) {
+            var filePath = (stream && stream.__path) ? String(stream.__path) : String(stream || '');
+            var cryptoPayload = typeof crypto === 'string'
+                ? crypto
+                : JSON.stringify(crypto == null ? {} : crypto);
+            var result = __native.decryptFile(
+                filePath,
+                String(cryptoPayload == null ? '' : cryptoPayload),
+                String(privateKey == null ? '' : privateKey)
+            );
+            var payload = {};
+            try {
+                payload = JSON.parse(result || '{}');
+            } catch (e) {
+                throw new Error('Sekrypt.decryptFile failed: invalid native response');
+            }
+
+            if (!payload.ok) {
+                throw new Error(payload.error || 'Sekrypt.decryptFile failed');
+            }
+
+            var plainContent = __reactorCore.FileSystem.File.open(String(payload.contentPath || ''));
+            plainContent.length = Number(payload.contentSize || 0);
+            return plainContent;
         }
     },
     Node: {

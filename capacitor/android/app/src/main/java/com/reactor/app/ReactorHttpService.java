@@ -4234,6 +4234,157 @@ public class ReactorHttpService extends Service {
                 }
             }
 
+            @Override public String decryptFile(String filePath, String cryptoPayload, String privateKey) {
+                try {
+                    String safePath = String.valueOf(filePath == null ? "" : filePath).trim();
+                    String safeCryptoPayload = String.valueOf(cryptoPayload == null ? "" : cryptoPayload).trim();
+                    String safePrivateKey = String.valueOf(privateKey == null ? "" : privateKey).trim();
+
+                    if (safePath.isEmpty()) {
+                        throw new IllegalArgumentException("file path is required");
+                    }
+                    if (safeCryptoPayload.isEmpty()) {
+                        throw new IllegalArgumentException("crypto payload is required");
+                    }
+                    if (safePrivateKey.isEmpty()) {
+                        throw new IllegalArgumentException("private key is required");
+                    }
+
+                    File sourceFile = new File(safePath);
+                    if (!sourceFile.exists() || !sourceFile.isFile()) {
+                        throw new IllegalArgumentException("source file not found");
+                    }
+
+                    byte[] encryptedContent = Files.readAllBytes(sourceFile.toPath());
+
+                    JSONObject cryptoObject = null;
+                    try {
+                        cryptoObject = new JSONObject(safeCryptoPayload);
+                    } catch (Exception ignored) {
+                        try {
+                            String decodedPayload = new String(Base64.decode(safeCryptoPayload, Base64.DEFAULT), StandardCharsets.UTF_8);
+                            cryptoObject = new JSONObject(decodedPayload);
+                        } catch (Exception ignoredAgain) {
+                            cryptoObject = null;
+                        }
+                    }
+
+                    if (cryptoObject == null) {
+                        throw new IllegalArgumentException("invalid crypto payload");
+                    }
+
+                    String extractedPrivateKey = safePrivateKey;
+                    try {
+                        if (extractedPrivateKey.startsWith("{") && extractedPrivateKey.endsWith("}")) {
+                            JSONObject keyEnvelope = new JSONObject(extractedPrivateKey);
+                            String candidate = "";
+                            if (candidate.isEmpty()) candidate = String.valueOf(keyEnvelope.optString("privateKey", "")).trim();
+                            if (candidate.isEmpty()) candidate = String.valueOf(keyEnvelope.optString("private_key", "")).trim();
+                            if (candidate.isEmpty()) candidate = String.valueOf(keyEnvelope.optString("key", "")).trim();
+                            if (candidate.isEmpty()) candidate = String.valueOf(keyEnvelope.optString("data", "")).trim();
+                            if (!candidate.isEmpty()) {
+                                extractedPrivateKey = candidate;
+                            }
+                        }
+                    } catch (Exception ignored) {
+                        // Keep original key value when payload is not JSON.
+                    }
+
+                    if (extractedPrivateKey.length() >= 2 && extractedPrivateKey.startsWith("\"") && extractedPrivateKey.endsWith("\"")) {
+                        extractedPrivateKey = extractedPrivateKey.substring(1, extractedPrivateKey.length() - 1);
+                    }
+                    extractedPrivateKey = extractedPrivateKey.replace("\\n", "\n").trim();
+
+                    String normalizedPrivatePem = extractedPrivateKey
+                        .replace("-----BEGIN PRIVATE KEY-----", "")
+                        .replace("-----END PRIVATE KEY-----", "")
+                        .replaceAll("\\s+", "");
+                    if (normalizedPrivatePem.isEmpty()) {
+                        throw new IllegalArgumentException("invalid private key");
+                    }
+
+                    byte[] privateKeyBytes = Base64.decode(normalizedPrivatePem, Base64.DEFAULT);
+                    java.security.PrivateKey rsaPrivateKey = java.security.KeyFactory.getInstance("RSA")
+                        .generatePrivate(new java.security.spec.PKCS8EncodedKeySpec(privateKeyBytes));
+
+                    String resourceIvB64 = String.valueOf(cryptoObject.optString("resourceIV", "")).trim();
+                    if (resourceIvB64.isEmpty()) {
+                        throw new IllegalArgumentException("crypto.resourceIV is required");
+                    }
+                    byte[] resourceIv = Base64.decode(resourceIvB64, Base64.DEFAULT);
+
+                    javax.crypto.Cipher rsaCipher = javax.crypto.Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");
+                    rsaCipher.init(javax.crypto.Cipher.DECRYPT_MODE, rsaPrivateKey);
+
+                    String cryptoType = String.valueOf(cryptoObject.optString("type", "")).trim().toLowerCase(Locale.ROOT);
+                    byte[] resourceKey;
+
+                    if ("user".equals(cryptoType)) {
+                        String encResourceKeyB64 = String.valueOf(cryptoObject.optString("encResourceKey", "")).trim();
+                        if (encResourceKeyB64.isEmpty()) {
+                            throw new IllegalArgumentException("crypto.encResourceKey is required");
+                        }
+
+                        byte[] encryptedResourceKey = Base64.decode(encResourceKeyB64, Base64.DEFAULT);
+                        resourceKey = rsaCipher.doFinal(encryptedResourceKey);
+                    } else if ("group".equals(cryptoType)) {
+                        String encGroupKeyB64 = String.valueOf(cryptoObject.optString("encGroupKey", "")).trim();
+                        String resourceGroupIvB64 = String.valueOf(cryptoObject.optString("resourceGroupIV", "")).trim();
+                        String encResourceGroupKeyB64 = String.valueOf(cryptoObject.optString("encResourceGroupKey", "")).trim();
+
+                        if (encGroupKeyB64.isEmpty()) {
+                            throw new IllegalArgumentException("crypto.encGroupKey is required");
+                        }
+                        if (resourceGroupIvB64.isEmpty()) {
+                            throw new IllegalArgumentException("crypto.resourceGroupIV is required");
+                        }
+                        if (encResourceGroupKeyB64.isEmpty()) {
+                            throw new IllegalArgumentException("crypto.encResourceGroupKey is required");
+                        }
+
+                        byte[] encryptedGroupKey = Base64.decode(encGroupKeyB64, Base64.DEFAULT);
+                        byte[] groupKey = rsaCipher.doFinal(encryptedGroupKey);
+                        byte[] resourceGroupIv = Base64.decode(resourceGroupIvB64, Base64.DEFAULT);
+                        byte[] encryptedResourceGroupKey = Base64.decode(encResourceGroupKeyB64, Base64.DEFAULT);
+
+                        javax.crypto.Cipher groupAesCipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+                        groupAesCipher.init(
+                            javax.crypto.Cipher.DECRYPT_MODE,
+                            new javax.crypto.spec.SecretKeySpec(groupKey, "AES"),
+                            new javax.crypto.spec.GCMParameterSpec(128, resourceGroupIv)
+                        );
+                        resourceKey = groupAesCipher.doFinal(encryptedResourceGroupKey);
+                    } else {
+                        throw new IllegalArgumentException("unsupported crypto type");
+                    }
+
+                    javax.crypto.Cipher aesCipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+                    aesCipher.init(
+                        javax.crypto.Cipher.DECRYPT_MODE,
+                        new javax.crypto.spec.SecretKeySpec(resourceKey, "AES"),
+                        new javax.crypto.spec.GCMParameterSpec(128, resourceIv)
+                    );
+                    byte[] plainContent = aesCipher.doFinal(encryptedContent);
+
+                    File decryptedDir = new File(getCacheDir(), "reactor/decrypted");
+                    if (!decryptedDir.exists() && !decryptedDir.mkdirs()) {
+                        throw new IOException("unable to create decrypted cache directory");
+                    }
+
+                    File decryptedFile = new File(decryptedDir, "dec-" + System.currentTimeMillis() + "-" + UUID.randomUUID() + ".bin");
+                    Files.write(decryptedFile.toPath(), plainContent);
+
+                    JSONObject response = new JSONObject();
+                    response.put("ok", true);
+                    response.put("contentPath", decryptedFile.getAbsolutePath());
+                    response.put("contentSize", plainContent.length);
+                    return response.toString();
+                } catch (Exception error) {
+                    String message = error.getMessage() != null ? error.getMessage() : "decryption failed";
+                    return "{\"ok\":false,\"error\":" + JSONObject.quote(message) + "}";
+                }
+            }
+
             @Override public String nodeStream(String target, String filePath, String meta) {
                 try {
                     Map<String, String> extraHeaders = new HashMap<>();

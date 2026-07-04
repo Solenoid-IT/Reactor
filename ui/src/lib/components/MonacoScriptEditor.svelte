@@ -20,6 +20,9 @@
 	let mounted = true;
 	let loadError = '';
 	let reactorTypesDisposable = null;
+	let reactorTypesJsDisposable = null;
+	let sekryptHintDisposable = null;
+	let sekryptHintJsDisposable = null;
 
 	$: signature = `${filePath}::${initialContent}`;
 
@@ -59,12 +62,50 @@
 			noSemanticValidation: false,
 		});
 
-		if (!reactorTypesDisposable) {
-			reactorTypesDisposable = defaults.addExtraLib(
-				reactorApiTypes,
-				'file:///reactor/typings/reactor-api.d.ts',
-			);
+		if (reactorTypesDisposable) {
+			reactorTypesDisposable.dispose();
 		}
+		if (reactorTypesJsDisposable) {
+			reactorTypesJsDisposable.dispose();
+		}
+		if (sekryptHintDisposable) {
+			sekryptHintDisposable.dispose();
+		}
+		if (sekryptHintJsDisposable) {
+			sekryptHintJsDisposable.dispose();
+		}
+
+		reactorTypesDisposable = defaults.addExtraLib(
+			reactorApiTypes,
+			'file:///reactor/typings/reactor-api.d.ts',
+		);
+		reactorTypesJsDisposable = jsDefaults.addExtraLib(
+			reactorApiTypes,
+			'file:///reactor/typings/reactor-api.js.d.ts',
+		);
+
+		const sekryptHintTypes = `declare module 'core' {
+	export interface SekryptApi {
+		encryptFile(
+			content: AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream,
+			publicKey: string,
+		): Promise<SekryptFileResult>;
+		decryptFile(
+			content: AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream,
+			crypto: object,
+			privateKey: string,
+		): Promise<AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream>;
+	}
+}`;
+
+		sekryptHintDisposable = defaults.addExtraLib(
+			sekryptHintTypes,
+			'file:///reactor/typings/sekrypt-hint.d.ts',
+		);
+		sekryptHintJsDisposable = jsDefaults.addExtraLib(
+			sekryptHintTypes,
+			'file:///reactor/typings/sekrypt-hint.js.d.ts',
+		);
 	}
 
 	onMount(() => {
@@ -133,6 +174,18 @@
 		if (reactorTypesDisposable) {
 			reactorTypesDisposable.dispose();
 			reactorTypesDisposable = null;
+		}
+		if (reactorTypesJsDisposable) {
+			reactorTypesJsDisposable.dispose();
+			reactorTypesJsDisposable = null;
+		}
+		if (sekryptHintDisposable) {
+			sekryptHintDisposable.dispose();
+			sekryptHintDisposable = null;
+		}
+		if (sekryptHintJsDisposable) {
+			sekryptHintJsDisposable.dispose();
+			sekryptHintJsDisposable = null;
 		}
 	});
 

@@ -154,31 +154,96 @@ function resolveStatusText(statusCode, fallback = '') {
 	return 'Unknown';
 }
 
-function serializeHttpResponseDataToText(data) {
-	if (typeof data === 'string') {
+function toUtf8Bytes(value) {
+	return new TextEncoder().encode(String(value ?? ''));
+}
+
+function toHttpResponseBytes(data) {
+	if (data instanceof Uint8Array) {
 		return data;
 	}
 
+	if (data instanceof ArrayBuffer) {
+		return new Uint8Array(data);
+	}
+
+	if (typeof data === 'string') {
+		return toUtf8Bytes(data);
+	}
+
 	if (data == null) {
-		return '';
+		return new Uint8Array(0);
 	}
 
 	try {
-		return JSON.stringify(data);
+		return toUtf8Bytes(JSON.stringify(data));
 	} catch {
-		return String(data);
+		return toUtf8Bytes(data);
 	}
 }
 
-async function writeHttpResponseBodyToTempFile(filesystem, responseData) {
-	const random = Math.floor(Math.random() * 1e9).toString(36);
-	const filePath = `reactor/http-responses/response-${Date.now()}-${random}.txt`;
-	await filesystem.writeFile({
-		path: filePath,
-		data: serializeHttpResponseDataToText(responseData),
-		recursive: true,
-	});
-	return filePath;
+function encodeBase64FromBytes(bytes) {
+	if (typeof btoa === 'function') {
+		let binary = '';
+		for (let i = 0; i < bytes.length; i += 1) {
+			binary += String.fromCharCode(bytes[i]);
+		}
+		return btoa(binary);
+	}
+
+	const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+	let out = '';
+	for (let i = 0; i < bytes.length; i += 3) {
+		const a = bytes[i];
+		const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
+		const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
+
+		const triple = (a << 16) | (b << 8) | c;
+		out += alphabet[(triple >> 18) & 63];
+		out += alphabet[(triple >> 12) & 63];
+		out += i + 1 < bytes.length ? alphabet[(triple >> 6) & 63] : '=';
+		out += i + 2 < bytes.length ? alphabet[triple & 63] : '=';
+	}
+
+	return out;
+}
+
+function createHttpResponseBody(responseData) {
+	const bodyBytes = toHttpResponseBytes(responseData);
+	const createReader = () => {
+		let done = false;
+		return {
+			read: async () => {
+				if (done) {
+					return { value: undefined, done: true };
+				}
+				done = true;
+				return { value: bodyBytes, done: false };
+			},
+			releaseLock: () => {},
+		};
+	};
+
+	return {
+		__type: 'ReadableStream',
+		getReader: () => createReader(),
+		[Symbol.asyncIterator]: async function* () {
+			yield bodyBytes;
+		},
+		toString: (encoding = 'utf8') => {
+			const safeEncoding = String(encoding || 'utf8').toLowerCase();
+			if (safeEncoding === 'base64') {
+				return encodeBase64FromBytes(bodyBytes);
+			}
+
+			if (safeEncoding !== 'utf8' && safeEncoding !== 'utf-8') {
+				throw new Error(`Unsupported response.body.toString encoding: ${safeEncoding}`);
+			}
+
+			return new TextDecoder().decode(bodyBytes);
+		},
+		toJSON: () => new TextDecoder().decode(bodyBytes),
+	};
 }
 
 class AndroidFile extends FileAdapter {
@@ -639,7 +704,14 @@ function createAndroidRuntimeApi() {
 				const appVersion = await getAndroidAppVersion();
 
 				let data = null;
-				if (request.body && typeof request.body === 'object' && String(request.body.__type || '') === 'FileHandle') {
+				if (
+					request.body
+					&& typeof request.body === 'object'
+					&& (
+						String(request.body.__type || '') === 'FileHandle'
+						|| String(request.body.__type || '') === 'ReadableStream'
+					)
+				) {
 					data = `@file:${String(request.body.__path || '')}`;
 				} else {
 					data = request.body ?? null;
@@ -654,18 +726,13 @@ function createAndroidRuntimeApi() {
 					readTimeout: timeoutMs,
 				});
 
-				const filesystem = plugins.Filesystem;
-				if (!filesystem || typeof filesystem.writeFile !== 'function') {
-					throw new Error('Capacitor Filesystem plugin unavailable');
-				}
-
-				const bodyPath = await writeHttpResponseBodyToTempFile(filesystem, response.data);
+				const body = createHttpResponseBody(response.data);
 
 				return {
 					statusCode: Number(response.status || 0),
 					statusText: resolveStatusText(response.status, response.statusText),
 					headers: response.headers || {},
-					body: bodyPath,
+					body,
 				};
 			},
 		},

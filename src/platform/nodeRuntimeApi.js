@@ -1,6 +1,5 @@
 const fs = require('fs/promises');
 const fsNative = require('fs');
-const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
@@ -60,15 +59,34 @@ function resolveStatusText(statusCode, fallback = '') {
 	return 'Unknown';
 }
 
-async function writeHttpResponseBodyToTempFile(payloadBuffer) {
-	const baseDir = path.join(os.tmpdir(), 'reactor', 'http-responses');
-	await fs.mkdir(baseDir, { recursive: true });
+function createHttpResponseBody(payloadBuffer) {
+	const bodyBytes = Buffer.isBuffer(payloadBuffer)
+		? payloadBuffer
+		: Buffer.from(payloadBuffer || []);
 
-	const now = Date.now();
-	const random = crypto.randomBytes(6).toString('hex');
-	const filePath = path.join(baseDir, `response-${now}-${random}.bin`);
-	await fs.writeFile(filePath, payloadBuffer);
-	return filePath;
+	const createReader = () => {
+		let done = false;
+		return {
+			read: async () => {
+				if (done) {
+					return { value: undefined, done: true };
+				}
+				done = true;
+				return { value: bodyBytes, done: false };
+			},
+			releaseLock: () => {},
+		};
+	};
+
+	return {
+		__type: 'ReadableStream',
+		getReader: () => createReader(),
+		[Symbol.asyncIterator]: async function* () {
+			yield bodyBytes;
+		},
+		toString: (encoding = 'utf8') => bodyBytes.toString(String(encoding || 'utf8')),
+		toJSON: () => bodyBytes.toString('utf8'),
+	};
 }
 
 function normalizeEpochSeconds(value) {
@@ -274,10 +292,17 @@ function resolveNodeHttpRequestBody(body) {
 		return body;
 	}
 
-	if (body && typeof body === 'object' && String(body.__type || '') === 'FileHandle') {
+	if (
+		body
+		&& typeof body === 'object'
+		&& (
+			String(body.__type || '') === 'FileHandle'
+			|| String(body.__type || '') === 'ReadableStream'
+		)
+	) {
 		const filePath = String(body.__path || '').trim();
 		if (!filePath) {
-			throw new Error('Invalid FileHandle body: missing path');
+			throw new Error('Invalid ReadableStream body: missing path');
 		}
 		return fsNative.createReadStream(filePath);
 	}
@@ -506,12 +531,12 @@ function createNodeRuntimeApi() {
 				try {
 					const response = await fetch(String(request.url || ''), init);
 					const bodyBytes = new Uint8Array(await response.arrayBuffer());
-					const bodyPath = await writeHttpResponseBodyToTempFile(Buffer.from(bodyBytes));
+					const body = createHttpResponseBody(Buffer.from(bodyBytes));
 					return {
 						statusCode: response.status,
 						statusText: resolveStatusText(response.status, response.statusText),
 						headers: Object.fromEntries(response.headers.entries()),
-						body: bodyPath,
+						body,
 					};
 				} finally {
 					if (timer) {

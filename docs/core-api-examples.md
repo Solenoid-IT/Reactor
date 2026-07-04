@@ -45,6 +45,25 @@ for (const relativePath of files)
 }
 ```
 
+## FileSystem: cross-platform readable stream
+
+```ts
+import { FileSystem } from 'core';
+
+const stream = await new FileSystem.ReadableStream('/tmp/inbox/report.bin').open();
+```
+
+## FileSystem: mode-based stream open
+
+```ts
+import { FileSystem } from 'core';
+
+const readable = await FileSystem.File.open('/tmp/inbox/report.bin');
+const writable = await FileSystem.File.open('/tmp/out/report.bin', { mode: 'write' });
+
+await FileSystem.File.copyStream(readable, writable);
+```
+
 ## HttpClient: upload file stream
 
 ```ts
@@ -69,8 +88,11 @@ if (response.statusCode >= 400)
   throw new Error('Upload failed: ' + response.statusCode + ' ' + response.statusText);
 }
 
-// Response body is written to a local file path.
-const bodyStream = await FileSystem.File.open(response.body);
+// Response body is a readable stream-like object.
+const responseText = response.body.toString();
+
+// Response headers are normalized to lowercase and support case-insensitive lookup.
+const contentType = response.headers.get('Content-Type');
 ```
 
 ## Sekrypt: encrypt stream before upload

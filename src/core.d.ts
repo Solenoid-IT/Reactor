@@ -4,6 +4,11 @@ declare module 'core' {
 
 	/** Outgoing HTTP headers map. */
 	export type HeadersMap = Record<string, string>;
+	/** Normalized incoming HTTP headers map (lowercase keys + lookup helper). */
+	export interface NormalizedHeadersMap extends HeadersMap {
+		/** Case-insensitive header lookup. */
+		get(name: string): string | undefined;
+	}
 	/** Incoming HTTP headers map (single, multi, or missing values). */
 	export type IncomingHeadersMap = Record<string, string | string[] | undefined>;
 
@@ -19,16 +24,58 @@ declare module 'core' {
 		url: string;
 	}
 
+	/** Base stream handle used by file APIs. */
+	export interface StreamHandle {
+		/** Internal discriminator used by runtime adapters. */
+		__type?: 'Stream' | 'FileHandle' | 'ReadableStream' | 'WritableStream' | 'HttpResponseBody';
+		/** Open mode (`r` for read streams, `w` for write streams). */
+		mode?: 'r' | 'w';
+		/** Source path associated with the handle when it is file-based. */
+		__path?: string;
+	}
+
+	/** Readable stream handle used by file and HTTP APIs. */
+	export interface ReadableStreamHandle extends StreamHandle, AsyncIterable<Uint8Array | Buffer | string> {
+		/** Internal discriminator used by runtime adapters. */
+		__type?: 'FileHandle' | 'ReadableStream' | 'HttpResponseBody';
+		/** Read mode marker. */
+		mode?: 'r';
+		/** Returns the same readable handle (fluent helper). */
+		open?(): ReadableStreamHandle;
+		/** ReadableStream-style reader accessor. */
+		getReader?(): { read(): Promise<{ value?: Uint8Array | Buffer | string; done: boolean }>; releaseLock?(): void };
+	}
+
+	/** Writable stream handle used by file write operations. */
+	export interface WritableStreamHandle extends StreamHandle {
+		/** Internal discriminator used by runtime adapters. */
+		__type?: 'WritableStream';
+		/** Write mode marker. */
+		mode?: 'w';
+		/** Write one chunk to the destination stream. */
+		write(chunk: Uint8Array | Buffer | string): Promise<void>;
+		/** Close and flush the destination stream. */
+		close(): Promise<void>;
+		/** WritableStream-style writer accessor. */
+		getWriter?(): { write(chunk: Uint8Array | Buffer | string): Promise<void>; close(): Promise<void>; releaseLock?(): void };
+	}
+
+	/** Stream-like HTTP response body that can also be converted to text. */
+	export interface HttpResponseBody extends ReadableStreamHandle {
+		/** Convert full response payload to a string. */
+		toString(encoding?: string): string;
+	}
+
 	/** HTTP response returned by `HttpClient.sendRequest`. */
 	export interface HttpResponse {
 		/** Numeric HTTP status code. */
 		statusCode: number;
 		/** Human-readable status label (for example `OK`, `Not Found`). */
 		statusText: string;
-		/** Normalized response headers. */
-		headers: HeadersMap;
-		/** Local file path that stores response body bytes/text. */
-		body: string;
+		/** Normalized response headers (all lowercase keys). */
+		headers: NormalizedHeadersMap;
+		/** Response body as a readable stream-like object. */
+		body: HttpResponseBody;
 	}
 
 	/** Object that can be converted to a path by FileSystem helpers. */
@@ -122,13 +169,22 @@ declare module 'core' {
 	}
 
 	/** Async readable file handle produced by `File.open`. */
-	export interface FileHandle extends AsyncIterable<Uint8Array | Buffer | string> {
+	export interface FileHandle extends ReadableStreamHandle {
 		/** Internal handle discriminator. */
-		__type: 'FileHandle';
+		__type: 'FileHandle' | 'ReadableStream';
 		/** Source path associated with the handle. */
 		__path: string;
 		/** Returns the same readable handle (fluent helper). */
-		open(): FileHandle;
+		open(): FileHandle | ReadableStreamHandle;
+	}
+
+	/** Readable stream constructor exposed by FileSystem namespace. */
+	export interface ReadableStreamConstructorApi {
+		/** Build a readable stream wrapper for a file path. */
+		new (filePath: PathLike): {
+			/** Open underlying stream in read mode. */
+			open(options?: { chunkSize?: number; encoding?: string }): FileHandle | Promise<FileHandle>;
+		};
 	}
 
 	/** Static file helpers (`File` export and `FileSystem.File`). */
@@ -136,7 +192,7 @@ declare module 'core' {
 		/** Pipe/copy bytes from input stream/iterable to output stream. */
 		copyStream(
 			input: AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream,
-			output: WritableStream<Uint8Array> | NodeJS.WritableStream,
+			output: WritableStreamHandle | WritableStream<Uint8Array> | NodeJS.WritableStream,
 		): Promise<boolean>;
 		/** Delete file by path. */
 		delete(filePath: string): Promise<boolean>;
@@ -149,7 +205,7 @@ declare module 'core' {
 		open(
 			filePath: PathLike,
 			options: { mode: 'write'; append?: boolean },
-		): WritableStream<Uint8Array> | NodeJS.WritableStream;
+		): WritableStreamHandle | WritableStream<Uint8Array> | NodeJS.WritableStream;
 	}
 
 	/** Constructor + static helpers for files. */
@@ -159,7 +215,7 @@ declare module 'core' {
 		/** Pipe/copy bytes from input stream/iterable to output stream. */
 		copyStream(
 			input: AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream,
-			output: WritableStream<Uint8Array> | NodeJS.WritableStream,
+			output: WritableStreamHandle | WritableStream<Uint8Array> | NodeJS.WritableStream,
 		): Promise<boolean>;
 		/** Delete file by path. */
 		delete(filePath: string): Promise<boolean>;
@@ -172,7 +228,7 @@ declare module 'core' {
 		open(
 			filePath: PathLike,
 			options: { mode: 'write'; append?: boolean },
-		): WritableStream<Uint8Array> | NodeJS.WritableStream;
+		): WritableStreamHandle | WritableStream<Uint8Array> | NodeJS.WritableStream;
 	}
 
 	/** Directory instance API (`new FileSystem.Directory(path)`). */
@@ -205,6 +261,8 @@ declare module 'core' {
 	export interface FileSystemApi {
 		/** File constructor + static helpers. */
 		File: FileConstructorApi;
+		/** Constructor for cross-platform readable streams from file paths. */
+		ReadableStream: ReadableStreamConstructorApi;
 		/** Directory constructor. */
 		Directory: new (path: string) => DirectoryApi;
 		/** Path utility helpers. */
@@ -233,9 +291,15 @@ declare module 'core' {
 	export interface SekryptApi {
 		/** Encrypt a readable stream using a public RSA key. */
 		encryptFile(
-			stream: AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream,
+			content: AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream,
 			publicKey: string,
 		): Promise<SekryptFileResult>;
+		/** Decrypt an encrypted readable stream using crypto metadata and an RSA private key. */
+		decryptFile(
+			content: AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream,
+			crypto: object,
+			privateKey: string,
+		): Promise<AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream>;
 		/** Encode crypto metadata object as base64-encoded JSON UTF-8 string. */
 		encodeCrypto(crypto: object): string;
 		/** Decode base64-encoded JSON UTF-8 crypto metadata string. */

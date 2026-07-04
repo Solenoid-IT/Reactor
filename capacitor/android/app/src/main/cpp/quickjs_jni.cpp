@@ -29,6 +29,7 @@ static jmethodID fsDeleteMethod = nullptr;
 static jmethodID fsListMethod = nullptr;
 static jmethodID fsCalcSizeMethod = nullptr;
 static jmethodID encryptFileMethod = nullptr;
+static jmethodID decryptFileMethod = nullptr;
 static pthread_mutex_t opsLock = PTHREAD_MUTEX_INITIALIZER;
 
 // Helper to get JNIEnv
@@ -560,6 +561,48 @@ static JSValue nativeEncryptFile(JSContext *ctx, JSValueConst this_val, int argc
     return ret;
 }
 
+static JSValue nativeDecryptFile(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 3) return JS_NewString(ctx, "{\"ok\":false,\"error\":\"invalid args\"}");
+
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !decryptFileMethod) {
+        LOGE("nativeDecryptFile: Missing JNI context");
+        return JS_NewString(ctx, "{\"ok\":false,\"error\":\"native unavailable\"}");
+    }
+
+    pthread_mutex_lock(&opsLock);
+
+    const char *filePath = JS_ToCString(ctx, argv[0]);
+    const char *cryptoPayload = JS_ToCString(ctx, argv[1]);
+    const char *privateKey = JS_ToCString(ctx, argv[2]);
+    jstring result = NULL;
+
+    if (filePath && cryptoPayload && privateKey) {
+        jstring jfilePath = env->NewStringUTF(filePath);
+        jstring jcryptoPayload = env->NewStringUTF(cryptoPayload);
+        jstring jprivateKey = env->NewStringUTF(privateKey);
+        result = (jstring)env->CallObjectMethod(opsObject, decryptFileMethod, jfilePath, jcryptoPayload, jprivateKey);
+        env->DeleteLocalRef(jfilePath);
+        env->DeleteLocalRef(jcryptoPayload);
+        env->DeleteLocalRef(jprivateKey);
+    }
+
+    const char *result_str = result ? env->GetStringUTFChars(result, NULL) : "{\"ok\":false,\"error\":\"decryption failed\"}";
+    JSValue ret = JS_NewString(ctx, result_str ? result_str : "{\"ok\":false,\"error\":\"decryption failed\"}");
+
+    if (result && result_str) {
+        env->ReleaseStringUTFChars(result, result_str);
+        env->DeleteLocalRef(result);
+    }
+
+    if (filePath) JS_FreeCString(ctx, filePath);
+    if (cryptoPayload) JS_FreeCString(ctx, cryptoPayload);
+    if (privateKey) JS_FreeCString(ctx, privateKey);
+
+    pthread_mutex_unlock(&opsLock);
+    return ret;
+}
+
 // ============ JNI Exported Functions ============
 
 extern "C" {
@@ -737,6 +780,9 @@ Java_com_reactor_app_QuickJsWrapper_registerNativeOps(JNIEnv *env, jobject thiz,
 
     encryptFileMethod = env->GetMethodID(opsClass, "encryptFile", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
     if (!encryptFileMethod) LOGE("Missing method: encryptFile");
+
+    decryptFileMethod = env->GetMethodID(opsClass, "decryptFile", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+    if (!decryptFileMethod) LOGE("Missing method: decryptFile");
     
     env->DeleteLocalRef(opsClass);
     
@@ -760,6 +806,7 @@ Java_com_reactor_app_QuickJsWrapper_registerNativeOps(JNIEnv *env, jobject thiz,
     JS_SetPropertyStr(ctx, nativeObj, "fsList", JS_NewCFunction(ctx, nativeFsList, "fsList", 2));
     JS_SetPropertyStr(ctx, nativeObj, "fsCalcSize", JS_NewCFunction(ctx, nativeFsCalcSize, "fsCalcSize", 1));
     JS_SetPropertyStr(ctx, nativeObj, "encryptFile", JS_NewCFunction(ctx, nativeEncryptFile, "encryptFile", 2));
+    JS_SetPropertyStr(ctx, nativeObj, "decryptFile", JS_NewCFunction(ctx, nativeDecryptFile, "decryptFile", 3));
     
     JS_SetPropertyStr(ctx, global, "__native", nativeObj);
     JS_FreeValue(ctx, global);

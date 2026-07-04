@@ -3803,8 +3803,181 @@ class ReactorRuntime {
 		const httpClient = {
 			...(this.runtimeApi.HttpClient || {}),
 			Request: RequestFactory,
-			sendRequest: (request, timeout = null) => sendRequest(request, timeout),
+			sendRequest: async (request, timeout = null) => {
+				const response = await sendRequest(request, timeout);
+				if (!response || typeof response !== 'object') {
+					return response;
+				}
+
+				const normalizeHeaders = (headers) => {
+					const normalized = Object.create(null);
+					const source = headers && typeof headers === 'object' ? headers : {};
+					for (const [rawName, rawValue] of Object.entries(source)) {
+						const key = String(rawName || '').trim().toLowerCase();
+						if (!key) {
+							continue;
+						}
+
+						if (Array.isArray(rawValue)) {
+							normalized[key] = rawValue.map((value) => String(value == null ? '' : value)).join(', ');
+						} else {
+							normalized[key] = String(rawValue == null ? '' : rawValue);
+						}
+					}
+
+					Object.defineProperty(normalized, 'get', {
+						enumerable: false,
+						value: (name) => {
+							const target = String(name || '').trim().toLowerCase();
+							if (!target) {
+								return undefined;
+							}
+
+							return Object.prototype.hasOwnProperty.call(normalized, target)
+								? normalized[target]
+								: undefined;
+						},
+					});
+
+					return normalized;
+				};
+
+				const normalizedResponse = {
+					...response,
+					headers: normalizeHeaders(response.headers),
+				};
+
+				const responseBody = normalizedResponse.body;
+				if (responseBody && typeof responseBody[Symbol.asyncIterator] === 'function') {
+					return normalizedResponse;
+				}
+
+				if (typeof responseBody === 'string' && fileSystemFacade.Entry.isFile(responseBody)) {
+					return {
+						...normalizedResponse,
+						body: new fileSystemFacade.ReadableStream(responseBody).open(),
+					};
+				}
+
+				return normalizedResponse;
+			},
 		};
+
+		const createReadableFileHandle = (filePath, options = {}) => {
+			const safePath = String(filePath || '').trim();
+			if (!safePath) {
+				throw new Error('ReadableStream requires a file path');
+			}
+
+			const safeOptions = options && typeof options === 'object' ? options : {};
+			const runtimeFileCtor = this.runtimeApi.FileSystem.File;
+			const readHandle = {
+				__type: 'ReadableStream',
+				mode: 'r',
+				__path: safePath,
+				[Symbol.asyncIterator]: async function* () {
+					const fileInstance = new runtimeFileCtor(safePath);
+					const readOptions = { ...safeOptions };
+					delete readOptions.mode;
+					delete readOptions.append;
+
+					if (fileInstance && typeof fileInstance.open === 'function') {
+						const opened = fileInstance.open(readOptions);
+						if (opened && typeof opened[Symbol.asyncIterator] === 'function') {
+							for await (const chunk of opened) {
+								yield chunk;
+							}
+							return;
+						}
+					}
+
+					if (fsNative && typeof fsNative.createReadStream === 'function') {
+						const fallbackStream = fsNative.createReadStream(safePath, readOptions);
+						for await (const chunk of fallbackStream) {
+							yield chunk;
+						}
+						return;
+					}
+
+					throw new Error('File.open not supported on this platform');
+				},
+			};
+
+			readHandle.open = () => readHandle;
+			return readHandle;
+		};
+
+		const createWritableFileHandle = (filePath, options = {}) => {
+			const safePath = String(filePath || '').trim();
+			if (!safePath) {
+				throw new Error('WritableStream requires a file path');
+			}
+
+			if (!fsNative || typeof fsNative.createWriteStream !== 'function') {
+				throw new Error('File.open write mode not supported on this platform');
+			}
+
+			const safeOptions = options && typeof options === 'object' ? options : {};
+			fsNative.mkdirSync(path.dirname(safePath), { recursive: true });
+			const appendMode = Boolean(safeOptions.append);
+			const nativeWriteStream = fsNative.createWriteStream(safePath, {
+				flags: appendMode ? 'a' : 'w',
+			});
+
+			const writableHandle = {
+				__type: 'WritableStream',
+				mode: 'w',
+				__path: safePath,
+				__native: nativeWriteStream,
+				write: async (chunk) => {
+					await new Promise((resolve, reject) => {
+						nativeWriteStream.write(chunk, (error) => {
+							if (error) {
+								reject(error);
+								return;
+							}
+							resolve();
+						});
+					});
+				},
+				close: async () => {
+					await new Promise((resolve, reject) => {
+						nativeWriteStream.end((error) => {
+							if (error) {
+								reject(error);
+								return;
+							}
+							resolve();
+						});
+					});
+				},
+				getWriter: () => ({
+					write: (chunk) => writableHandle.write(chunk),
+					close: () => writableHandle.close(),
+					releaseLock: () => {},
+				}),
+			};
+
+			writableHandle.open = () => writableHandle;
+			return writableHandle;
+		};
+
+		class CoreReadableStream {
+			constructor(filePath) {
+				this.filePath = String(filePath || '').trim();
+				if (!this.filePath) {
+					throw new Error('ReadableStream requires a file path');
+				}
+			}
+
+			open(options = {}) {
+				const safeOptions = options && typeof options === 'object' ? options : {};
+				return createReadableFileHandle(this.filePath, {
+					...safeOptions,
+					mode: 'read',
+				});
+			}
+		}
 
 		const fileFacade = {
 			open: (filePath, options = {}) => {
@@ -3817,55 +3990,24 @@ class ReactorRuntime {
 				const openMode = String(safeOptions.mode || 'read').trim().toLowerCase();
 
 				if (openMode === 'write') {
-					if (!fsNative || typeof fsNative.createWriteStream !== 'function') {
-						throw new Error('File.open write mode not supported on this platform');
-					}
-
-					fsNative.mkdirSync(path.dirname(safePath), { recursive: true });
-					const appendMode = Boolean(safeOptions.append);
-					return fsNative.createWriteStream(safePath, {
-						flags: appendMode ? 'a' : 'w',
-					});
+					return createWritableFileHandle(safePath, safeOptions);
 				}
 
-				const runtimeFileCtor = this.runtimeApi.FileSystem.File;
-				const readHandle = {
-					__type: 'FileHandle',
-					__path: safePath,
-					[Symbol.asyncIterator]: async function* () {
-						const fileInstance = new runtimeFileCtor(safePath);
-						const readOptions = { ...safeOptions };
-						delete readOptions.mode;
-						delete readOptions.append;
-
-						if (fileInstance && typeof fileInstance.open === 'function') {
-							const opened = fileInstance.open(readOptions);
-							if (opened && typeof opened[Symbol.asyncIterator] === 'function') {
-								for await (const chunk of opened) {
-									yield chunk;
-								}
-								return;
-							}
-						}
-
-						if (fsNative && typeof fsNative.createReadStream === 'function') {
-							const fallbackStream = fsNative.createReadStream(safePath, readOptions);
-							for await (const chunk of fallbackStream) {
-								yield chunk;
-							}
-							return;
-						}
-
-						throw new Error('File.open not supported on this platform');
-					},
-				};
-
-				readHandle.open = () => readHandle;
-				return readHandle;
+				return new CoreReadableStream(safePath).open(safeOptions);
 			},
 			copyStream: async (inputStream, outputStream) => {
 				if (!inputStream || !outputStream) {
 					throw new Error('File.copyStream requires input and output streams');
+				}
+
+				if (
+					outputStream
+					&& typeof outputStream === 'object'
+					&& String(outputStream.__type || '') === 'WritableStream'
+					&& outputStream.__native
+				) {
+					await pipeline(inputStream, outputStream.__native);
+					return true;
 				}
 
 				if (typeof outputStream.getWriter === 'function') {
@@ -3907,6 +4049,7 @@ class ReactorRuntime {
 				copyStream: (inputStream, outputStream) => fileFacade.copyStream(inputStream, outputStream),
 				delete: (filePath) => fileFacade.delete(filePath),
 			}),
+			ReadableStream: CoreReadableStream,
 		};
 
 		const resolveWebCrypto = () => {
@@ -3951,26 +4094,17 @@ class ReactorRuntime {
 			return out;
 		};
 
-		const decodePemContent = (pem) => {
+		const decodePemContent = (pem, kind = 'key') => {
 			const stripped = String(pem || '')
-				.replace(/-----BEGIN PUBLIC KEY-----/g, '')
-				.replace(/-----END PUBLIC KEY-----/g, '')
+				.replace(/-----BEGIN [^-]+-----/g, '')
+				.replace(/-----END [^-]+-----/g, '')
 				.replace(/\s+/g, '');
 
 			if (!stripped) {
-				throw new Error('Invalid public key');
+				throw new Error(`Invalid ${kind}`);
 			}
 
-			if (typeof Buffer !== 'undefined') {
-				return new Uint8Array(Buffer.from(stripped, 'base64'));
-			}
-
-			const binary = atob(stripped);
-			const out = new Uint8Array(binary.length);
-			for (let index = 0; index < binary.length; index += 1) {
-				out[index] = binary.charCodeAt(index);
-			}
-			return out;
+			return decodeBase64ToBytes(stripped);
 		};
 
 		const chunkToBytes = (chunk) => {
@@ -4024,7 +4158,7 @@ class ReactorRuntime {
 					total += bytes.byteLength;
 				}
 			} else {
-				throw new Error('Sekrypt.encryptFile requires a readable stream');
+				throw new Error('Sekrypt requires a readable stream');
 			}
 
 			const merged = new Uint8Array(total);
@@ -4054,6 +4188,100 @@ class ReactorRuntime {
 			const bytes = decodeBase64ToBytes(cryptoValue);
 			const json = new TextDecoder().decode(bytes);
 			return JSON.parse(json);
+		};
+
+		const normalizeCryptoMetadata = (cryptoValue) => {
+			if (typeof cryptoValue === 'string') {
+				return decodeCryptoPayload(cryptoValue);
+			}
+
+			if (cryptoValue && typeof cryptoValue === 'object') {
+				return cryptoValue;
+			}
+
+			throw new Error('Sekrypt.decryptFile requires valid crypto metadata');
+		};
+
+		const importPrivateKey = async (subtle, privateKeyPem) => {
+			const privateKeyBytes = decodePemContent(privateKeyPem, 'private key');
+			return subtle.importKey(
+				'pkcs8',
+				privateKeyBytes,
+				{ name: 'RSA-OAEP', hash: 'SHA-256' },
+				false,
+				['decrypt'],
+			);
+		};
+
+		const requireBase64Field = (metadata, key, contextName) => {
+			const value = String(metadata?.[key] || '').trim();
+			if (!value) {
+				throw new Error(`Sekrypt.decryptFile requires ${contextName}`);
+			}
+			return decodeBase64ToBytes(value);
+		};
+
+		const decryptAesGcm = async (subtle, cipherBytes, keyBytes, ivBytes) => {
+			const aesKey = await subtle.importKey(
+				'raw',
+				keyBytes,
+				{ name: 'AES-GCM', length: 256 },
+				false,
+				['decrypt'],
+			);
+
+			return subtle.decrypt(
+				{ name: 'AES-GCM', iv: ivBytes, tagLength: 128 },
+				aesKey,
+				cipherBytes,
+			);
+		};
+
+		const resolveResourceCrypto = async (subtle, cryptoValue, privateKeyPem) => {
+			const metadata = normalizeCryptoMetadata(cryptoValue);
+			const type = String(metadata?.type || '').toLowerCase();
+			const resourceIv = requireBase64Field(metadata, 'resourceIV', 'crypto.resourceIV');
+			const privateKey = await importPrivateKey(subtle, privateKeyPem);
+
+			if (type === 'user') {
+				const encryptedResourceKey = requireBase64Field(metadata, 'encResourceKey', 'crypto.encResourceKey');
+				const resourceKey = await subtle.decrypt(
+					{ name: 'RSA-OAEP' },
+					privateKey,
+					encryptedResourceKey,
+				);
+
+				return {
+					resourceIv,
+					resourceKey: new Uint8Array(resourceKey),
+				};
+			}
+
+			if (type === 'group') {
+				const encryptedGroupKey = requireBase64Field(metadata, 'encGroupKey', 'crypto.encGroupKey');
+				const resourceGroupIv = requireBase64Field(metadata, 'resourceGroupIV', 'crypto.resourceGroupIV');
+				const encryptedResourceGroupKey = requireBase64Field(metadata, 'encResourceGroupKey', 'crypto.encResourceGroupKey');
+
+				const groupKey = await subtle.decrypt(
+					{ name: 'RSA-OAEP' },
+					privateKey,
+					encryptedGroupKey,
+				);
+
+				const resourceKey = await decryptAesGcm(
+					subtle,
+					encryptedResourceGroupKey,
+					new Uint8Array(groupKey),
+					resourceGroupIv,
+				);
+
+				return {
+					resourceIv,
+					resourceKey: new Uint8Array(resourceKey),
+				};
+			}
+
+			throw new Error(`Sekrypt.decryptFile unsupported crypto type: ${type || 'unknown'}`);
 		};
 
 		const encryptionFacade = {
@@ -4103,6 +4331,22 @@ class ReactorRuntime {
 						encResourceKey: encodeBase64(new Uint8Array(encryptedResourceKey)),
 					},
 				};
+			},
+			decryptFile: async (stream, cryptoValue, privateKey) => {
+				const cryptoApi = resolveWebCrypto();
+				const subtle = cryptoApi.subtle;
+
+				const encryptedBytes = await readAllBytesFromStream(stream);
+				const { resourceIv, resourceKey } = await resolveResourceCrypto(subtle, cryptoValue, privateKey);
+
+				const decryptedContent = await decryptAesGcm(
+					subtle,
+					encryptedBytes,
+					resourceKey,
+					resourceIv,
+				);
+
+				return buildSingleChunkStream(new Uint8Array(decryptedContent));
 			},
 		};
 
