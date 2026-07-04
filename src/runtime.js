@@ -13,6 +13,7 @@ const { readWorkingModeConfig, writeWorkingModeConfig } = require('./workingMode
 const { parseScheduleExpression } = require('./scheduleParser');
 const { parseEndpointMetadata } = require('./metadata');
 const { loadEndpointModule } = require('./scriptLoader');
+const { readEnvConfig, writeEnvConfig } = require('./envStore');
 const { NetworkMonitor } = require('./networkMonitor');
 const { createNodePlatformServices } = require('./platform/nodePlatformServices');
 const { createNodeRuntimeApi } = require('./platform/nodeRuntimeApi');
@@ -956,6 +957,8 @@ class ReactorRuntime {
 		this.tlsEnabled = false; // impostato da startHttpServer
 		this.messageQueuePath = path.join(this.reactorRootDir, 'outgoing-message-queue.json');
 		this.messageQueueConfigPath = path.join(this.reactorRootDir, 'message-queue-config.json');
+		this.envDirPath = path.join(this.reactorRootDir, 'envs');
+		this.envMap = Object.freeze({});
 		this.messageQueueTtlMs = this.readQueueDuration('REACTOR_MESSAGE_QUEUE_TTL_MS', DEFAULT_MESSAGE_QUEUE_TTL_MS, 60 * 1000);
 		this.messageQueueRetryMs = this.readQueueDuration('REACTOR_MESSAGE_QUEUE_RETRY_MS', DEFAULT_MESSAGE_QUEUE_RETRY_MS, 5 * 1000);
 		this.watchCreatedPollMs = this.readQueueDuration('REACTOR_WATCH_CREATED_POLL_MS', DEFAULT_WATCH_CREATED_POLL_MS, 250);
@@ -1342,6 +1345,22 @@ class ReactorRuntime {
 	getHttpServerLogs(limit = 100) {
 		const safeLimit = Number(limit) > 0 ? Number(limit) : 100;
 		return this.httpServerLogs.slice(-safeLimit);
+	}
+
+	async getEnvConfig() {
+		return { ...this.envMap };
+	}
+
+	async setEnvConfig(nextConfig) {
+		const saved = await writeEnvConfig(this.reactorRootDir, nextConfig);
+		this.envMap = Object.freeze({ ...saved });
+		return { ...this.envMap };
+	}
+
+	async loadEnvMapFromDisk() {
+		const loaded = await readEnvConfig(this.reactorRootDir);
+		this.envMap = Object.freeze({ ...loaded });
+		return this.envMap;
 	}
 
 	getExchangeConfig() {
@@ -3645,9 +3664,10 @@ class ReactorRuntime {
 		});
 	}
 
-	createEndpointCoreApi(endpointName) {
+	createEndpointCoreApi(endpointName, envConfig = {}) {
 		const requestCtor = this.runtimeApi.HttpClient && this.runtimeApi.HttpClient.Request;
 		const sendRequest = this.runtimeApi.HttpClient && this.runtimeApi.HttpClient.sendRequest;
+		const envEntries = envConfig && typeof envConfig === 'object' && !Array.isArray(envConfig) ? envConfig : {};
 
 		function RequestFactory(method, url, body = null, headers = {}) {
 			return new requestCtor(method, url, body, headers);
@@ -3864,6 +3884,20 @@ class ReactorRuntime {
 				await pipeline(inputStream, outputStream);
 				return true;
 			},
+			delete: async (filePath) => {
+				const safePath = String(filePath || '').trim();
+				if (!safePath) {
+					throw new Error('File.delete requires a file path');
+				}
+
+				const runtimeFileCtor = this.runtimeApi.FileSystem.File;
+				const fileInstance = new runtimeFileCtor(safePath);
+				if (!fileInstance || typeof fileInstance.delete !== 'function') {
+					throw new Error('File.delete not supported on this platform');
+				}
+
+				return Boolean(await fileInstance.delete());
+			},
 		};
 
 		const fileSystemFacade = {
@@ -3871,7 +3905,205 @@ class ReactorRuntime {
 			File: Object.assign(this.runtimeApi.FileSystem.File, {
 				open: (filePath, options = {}) => fileFacade.open(filePath, options),
 				copyStream: (inputStream, outputStream) => fileFacade.copyStream(inputStream, outputStream),
+				delete: (filePath) => fileFacade.delete(filePath),
 			}),
+		};
+
+		const resolveWebCrypto = () => {
+			if (globalThis.crypto && globalThis.crypto.subtle) {
+				return globalThis.crypto;
+			}
+
+			if (crypto.webcrypto && crypto.webcrypto.subtle) {
+				return crypto.webcrypto;
+			}
+
+			throw new Error('Sekrypt API requires WebCrypto support');
+		};
+
+		const encodeBase64 = (bytes) => {
+			if (typeof Buffer !== 'undefined') {
+				return Buffer.from(bytes).toString('base64');
+			}
+
+			let binary = '';
+			for (const byte of bytes) {
+				binary += String.fromCharCode(byte);
+			}
+			return btoa(binary);
+		};
+
+		const decodeBase64ToBytes = (value) => {
+			const normalized = String(value || '').trim();
+			if (!normalized) {
+				return new Uint8Array(0);
+			}
+
+			if (typeof Buffer !== 'undefined') {
+				return new Uint8Array(Buffer.from(normalized, 'base64'));
+			}
+
+			const binary = atob(normalized);
+			const out = new Uint8Array(binary.length);
+			for (let index = 0; index < binary.length; index += 1) {
+				out[index] = binary.charCodeAt(index);
+			}
+			return out;
+		};
+
+		const decodePemContent = (pem) => {
+			const stripped = String(pem || '')
+				.replace(/-----BEGIN PUBLIC KEY-----/g, '')
+				.replace(/-----END PUBLIC KEY-----/g, '')
+				.replace(/\s+/g, '');
+
+			if (!stripped) {
+				throw new Error('Invalid public key');
+			}
+
+			if (typeof Buffer !== 'undefined') {
+				return new Uint8Array(Buffer.from(stripped, 'base64'));
+			}
+
+			const binary = atob(stripped);
+			const out = new Uint8Array(binary.length);
+			for (let index = 0; index < binary.length; index += 1) {
+				out[index] = binary.charCodeAt(index);
+			}
+			return out;
+		};
+
+		const chunkToBytes = (chunk) => {
+			if (chunk instanceof Uint8Array) {
+				return chunk;
+			}
+
+			if (typeof Buffer !== 'undefined' && Buffer.isBuffer(chunk)) {
+				return new Uint8Array(chunk);
+			}
+
+			if (chunk instanceof ArrayBuffer) {
+				return new Uint8Array(chunk);
+			}
+
+			if (ArrayBuffer.isView(chunk)) {
+				return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+			}
+
+			if (typeof chunk === 'string') {
+				return new TextEncoder().encode(chunk);
+			}
+
+			return new TextEncoder().encode(String(chunk ?? ''));
+		};
+
+		const readAllBytesFromStream = async (stream) => {
+			const chunks = [];
+			let total = 0;
+
+			if (stream && typeof stream.getReader === 'function') {
+				const reader = stream.getReader();
+				try {
+					while (true) {
+						const { value, done } = await reader.read();
+						if (done) {
+							break;
+						}
+
+						const bytes = chunkToBytes(value);
+						chunks.push(bytes);
+						total += bytes.byteLength;
+					}
+				} finally {
+					reader.releaseLock();
+				}
+			} else if (stream && typeof stream[Symbol.asyncIterator] === 'function') {
+				for await (const chunk of stream) {
+					const bytes = chunkToBytes(chunk);
+					chunks.push(bytes);
+					total += bytes.byteLength;
+				}
+			} else {
+				throw new Error('Sekrypt.encryptFile requires a readable stream');
+			}
+
+			const merged = new Uint8Array(total);
+			let offset = 0;
+			for (const chunk of chunks) {
+				merged.set(chunk, offset);
+				offset += chunk.byteLength;
+			}
+
+			return merged;
+		};
+
+		const buildSingleChunkStream = (bytes) => ({
+			__type: 'EncryptedStream',
+			async *[Symbol.asyncIterator]() {
+				yield bytes;
+			},
+		});
+
+		const encodeCryptoPayload = (cryptoValue) => {
+			const json = JSON.stringify(cryptoValue);
+			const bytes = new TextEncoder().encode(json);
+			return encodeBase64(bytes);
+		};
+
+		const decodeCryptoPayload = (cryptoValue) => {
+			const bytes = decodeBase64ToBytes(cryptoValue);
+			const json = new TextDecoder().decode(bytes);
+			return JSON.parse(json);
+		};
+
+		const encryptionFacade = {
+			encodeCrypto: (cryptoValue) => encodeCryptoPayload(cryptoValue),
+			decodeCrypto: (cryptoValue) => decodeCryptoPayload(cryptoValue),
+			encryptFile: async (stream, publicKey) => {
+				const cryptoApi = resolveWebCrypto();
+				const subtle = cryptoApi.subtle;
+
+				const plainBytes = await readAllBytesFromStream(stream);
+				const publicKeyBytes = decodePemContent(publicKey);
+
+				const importedPublicKey = await subtle.importKey(
+					'spki',
+					publicKeyBytes,
+					{ name: 'RSA-OAEP', hash: 'SHA-256' },
+					false,
+					['encrypt'],
+				);
+
+				const aesKey = await subtle.generateKey(
+					{ name: 'AES-GCM', length: 256 },
+					true,
+					['encrypt', 'decrypt'],
+				);
+
+				const rawAesKey = await subtle.exportKey('raw', aesKey);
+				const resourceIv = cryptoApi.getRandomValues(new Uint8Array(12));
+
+				const encryptedContent = await subtle.encrypt(
+					{ name: 'AES-GCM', iv: resourceIv, tagLength: 128 },
+					aesKey,
+					plainBytes,
+				);
+
+				const encryptedResourceKey = await subtle.encrypt(
+					{ name: 'RSA-OAEP' },
+					importedPublicKey,
+					rawAesKey,
+				);
+
+				return {
+					content: buildSingleChunkStream(new Uint8Array(encryptedContent)),
+					crypto: {
+						type: 'user',
+						resourceIV: encodeBase64(resourceIv),
+						encResourceKey: encodeBase64(new Uint8Array(encryptedResourceKey)),
+					},
+				};
+			},
 		};
 
 		const normalizeEventPath = (rawPath) => normalizeWatchEventPath(rawPath);
@@ -4169,10 +4401,25 @@ class ReactorRuntime {
 			api: this.runtimeApi,
 			FileSystem: fileSystemFacade,
 			HttpClient: httpClient,
+			Sekrypt: encryptionFacade,
 			Unit: unitApi,
 			Time: timeApi,
 			Device: this.runtimeApi.Device,
 			System: this.runtimeApi.System,
+			Env: {
+				get: (name, defaultValue = '') => {
+					const safeName = String(name || '').trim();
+					if (!safeName) {
+						return String(defaultValue == null ? '' : defaultValue);
+					}
+
+					if (Object.prototype.hasOwnProperty.call(envEntries, safeName)) {
+						return String(envEntries[safeName] == null ? '' : envEntries[safeName]);
+					}
+
+					return String(defaultValue == null ? '' : defaultValue);
+				},
+			},
 			log: async (message) => {
 				this.log(`${endpointName}: ${message}`);
 			},
@@ -4522,6 +4769,7 @@ class ReactorRuntime {
 		await this.loadMessageQueueConfig();
 		await fs.mkdir(this.endpointsDir, { recursive: true });
 		await fs.mkdir(this.streamStorageDir, { recursive: true });
+		await this.loadEnvMapFromDisk();
 		await this.cleanupOrphanStreamFiles();
 		this.startStreamCleanupTimer();
 		await this.getReactorName();
@@ -4577,6 +4825,7 @@ class ReactorRuntime {
 
 		try {
 			this.clearSchedules();
+			await this.loadEnvMapFromDisk();
 
 			await this.discoverEndpoints();
 			this.setupSchedules();
@@ -4690,6 +4939,7 @@ class ReactorRuntime {
 	}
 
 	async discoverEndpoints() {
+		const envConfig = this.envMap;
 		this.endpoints = [];
 		this.eventMap.clear();
 		this.messageListenerMap.clear();
@@ -4718,7 +4968,7 @@ class ReactorRuntime {
 				const displayName = isProjectBootEndpoint ? path.basename(endpointDir) : path.basename(endpointPath);
 				const projectDir = isProjectEndpoint ? endpointDir : null;
 				const endpointId = projectDir ? await this.ensureProjectEndpointId(projectDir) : null;
-				const coreApi = this.createEndpointCoreApi(displayName);
+				const coreApi = this.createEndpointCoreApi(displayName, envConfig);
 				const moduleExports = loadEndpointModule(endpointPath, source, {
 					virtualModules: {
 						core: coreApi,

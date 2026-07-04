@@ -23,6 +23,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.util.Base64;
+import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
 
@@ -110,6 +111,7 @@ public class ReactorHttpService extends Service {
     public static final String PREF_MESSAGE_QUEUE_RETRY_MS = "messageQueueRetryMs";
     public static final int DEFAULT_PORT = 7070;
     private static final String WORKING_MODE_FILE = "working-mode.json";
+    private static final String ENV_DIR = "envs";
 
     private static final String CHANNEL_ID = "reactor_http_channel";
     private static final String ENDPOINT_NOTIFY_CHANNEL_ID = "reactor_endpoint_notify_channel";
@@ -149,6 +151,8 @@ public class ReactorHttpService extends Service {
     private static volatile P2PSignalListener p2pSignalListener = null;
     private static ReactorHttpService instance = null;
     private static volatile boolean stopRequestedByUser = false;
+    private static final Object envCacheLock = new Object();
+    private static volatile JSONObject envCacheMap = new JSONObject();
 
     private final ExecutorService clientPool = Executors.newCachedThreadPool();
     private ServerSocket serverSocket;
@@ -875,6 +879,105 @@ public class ReactorHttpService extends Service {
             return new File(getFilesDir(), WORKING_MODE_FILE);
         }
 
+        private File getEnvDir() {
+            File envDir = new File(getFilesDir(), ENV_DIR);
+            if (!envDir.exists()) {
+                envDir.mkdirs();
+            }
+            return envDir;
+        }
+
+        private JSONObject copyJsonObject(JSONObject source) {
+            if (source == null) {
+                return new JSONObject();
+            }
+
+            try {
+                return new JSONObject(source.toString());
+            } catch (Exception ignored) {
+                return new JSONObject();
+            }
+        }
+
+        private JSONObject readEnvMapFromDisk() {
+            JSONObject envs = new JSONObject();
+
+            try {
+                File envDir = getEnvDir();
+                File[] entries = envDir.listFiles();
+
+                if (entries == null) {
+                    return envs;
+                }
+
+                for (File entry : entries) {
+                    if (entry == null || !entry.isFile()) {
+                        continue;
+                    }
+
+                    String name = String.valueOf(entry.getName() == null ? "" : entry.getName()).trim();
+                    if (name.isEmpty() || name.contains("/") || name.contains("\\") || "..".equals(name) || ".".equals(name)) {
+                        continue;
+                    }
+
+                    try {
+                        envs.put(name, new String(Files.readAllBytes(entry.toPath()), StandardCharsets.UTF_8));
+                    } catch (Exception perEntryError) {
+                        Log.e("SCRIPT_ENGINE", "ENV_READ_ENTRY_ERROR name=" + name + " message=" + perEntryError.getMessage(), perEntryError);
+                    }
+                }
+            } catch (Exception ignored) {
+                return new JSONObject();
+            }
+
+            return envs;
+        }
+
+        private JSONObject getEnvCacheSnapshot() {
+            synchronized (envCacheLock) {
+                return copyJsonObject(envCacheMap);
+            }
+        }
+
+        private void refreshEnvCacheFromDisk(String reason) {
+            JSONObject loaded = readEnvMapFromDisk();
+            synchronized (envCacheLock) {
+                envCacheMap = copyJsonObject(loaded);
+            }
+
+            try {
+                File envDir = getEnvDir();
+                JSONObject payload = new JSONObject();
+                payload.put("reason", String.valueOf(reason == null ? "" : reason));
+                payload.put("path", envDir.getAbsolutePath());
+                payload.put("envCount", getEnvCacheSnapshot().length());
+                Log.d("SCRIPT_ENGINE", "ENV_STARTUP_SNAPSHOT: " + payload.toString());
+            } catch (Exception error) {
+                Log.e("SCRIPT_ENGINE", "ENV_STARTUP_SNAPSHOT_ERROR: " + error.getMessage(), error);
+            }
+        }
+
+    public static void refreshEnvCacheNow(String reason) {
+        if (instance != null) {
+            instance.refreshEnvCacheFromDisk(reason);
+        }
+    }
+
+    public static JSObject getEnvCacheSnapshotForUi() {
+        JSObject payload = new JSObject();
+        if (instance == null) {
+            payload.put("ok", false);
+            payload.put("path", "");
+            payload.put("envs", new JSObject());
+            return payload;
+        }
+
+        payload.put("ok", true);
+        payload.put("path", instance.getEnvDir().getAbsolutePath());
+        payload.put("envs", instance.getEnvCacheSnapshot());
+        return payload;
+    }
+
         private String readExchangeToken() {
             try {
                 File workingModeFile = getWorkingModeFile();
@@ -994,6 +1097,7 @@ public class ReactorHttpService extends Service {
         instance = this;
         createNotificationChannel();
         createEndpointNotificationChannel();
+        refreshEnvCacheFromDisk("service-onCreate");
         ReactorServiceWatchdogWorker.schedule(getApplicationContext());
     }
 
@@ -1009,6 +1113,7 @@ public class ReactorHttpService extends Service {
         }
 
         stopRequestedByUser = false;
+    refreshEnvCacheFromDisk("service-onStartCommand");
 
         int requestedPort = readConfiguredPort(intent);
         currentPort = requestedPort;
@@ -3858,6 +3963,26 @@ public class ReactorHttpService extends Service {
 
     private void executeEndpointActions(MessageEndpoint endpoint, String messageBody, Map<String, String> incomingHeaders, Map<String, String> eventContext) {
         // ── QuickJS execution: TS → sucrase → CommonJS JS → run(event) ──────────
+        refreshEnvCacheFromDisk("before-endpoint-exec:" + String.valueOf(endpoint != null ? endpoint.endpointName : "unknown"));
+        JSONObject envSnapshotForScript = getEnvCacheSnapshot();
+        if (envSnapshotForScript.length() == 0) {
+            JSONObject diskSnapshot = readEnvMapFromDisk();
+            if (diskSnapshot.length() > 0) {
+                synchronized (envCacheLock) {
+                    envCacheMap = copyJsonObject(diskSnapshot);
+                }
+                envSnapshotForScript = copyJsonObject(diskSnapshot);
+            }
+        }
+        final JSONObject effectiveEnvSnapshot = copyJsonObject(envSnapshotForScript);
+        try {
+            appendProjectLog(endpoint, buildReadableGlobalLogLine(
+                    "SCRIPT_LOG",
+                    "ENV_CACHE_BEFORE_ENGINE path=" + getEnvDir().getAbsolutePath() + " envCount=" + effectiveEnvSnapshot.length()
+            ));
+        } catch (Exception ignored) {
+            // Best-effort diagnostic logging.
+        }
         String trigger = incomingHeaders != null ? incomingHeaders.getOrDefault("x-reactor-trigger", "") : "";
         if (trigger.isEmpty() && eventContext != null) {
             trigger = eventContext.getOrDefault("event.type", "");
@@ -3880,6 +4005,7 @@ public class ReactorHttpService extends Service {
 
         ReactorScriptOps ops = new ReactorScriptOps() {
             @Override public void log(String message) {
+                Log.d("SCRIPT_ENGINE", "SCRIPT_LOG: " + String.valueOf(message == null ? "" : message));
                 appendProjectLog(endpoint, buildReadableGlobalLogLine("SCRIPT_LOG", message));
             }
 
@@ -3913,6 +4039,24 @@ public class ReactorHttpService extends Service {
                     return out.toString();
                 } catch (Exception error) {
                     return "{\"exists\":false,\"isFile\":false,\"isDirectory\":false,\"size\":0,\"mTime\":0,\"cTime\":0}";
+                }
+            }
+
+            @Override public boolean fsDelete(String path) {
+                try {
+                    String safePath = String.valueOf(path == null ? "" : path).trim();
+                    if (safePath.isEmpty()) {
+                        return false;
+                    }
+
+                    File target = new File(safePath);
+                    if (!target.exists() || !target.isFile()) {
+                        return false;
+                    }
+
+                    return target.delete();
+                } catch (Exception error) {
+                    return false;
                 }
             }
 
@@ -3990,6 +4134,103 @@ public class ReactorHttpService extends Service {
                     return Math.max(0L, total[0]);
                 } catch (Exception error) {
                     return 0L;
+                }
+            }
+
+            @Override public String encryptFile(String filePath, String publicKey) {
+                try {
+                    String safePath = String.valueOf(filePath == null ? "" : filePath).trim();
+                    String safePublicKey = String.valueOf(publicKey == null ? "" : publicKey).trim();
+                    if (safePath.isEmpty()) {
+                        throw new IllegalArgumentException("file path is required");
+                    }
+                    if (safePublicKey.isEmpty()) {
+                        throw new IllegalArgumentException("public key is required");
+                    }
+
+                    File sourceFile = new File(safePath);
+                    if (!sourceFile.exists() || !sourceFile.isFile()) {
+                        throw new IllegalArgumentException("source file not found");
+                    }
+
+                    byte[] plainBytes = Files.readAllBytes(sourceFile.toPath());
+
+                    // Accept both plain PEM/base64 keys and JSON payloads that carry a key field.
+                    String extractedKey = safePublicKey;
+                    try {
+                        if (extractedKey.startsWith("{") && extractedKey.endsWith("}")) {
+                            JSONObject keyEnvelope = new JSONObject(extractedKey);
+                            String candidate = "";
+                            if (candidate.isEmpty()) candidate = String.valueOf(keyEnvelope.optString("publicKey", "")).trim();
+                            if (candidate.isEmpty()) candidate = String.valueOf(keyEnvelope.optString("public_key", "")).trim();
+                            if (candidate.isEmpty()) candidate = String.valueOf(keyEnvelope.optString("key", "")).trim();
+                            if (candidate.isEmpty()) candidate = String.valueOf(keyEnvelope.optString("data", "")).trim();
+                            if (!candidate.isEmpty()) {
+                                extractedKey = candidate;
+                            }
+                        }
+                    } catch (Exception ignored) {
+                        // Keep original key value when payload is not JSON.
+                    }
+
+                    if (extractedKey.length() >= 2 && extractedKey.startsWith("\"") && extractedKey.endsWith("\"")) {
+                        extractedKey = extractedKey.substring(1, extractedKey.length() - 1);
+                    }
+                    extractedKey = extractedKey.replace("\\n", "\n").trim();
+
+                    String normalizedPem = extractedKey
+                        .replace("-----BEGIN PUBLIC KEY-----", "")
+                        .replace("-----END PUBLIC KEY-----", "")
+                        .replaceAll("\\s+", "");
+                    if (normalizedPem.isEmpty()) {
+                        throw new IllegalArgumentException("invalid public key");
+                    }
+
+                    byte[] publicKeyBytes = Base64.decode(normalizedPem, Base64.DEFAULT);
+                    java.security.spec.X509EncodedKeySpec publicKeySpec = new java.security.spec.X509EncodedKeySpec(publicKeyBytes);
+                    java.security.PublicKey rsaPublicKey = java.security.KeyFactory.getInstance("RSA").generatePublic(publicKeySpec);
+
+                    javax.crypto.KeyGenerator keyGenerator = javax.crypto.KeyGenerator.getInstance("AES");
+                    keyGenerator.init(256);
+                    javax.crypto.SecretKey aesKey = keyGenerator.generateKey();
+
+                    byte[] iv = new byte[12];
+                    new SecureRandom().nextBytes(iv);
+
+                    javax.crypto.Cipher aesCipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+                    aesCipher.init(
+                        javax.crypto.Cipher.ENCRYPT_MODE,
+                        aesKey,
+                        new javax.crypto.spec.GCMParameterSpec(128, iv)
+                    );
+                    byte[] encryptedContent = aesCipher.doFinal(plainBytes);
+
+                    javax.crypto.Cipher rsaCipher = javax.crypto.Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");
+                    rsaCipher.init(javax.crypto.Cipher.ENCRYPT_MODE, rsaPublicKey);
+                    byte[] encryptedResourceKey = rsaCipher.doFinal(aesKey.getEncoded());
+
+                    File encryptedDir = new File(getCacheDir(), "reactor/encrypted");
+                    if (!encryptedDir.exists() && !encryptedDir.mkdirs()) {
+                        throw new IOException("unable to create encrypted cache directory");
+                    }
+
+                    File encryptedFile = new File(encryptedDir, "enc-" + System.currentTimeMillis() + "-" + UUID.randomUUID() + ".bin");
+                    Files.write(encryptedFile.toPath(), encryptedContent);
+
+                    JSONObject cryptoObject = new JSONObject();
+                    cryptoObject.put("type", "user");
+                    cryptoObject.put("resourceIV", Base64.encodeToString(iv, Base64.NO_WRAP));
+                    cryptoObject.put("encResourceKey", Base64.encodeToString(encryptedResourceKey, Base64.NO_WRAP));
+
+                    JSONObject response = new JSONObject();
+                    response.put("ok", true);
+                    response.put("contentPath", encryptedFile.getAbsolutePath());
+                    response.put("contentSize", encryptedContent.length);
+                    response.put("crypto", cryptoObject);
+                    return response.toString();
+                } catch (Exception error) {
+                    String message = error.getMessage() != null ? error.getMessage() : "encryption failed";
+                    return "{\"ok\":false,\"error\":" + JSONObject.quote(message) + "}";
                 }
             }
 
@@ -4132,6 +4373,18 @@ public class ReactorHttpService extends Service {
                     return result.toString();
                 } catch (Exception e) {
                     return "{\"lat\":null,\"lon\":null,\"available\":false}";
+                }
+            }
+
+            @Override public String getEnvConfig() {
+                try {
+                    JSONObject response = new JSONObject();
+                    response.put("envs", effectiveEnvSnapshot);
+                    Log.d("SCRIPT_ENGINE", "ENV_DEBUG_MAP: envCount=" + effectiveEnvSnapshot.length());
+                    return response.toString();
+                } catch (Exception e) {
+                    Log.e("SCRIPT_ENGINE", "ENV_DEBUG_MAP_ERROR: " + e.getMessage(), e);
+                    return "{\"envs\":{}}";
                 }
             }
 

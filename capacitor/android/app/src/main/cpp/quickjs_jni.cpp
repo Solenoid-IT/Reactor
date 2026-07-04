@@ -18,13 +18,17 @@ static jmethodID deviceNotifyMethod = nullptr;
 static jmethodID copyStreamMethod = nullptr;
 static jmethodID getHomeDirectoryMethod = nullptr;
 static jmethodID getNetworkStatusMethod = nullptr;
+static jmethodID getGeoLocationMethod = nullptr;
+static jmethodID getEnvConfigMethod = nullptr;
 static jmethodID nodeStreamMethod = nullptr;
 static jmethodID nodeSendMessageMethod = nullptr;
 static jmethodID sendHttpRequestMethod = nullptr;
 static jmethodID spawnProcessMethod = nullptr;
 static jmethodID fsStatMethod = nullptr;
+static jmethodID fsDeleteMethod = nullptr;
 static jmethodID fsListMethod = nullptr;
 static jmethodID fsCalcSizeMethod = nullptr;
+static jmethodID encryptFileMethod = nullptr;
 static pthread_mutex_t opsLock = PTHREAD_MUTEX_INITIALIZER;
 
 // Helper to get JNIEnv
@@ -41,6 +45,43 @@ static void releaseJniEnv(JNIEnv *env) {
     if (jvm) {
         jvm->DetachCurrentThread();
     }
+}
+
+// Run pending QuickJS jobs (Promise microtasks) so async/await can progress.
+static bool drainPendingJobs(JSContext *ctx) {
+    if (!ctx) {
+        return false;
+    }
+
+    JSRuntime *rt = JS_GetRuntime(ctx);
+    if (!rt) {
+        return false;
+    }
+
+    int executed = 0;
+    while (JS_IsJobPending(rt)) {
+        JSContext *jobCtx = nullptr;
+        int rc = JS_ExecutePendingJob(rt, &jobCtx);
+        if (rc < 0) {
+            JSContext *errCtx = jobCtx ? jobCtx : ctx;
+            JSValue exception = JS_GetException(errCtx);
+            const char *error_msg = JS_ToCString(errCtx, exception);
+            LOGE("drainPendingJobs: Error: %s", error_msg ? error_msg : "unknown");
+            if (error_msg) {
+                JS_FreeCString(errCtx, error_msg);
+            }
+            JS_FreeValue(errCtx, exception);
+            return false;
+        }
+
+        executed += 1;
+        if (executed > 10000) {
+            LOGE("drainPendingJobs: Aborted after too many jobs");
+            break;
+        }
+    }
+
+    return true;
 }
 
 // ============ Native Functions for JavaScript ============
@@ -162,6 +203,50 @@ static JSValue nativeGetNetworkStatus(JSContext *ctx, JSValueConst this_val, int
         env->DeleteLocalRef(result);
     }
     
+    pthread_mutex_unlock(&opsLock);
+    return ret;
+}
+
+static JSValue nativeGetGeoLocation(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !getGeoLocationMethod) {
+        LOGE("nativeGetGeoLocation: Missing JNI context");
+        return JS_NewString(ctx, "{\"lat\":null,\"lon\":null,\"available\":false}");
+    }
+
+    pthread_mutex_lock(&opsLock);
+
+    jstring result = (jstring)env->CallObjectMethod(opsObject, getGeoLocationMethod);
+    const char *status = result ? env->GetStringUTFChars(result, NULL) : "{\"lat\":null,\"lon\":null,\"available\":false}";
+    JSValue ret = JS_NewString(ctx, status ? status : "{\"lat\":null,\"lon\":null,\"available\":false}");
+
+    if (result && status) {
+        env->ReleaseStringUTFChars(result, status);
+        env->DeleteLocalRef(result);
+    }
+
+    pthread_mutex_unlock(&opsLock);
+    return ret;
+}
+
+static JSValue nativeGetEnvConfig(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !getEnvConfigMethod) {
+        LOGE("nativeGetEnvConfig: Missing JNI context");
+        return JS_NewString(ctx, "{\"envs\":{}}");
+    }
+
+    pthread_mutex_lock(&opsLock);
+
+    jstring result = (jstring)env->CallObjectMethod(opsObject, getEnvConfigMethod);
+    const char *status = result ? env->GetStringUTFChars(result, NULL) : "{\"envs\":{}}";
+    JSValue ret = JS_NewString(ctx, status ? status : "{\"envs\":{}}");
+
+    if (result && status) {
+        env->ReleaseStringUTFChars(result, status);
+        env->DeleteLocalRef(result);
+    }
+
     pthread_mutex_unlock(&opsLock);
     return ret;
 }
@@ -355,6 +440,30 @@ static JSValue nativeFsStat(JSContext *ctx, JSValueConst this_val, int argc, JSV
     return ret;
 }
 
+static JSValue nativeFsDelete(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_FALSE;
+
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !fsDeleteMethod) {
+        LOGE("nativeFsDelete: Missing JNI context");
+        return JS_FALSE;
+    }
+
+    pthread_mutex_lock(&opsLock);
+
+    const char *path = JS_ToCString(ctx, argv[0]);
+    jboolean result = JNI_FALSE;
+    if (path) {
+        jstring jpath = env->NewStringUTF(path);
+        result = env->CallBooleanMethod(opsObject, fsDeleteMethod, jpath);
+        env->DeleteLocalRef(jpath);
+        JS_FreeCString(ctx, path);
+    }
+
+    pthread_mutex_unlock(&opsLock);
+    return result ? JS_TRUE : JS_FALSE;
+}
+
 static JSValue nativeFsList(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     if (argc < 2) return JS_NewString(ctx, "[]");
 
@@ -411,6 +520,44 @@ static JSValue nativeFsCalcSize(JSContext *ctx, JSValueConst this_val, int argc,
 
     pthread_mutex_unlock(&opsLock);
     return JS_NewInt64(ctx, (int64_t)size);
+}
+
+static JSValue nativeEncryptFile(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_NewString(ctx, "{\"ok\":false,\"error\":\"invalid args\"}");
+
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !encryptFileMethod) {
+        LOGE("nativeEncryptFile: Missing JNI context");
+        return JS_NewString(ctx, "{\"ok\":false,\"error\":\"native unavailable\"}");
+    }
+
+    pthread_mutex_lock(&opsLock);
+
+    const char *filePath = JS_ToCString(ctx, argv[0]);
+    const char *publicKey = JS_ToCString(ctx, argv[1]);
+    jstring result = NULL;
+
+    if (filePath && publicKey) {
+        jstring jfilePath = env->NewStringUTF(filePath);
+        jstring jpublicKey = env->NewStringUTF(publicKey);
+        result = (jstring)env->CallObjectMethod(opsObject, encryptFileMethod, jfilePath, jpublicKey);
+        env->DeleteLocalRef(jfilePath);
+        env->DeleteLocalRef(jpublicKey);
+    }
+
+    const char *result_str = result ? env->GetStringUTFChars(result, NULL) : "{\"ok\":false,\"error\":\"encryption failed\"}";
+    JSValue ret = JS_NewString(ctx, result_str ? result_str : "{\"ok\":false,\"error\":\"encryption failed\"}");
+
+    if (result && result_str) {
+        env->ReleaseStringUTFChars(result, result_str);
+        env->DeleteLocalRef(result);
+    }
+
+    if (filePath) JS_FreeCString(ctx, filePath);
+    if (publicKey) JS_FreeCString(ctx, publicKey);
+
+    pthread_mutex_unlock(&opsLock);
+    return ret;
 }
 
 // ============ JNI Exported Functions ============
@@ -557,6 +704,12 @@ Java_com_reactor_app_QuickJsWrapper_registerNativeOps(JNIEnv *env, jobject thiz,
     
     getNetworkStatusMethod = env->GetMethodID(opsClass, "getNetworkStatus", "()Ljava/lang/String;");
     if (!getNetworkStatusMethod) LOGE("Missing method: getNetworkStatus");
+
+    getGeoLocationMethod = env->GetMethodID(opsClass, "getGeoLocation", "()Ljava/lang/String;");
+    if (!getGeoLocationMethod) LOGE("Missing method: getGeoLocation");
+
+    getEnvConfigMethod = env->GetMethodID(opsClass, "getEnvConfig", "()Ljava/lang/String;");
+    if (!getEnvConfigMethod) LOGE("Missing method: getEnvConfig");
     
     nodeStreamMethod = env->GetMethodID(opsClass, "nodeStream", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
     if (!nodeStreamMethod) LOGE("Missing method: nodeStream");
@@ -573,11 +726,17 @@ Java_com_reactor_app_QuickJsWrapper_registerNativeOps(JNIEnv *env, jobject thiz,
     fsStatMethod = env->GetMethodID(opsClass, "fsStat", "(Ljava/lang/String;)Ljava/lang/String;");
     if (!fsStatMethod) LOGE("Missing method: fsStat");
 
+    fsDeleteMethod = env->GetMethodID(opsClass, "fsDelete", "(Ljava/lang/String;)Z");
+    if (!fsDeleteMethod) LOGE("Missing method: fsDelete");
+
     fsListMethod = env->GetMethodID(opsClass, "fsList", "(Ljava/lang/String;Z)Ljava/lang/String;");
     if (!fsListMethod) LOGE("Missing method: fsList");
 
     fsCalcSizeMethod = env->GetMethodID(opsClass, "fsCalcSize", "(Ljava/lang/String;)J");
     if (!fsCalcSizeMethod) LOGE("Missing method: fsCalcSize");
+
+    encryptFileMethod = env->GetMethodID(opsClass, "encryptFile", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+    if (!encryptFileMethod) LOGE("Missing method: encryptFile");
     
     env->DeleteLocalRef(opsClass);
     
@@ -590,13 +749,17 @@ Java_com_reactor_app_QuickJsWrapper_registerNativeOps(JNIEnv *env, jobject thiz,
     JS_SetPropertyStr(ctx, nativeObj, "copyStream", JS_NewCFunction(ctx, nativeCopyStream, "copyStream", 2));
     JS_SetPropertyStr(ctx, nativeObj, "getHomeDirectory", JS_NewCFunction(ctx, nativeGetHomeDirectory, "getHomeDirectory", 0));
     JS_SetPropertyStr(ctx, nativeObj, "getNetworkStatus", JS_NewCFunction(ctx, nativeGetNetworkStatus, "getNetworkStatus", 0));
+    JS_SetPropertyStr(ctx, nativeObj, "getGeoLocation", JS_NewCFunction(ctx, nativeGetGeoLocation, "getGeoLocation", 0));
+    JS_SetPropertyStr(ctx, nativeObj, "getEnvConfig", JS_NewCFunction(ctx, nativeGetEnvConfig, "getEnvConfig", 0));
     JS_SetPropertyStr(ctx, nativeObj, "nodeStream", JS_NewCFunction(ctx, nativeNodeStream, "nodeStream", 3));
     JS_SetPropertyStr(ctx, nativeObj, "nodeSendMessage", JS_NewCFunction(ctx, nativeNodeSendMessage, "nodeSendMessage", 3));
     JS_SetPropertyStr(ctx, nativeObj, "sendHttpRequest", JS_NewCFunction(ctx, nativeSendHttpRequest, "sendHttpRequest", 5));
     JS_SetPropertyStr(ctx, nativeObj, "spawnProcess", JS_NewCFunction(ctx, nativeSpawnProcess, "spawnProcess", 1));
     JS_SetPropertyStr(ctx, nativeObj, "fsStat", JS_NewCFunction(ctx, nativeFsStat, "fsStat", 1));
+    JS_SetPropertyStr(ctx, nativeObj, "fsDelete", JS_NewCFunction(ctx, nativeFsDelete, "fsDelete", 1));
     JS_SetPropertyStr(ctx, nativeObj, "fsList", JS_NewCFunction(ctx, nativeFsList, "fsList", 2));
     JS_SetPropertyStr(ctx, nativeObj, "fsCalcSize", JS_NewCFunction(ctx, nativeFsCalcSize, "fsCalcSize", 1));
+    JS_SetPropertyStr(ctx, nativeObj, "encryptFile", JS_NewCFunction(ctx, nativeEncryptFile, "encryptFile", 2));
     
     JS_SetPropertyStr(ctx, global, "__native", nativeObj);
     JS_FreeValue(ctx, global);
@@ -656,7 +819,8 @@ Java_com_reactor_app_QuickJsWrapper_evaluateScript(JNIEnv *env, jobject thiz,
         JS_FreeValue(ctx, exception);
     } else {
         const char *result_cstr = JS_ToCString(ctx, result);
-        result_str = env->NewStringUTF(result_cstr ? result_cstr : "undefined");
+        bool jobsOk = drainPendingJobs(ctx);
+        result_str = env->NewStringUTF(jobsOk ? (result_cstr ? result_cstr : "undefined") : "Error: pending job failed");
         if (result_cstr) {
             if (strlen(result_cstr) < 100) {
                 LOGI("evaluateScript: Success - result: %s", result_cstr);
@@ -742,7 +906,8 @@ Java_com_reactor_app_QuickJsWrapper_callFunction(JNIEnv *env, jobject thiz,
             JS_FreeValue(ctx, exception);
         } else {
             const char *result_cstr = JS_ToCString(ctx, result);
-            result_str = env->NewStringUTF(result_cstr ? result_cstr : "undefined");
+            bool jobsOk = drainPendingJobs(ctx);
+            result_str = env->NewStringUTF(jobsOk ? (result_cstr ? result_cstr : "undefined") : "Error: pending job failed");
             LOGI("callFunction: Success - result: %.100s", result_cstr ? result_cstr : "undefined");
             if (result_cstr) JS_FreeCString(ctx, result_cstr);
             JS_FreeValue(ctx, result);

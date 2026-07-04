@@ -7,6 +7,7 @@
 	export let onRefresh = () => {};
 	export let onOpenFolder = () => {};
 	export let onOpenSettings = () => {};
+	export let onOpenEnvManager = () => {};
 	export let onOpenNetworkView = () => {};
 	export let onOpenGlobalLog = () => {};
 	export let onClearGlobalLog = () => {};
@@ -64,6 +65,8 @@
 		</div>
 
 		<button type="button" class="btn-secondary" on:click={onOpenSettings} title="settings"><i class="fa-solid fa-cog"></i></button>
+
+		<button type="button" class="btn-secondary" on:click={onOpenEnvManager} title="environment variables"><i class="fa-solid fa-database"></i></button>
 
 		<div class="log-picker" class:open={logOpen}>
 			<button type="button" class="btn-secondary" on:click={() => (logOpen = !logOpen)} title="log actions"><i class="fa-solid fa-list"></i></button>

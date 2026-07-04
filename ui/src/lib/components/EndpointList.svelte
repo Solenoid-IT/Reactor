@@ -35,6 +35,11 @@
 		tags.push({ label: endpoint?.watch?.length ? `watch (${endpoint.watch.length})` : 'no watch', cls: endpoint?.watch?.length ? 'watch' : '' });
 		return tags;
 	}
+
+	function endpointDisplayName(endpoint) {
+		const rawName = String(endpoint?.name || '').trim();
+		return rawName ? rawName.replace(/\.(ts|js)$/i, '') : 'Unnamed endpoint';
+	}
 </script>
 
 <div class="file-list">
@@ -70,7 +75,7 @@
 				<div class="file-header">
 					<div class="file-header-main">
 						<div class="file-name-row">
-							<div class="file-name"><span class="file-name-label">{endpoint.name.replace(/\.(ts|js)$/i, '')}</span></div>
+								<div class="file-name"><span class="file-name-label">{endpointDisplayName(endpoint)}</span></div>
 							<button
 								class={`debug-icon-toggle ${endpoint.debug ? 'debug-on' : 'debug-off'}`}
 								title={endpoint.debug ? 'Disable debug' : 'Enable debug'}

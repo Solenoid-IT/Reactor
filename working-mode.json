@@ -1,0 +1,22 @@
+{
+  "type": "node",
+  "host": "reactor.solenoid.it",
+  "port": 7070,
+  "tls": true,
+  "token": "lOQMp_waxCqo13p6zstEzW_DkE-w3LRhinl5M6iG7Cs",
+  "discovery": false,
+  "stun": {
+    "host": "reactor.solenoid.it",
+    "port": 3478,
+    "tls": false,
+    "username": "",
+    "password": ""
+  },
+  "turn": {
+    "host": "reactor.solenoid.it",
+    "port": 5349,
+    "tls": true,
+    "username": "reactor",
+    "password": "T1!F08hSmIb-eASD4nC8_5nHxT8oW-rs"
+  }
+}

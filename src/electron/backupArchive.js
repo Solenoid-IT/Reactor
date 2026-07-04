@@ -8,6 +8,7 @@ function getBackupEntries(rootDir) {
 		{ sourcePath: path.join(rootDir, 'working-mode.json'), archiveName: 'working-mode.json' },
 		{ sourcePath: path.join(rootDir, 'name'), archiveName: 'name' },
 		{ sourcePath: path.join(rootDir, 'permissions.json'), archiveName: 'permissions.json' },
+		{ sourcePath: path.join(rootDir, 'envs'), archiveName: 'envs' },
 		{ sourcePath: path.join(rootDir, 'ui-settings.json'), archiveName: 'ui-settings.json' },
 		{ sourcePath: path.join(rootDir, 'workflow.json'), archiveName: 'workflow.json' },
 		{ sourcePath: path.join(rootDir, 'activity.log'), archiveName: 'activity.log' },
@@ -63,7 +64,7 @@ function resolveSafeBackupTarget(rootDir, rawEntryName) {
 	}
 
 	const firstSegment = normalized.split('/')[0];
-	const allowedRoots = new Set(['endpoints', 'working-mode.json', 'name', 'permissions.json', 'ui-settings.json', 'workflow.json', 'activity.log', 'tls', 'backup-meta.json']);
+	const allowedRoots = new Set(['endpoints', 'working-mode.json', 'name', 'permissions.json', 'envs', 'ui-settings.json', 'workflow.json', 'activity.log', 'tls', 'backup-meta.json']);
 	if (!allowedRoots.has(firstSegment)) {
 		return null;
 	}

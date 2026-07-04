@@ -138,6 +138,8 @@ declare module 'core' {
 			input: AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream,
 			output: WritableStream<Uint8Array> | NodeJS.WritableStream,
 		): Promise<boolean>;
+		/** Delete file by path. */
+		delete(filePath: string): Promise<boolean>;
 		/** Open file for read mode (default). */
 		open(
 			filePath: PathLike,
@@ -159,6 +161,8 @@ declare module 'core' {
 			input: AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream,
 			output: WritableStream<Uint8Array> | NodeJS.WritableStream,
 		): Promise<boolean>;
+		/** Delete file by path. */
+		delete(filePath: string): Promise<boolean>;
 		/** Open file for read mode (default). */
 		open(
 			filePath: PathLike,
@@ -205,6 +209,37 @@ declare module 'core' {
 		Directory: new (path: string) => DirectoryApi;
 		/** Path utility helpers. */
 		Entry: EntryStaticApi;
+	}
+
+	/** Supported crypto metadata for user-key encrypted payloads. */
+	export interface UserEncryptionCrypto {
+		/** Crypto map type discriminator. */
+		type: 'user';
+		/** AES-GCM IV encoded in base64. */
+		resourceIV: string;
+		/** RSA-OAEP encrypted resource key encoded in base64. */
+		encResourceKey: string;
+	}
+
+	/** Result returned by `Sekrypt.encryptFile`. */
+	export interface SekryptFileResult {
+		/** Encrypted content stream ready for `HttpClient.Request` body. */
+		content: AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream;
+		/** Encryption metadata required for decryption. */
+		crypto: UserEncryptionCrypto;
+	}
+
+	/** Sekrypt helpers exposed to endpoint scripts. */
+	export interface SekryptApi {
+		/** Encrypt a readable stream using a public RSA key. */
+		encryptFile(
+			stream: AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream,
+			publicKey: string,
+		): Promise<SekryptFileResult>;
+		/** Encode crypto metadata object as base64-encoded JSON UTF-8 string. */
+		encodeCrypto(crypto: object): string;
+		/** Decode base64-encoded JSON UTF-8 crypto metadata string. */
+		decodeCrypto(crypto: string): any;
 	}
 
 	/** Network status snapshot (platform-dependent fields may vary). */
@@ -707,6 +742,8 @@ declare module 'core' {
 	export const FileSystem: FileSystemApi;
 	/** HTTP client namespace. */
 	export const HttpClient: HttpClientApi;
+	/** Sekrypt namespace. */
+	export const Sekrypt: SekryptApi;
 	/** Unit conversion namespace. */
 	export const Unit: UnitApi;
 	/** Time helpers namespace. */
@@ -717,6 +754,15 @@ declare module 'core' {
 	export const System: SystemApi;
 	/** Node communication namespace. */
 	export const Node: NodeApi;
+
+	/** Environment helper namespace. */
+	export interface EnvApi {
+		/** Read a value from envs/<NAME> or return the provided default. */
+		get(name: string, defaultValue?: string): string;
+	}
+
+	/** Environment helper namespace (`Env.get`). */
+	export const Env: EnvApi;
 
 	/** Write endpoint log line with optional log level. */
 	export function log(message: string, type?: LogLevel): Promise<void> | void;

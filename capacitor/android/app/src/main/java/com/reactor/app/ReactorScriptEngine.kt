@@ -12,14 +12,17 @@ interface ReactorScriptOps {
     fun log(message: String)
     fun deviceNotify(message: String): Boolean
     fun fsStat(path: String): String
+    fun fsDelete(path: String): Boolean
     fun fsList(path: String, recursive: Boolean): String
     fun fsCalcSize(path: String): Long
+    fun encryptFile(filePath: String, publicKey: String): String
     fun nodeStream(target: String, filePath: String, meta: String): String
     fun nodeSendMessage(target: String, stream: String, data: String): String
     fun copyStream(src: String, dst: String): Boolean
     fun getHomeDirectory(): String
     fun getNetworkStatus(): String
     fun getGeoLocation(): String
+    fun getEnvConfig(): String
     fun sendHttpRequest(url: String, method: String, headers: String, body: String, timeoutMs: Long): String
     fun spawnProcess(command: String): Boolean
 }
@@ -38,6 +41,21 @@ class ReactorScriptEngine(private val context: Context) {
         val BOOTSTRAP_JS = """
 var module = { exports: {} };
 var exports = module.exports;
+var __loadEnvConfig = function () {
+    try {
+        var parsed = JSON.parse(__native.getEnvConfig());
+        if (parsed && parsed.envs && typeof parsed.envs === 'object') {
+            return parsed.envs;
+        } else if (parsed && typeof parsed === 'object') {
+            return parsed;
+        } else {
+            return {};
+        }
+    } catch (e) {
+        return {};
+    }
+};
+var __envConfig = __loadEnvConfig();
 var require = function (s) {
     if (s === 'core') return __reactorCore;
     throw new Error('Cannot find module: ' + s);
@@ -182,6 +200,138 @@ function __parseUnitExpression(input, unitTable) {
     throw new Error('Invalid unit expression: ' + raw);
 }
 
+function __encodeUtf8(input) {
+    var value = String(input == null ? '' : input);
+    var bytes = [];
+
+    for (var index = 0; index < value.length; index += 1) {
+        var codePoint = value.charCodeAt(index);
+
+        if (codePoint >= 0xD800 && codePoint <= 0xDBFF && index + 1 < value.length) {
+            var nextCodePoint = value.charCodeAt(index + 1);
+            if (nextCodePoint >= 0xDC00 && nextCodePoint <= 0xDFFF) {
+                codePoint = 0x10000 + ((codePoint - 0xD800) << 10) + (nextCodePoint - 0xDC00);
+                index += 1;
+            }
+        }
+
+        if (codePoint <= 0x7F) {
+            bytes.push(codePoint);
+        } else if (codePoint <= 0x7FF) {
+            bytes.push(0xC0 | (codePoint >> 6));
+            bytes.push(0x80 | (codePoint & 0x3F));
+        } else if (codePoint <= 0xFFFF) {
+            bytes.push(0xE0 | (codePoint >> 12));
+            bytes.push(0x80 | ((codePoint >> 6) & 0x3F));
+            bytes.push(0x80 | (codePoint & 0x3F));
+        } else {
+            bytes.push(0xF0 | (codePoint >> 18));
+            bytes.push(0x80 | ((codePoint >> 12) & 0x3F));
+            bytes.push(0x80 | ((codePoint >> 6) & 0x3F));
+            bytes.push(0x80 | (codePoint & 0x3F));
+        }
+    }
+
+    return new Uint8Array(bytes);
+}
+
+function __decodeUtf8(bytes) {
+    var input = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+    var output = '';
+
+    for (var index = 0; index < input.length; ) {
+        var byte1 = input[index++];
+
+        if ((byte1 & 0x80) === 0) {
+            output += String.fromCharCode(byte1);
+            continue;
+        }
+
+        if ((byte1 & 0xE0) === 0xC0) {
+            var byte2 = index < input.length ? input[index++] : 0;
+            var codePoint2 = ((byte1 & 0x1F) << 6) | (byte2 & 0x3F);
+            output += String.fromCharCode(codePoint2);
+            continue;
+        }
+
+        if ((byte1 & 0xF0) === 0xE0) {
+            var byte2a = index < input.length ? input[index++] : 0;
+            var byte3 = index < input.length ? input[index++] : 0;
+            var codePoint3 = ((byte1 & 0x0F) << 12) | ((byte2a & 0x3F) << 6) | (byte3 & 0x3F);
+            output += String.fromCharCode(codePoint3);
+            continue;
+        }
+
+        var byte2b = index < input.length ? input[index++] : 0;
+        var byte3b = index < input.length ? input[index++] : 0;
+        var byte4 = index < input.length ? input[index++] : 0;
+        var codePoint4 = ((byte1 & 0x07) << 18) | ((byte2b & 0x3F) << 12) | ((byte3b & 0x3F) << 6) | (byte4 & 0x3F);
+        codePoint4 -= 0x10000;
+        output += String.fromCharCode(0xD800 + (codePoint4 >> 10));
+        output += String.fromCharCode(0xDC00 + (codePoint4 & 0x3FF));
+    }
+
+    return output;
+}
+
+var __base64Alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+function __encodeBase64(bytes) {
+    var input = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+    var output = '';
+
+    for (var index = 0; index < input.length; index += 3) {
+        var byte1 = input[index];
+        var hasByte2 = index + 1 < input.length;
+        var hasByte3 = index + 2 < input.length;
+        var byte2 = hasByte2 ? input[index + 1] : 0;
+        var byte3 = hasByte3 ? input[index + 2] : 0;
+        var triplet = (byte1 << 16) | (byte2 << 8) | byte3;
+
+        output += __base64Alphabet[(triplet >> 18) & 0x3F];
+        output += __base64Alphabet[(triplet >> 12) & 0x3F];
+        output += hasByte2 ? __base64Alphabet[(triplet >> 6) & 0x3F] : '=';
+        output += hasByte3 ? __base64Alphabet[triplet & 0x3F] : '=';
+    }
+
+    return output;
+}
+
+function __decodeBase64(input) {
+    var normalized = String(input == null ? '' : input).replace(/\s+/g, '');
+    if (!normalized) {
+        return new Uint8Array(0);
+    }
+
+    var output = [];
+    for (var index = 0; index < normalized.length; index += 4) {
+        var char1 = normalized.charAt(index);
+        var char2 = normalized.charAt(index + 1);
+        var char3 = normalized.charAt(index + 2);
+        var char4 = normalized.charAt(index + 3);
+
+        var enc1 = __base64Alphabet.indexOf(char1);
+        var enc2 = __base64Alphabet.indexOf(char2);
+        var enc3 = char3 === '=' ? -1 : __base64Alphabet.indexOf(char3);
+        var enc4 = char4 === '=' ? -1 : __base64Alphabet.indexOf(char4);
+
+        if (enc1 < 0 || enc2 < 0 || (char3 !== '=' && enc3 < 0) || (char4 !== '=' && enc4 < 0)) {
+            throw new Error('Invalid base64 string');
+        }
+
+        var triplet = (enc1 << 18) | (enc2 << 12) | ((enc3 < 0 ? 0 : enc3) << 6) | (enc4 < 0 ? 0 : enc4);
+        output.push((triplet >> 16) & 0xFF);
+        if (char3 !== '=') {
+            output.push((triplet >> 8) & 0xFF);
+        }
+        if (char4 !== '=') {
+            output.push(triplet & 0xFF);
+        }
+    }
+
+    return new Uint8Array(output);
+}
+
 var __reactorCore = {
     Event: Event,
     WatchEvent: WatchEvent,
@@ -194,6 +344,7 @@ var __reactorCore = {
     FileSystem: {
         File: Object.assign(function ReactorFile(p) { this.__path = String(p || ''); }, {
             open: function (p) { return { __type: 'FileHandle', __path: String(p || '') }; },
+            delete: function (p) { return __native.fsDelete(String(p || '')); },
             copyStream: function (input, output) {
                 var s = (input && input.__path) ? input.__path : String(input || '');
                 var d = (output && output.__path) ? output.__path : String(output || '');
@@ -213,6 +364,46 @@ var __reactorCore = {
         Directory: function ReactorDir(p) {
             this.__path = String(p || '');
             this.path = this.__path;
+        }
+    },
+    Sekrypt: {
+        encodeCrypto: function (crypto) {
+            var json = JSON.stringify(crypto);
+            var bytes = __encodeUtf8(json);
+            var binary = '';
+
+            for (var index = 0; index < bytes.length; index += 1) {
+                binary += String.fromCharCode(bytes[index]);
+            }
+
+            return __encodeBase64(bytes);
+        },
+        decodeCrypto: function (crypto) {
+            var bytes = __decodeBase64(String(crypto == null ? '' : crypto));
+            var json = __decodeUtf8(bytes);
+            return JSON.parse(json);
+        },
+        encryptFile: function (stream, publicKey) {
+            var filePath = (stream && stream.__path) ? String(stream.__path) : String(stream || '');
+            var result = __native.encryptFile(filePath, String(publicKey == null ? '' : publicKey));
+            var payload = {};
+            try {
+                payload = JSON.parse(result || '{}');
+            } catch (e) {
+                throw new Error('Sekrypt.encryptFile failed: invalid native response');
+            }
+
+            if (!payload.ok) {
+                throw new Error(payload.error || 'Sekrypt.encryptFile failed');
+            }
+
+            var encryptedContent = __reactorCore.FileSystem.File.open(String(payload.contentPath || ''));
+            encryptedContent.length = Number(payload.contentSize || 0);
+
+            return {
+                content: encryptedContent,
+                crypto: payload.crypto || {}
+            };
         }
     },
     Node: {
@@ -371,6 +562,28 @@ var __reactorCore = {
         },
         getHomeDirectory: function () { return __native.getHomeDirectory(); }
     },
+    Env: {
+        get: function (name, defaultValue) {
+            var safeName = String(name == null ? '' : name).trim();
+            if (!safeName) return String(defaultValue == null ? '' : defaultValue);
+
+            var envConfig = __envConfig;
+            if (Object.prototype.hasOwnProperty.call(envConfig, safeName)) {
+                return String(envConfig[safeName] == null ? '' : envConfig[safeName]).trim();
+            }
+
+            var requestedUpper = safeName.toUpperCase();
+            for (var key in envConfig) {
+                if (!Object.prototype.hasOwnProperty.call(envConfig, key)) continue;
+                var normalizedKey = String(key == null ? '' : key).trim().toUpperCase();
+                if (normalizedKey === requestedUpper) {
+                    return String(envConfig[key] == null ? '' : envConfig[key]).trim();
+                }
+            }
+
+            return String(defaultValue == null ? '' : defaultValue).trim();
+        }
+    },
     log: function () { __native.log(_formatArgs.apply(null, arguments)); }
 };
 var FileSystem = __reactorCore.FileSystem;
@@ -378,9 +591,12 @@ var Node = __reactorCore.Node;
 var Device = __reactorCore.Device;
 var OS = __reactorCore.OS;
 var HttpClient = __reactorCore.HttpClient;
+var Encryption = __reactorCore.Encryption;
+var Sekrypt = __reactorCore.Sekrypt;
 var Time = __reactorCore.Time;
 var Unit = __reactorCore.Unit;
 var System = __reactorCore.System;
+var Env = __reactorCore.Env;
 var log = __reactorCore.log;
 
 FileSystem.File.prototype.path = '';

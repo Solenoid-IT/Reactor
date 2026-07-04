@@ -5,8 +5,11 @@ declare global {
 			getUiSettings?: () => Promise<any>;
 			getPermissionsConfig?: () => Promise<any>;
 			savePermissionsConfig?: (permissions: any) => Promise<any>;
+			getEnvConfig?: () => Promise<any>;
+			saveEnvConfig?: (env: any) => Promise<any>;
 			requestSystemPermissions?: (permissions: string[]) => Promise<any>;
 			openSystemPermissionSettings?: (permissions?: string[]) => Promise<any>;
+			copyTextToClipboard?: (text: string) => Promise<any>;
 			stopBackgroundProcess?: () => Promise<any>;
 			openEndpointsFolder?: () => Promise<any>;
 			openEndpointFile?: (filePath: string) => Promise<any>;

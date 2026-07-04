@@ -62,6 +62,44 @@ export async function getPermissionsConfig() {
 	return { ok: false, error: 'bridge unavailable', platform: '', permissions: {} };
 }
 
+export async function getEnvConfig() {
+	const bridge = getBridge();
+	if (bridge && bridge.getEnvConfig) {
+		return bridge.getEnvConfig();
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.getEnvConfig) {
+		return mobile.getEnvConfig();
+	}
+
+	const nativeResult = await callNative('getEnvConfig');
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable', envs: {} };
+}
+
+export async function saveEnvConfig(env) {
+	const bridge = getBridge();
+	if (bridge && bridge.saveEnvConfig) {
+		return bridge.saveEnvConfig(env);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.saveEnvConfig) {
+		return mobile.saveEnvConfig({ envs: env });
+	}
+
+	const nativeResult = await callNative('saveEnvConfig', { envs: env });
+	if (nativeResult) {
+		return nativeResult;
+	}
+
+	return { ok: false, error: 'bridge unavailable', envs: {} };
+}
+
 export async function savePermissionsConfig(permissions) {
 	const bridge = getBridge();
 	if (bridge && bridge.savePermissionsConfig) {
@@ -144,6 +182,11 @@ export async function stopBackgroundProcess() {
 
 export async function copyTextToClipboard(text) {
 	const safeText = String(text ?? '');
+	const bridge = getBridge();
+	if (bridge && bridge.copyTextToClipboard) {
+		return bridge.copyTextToClipboard(safeText);
+	}
+
 	const mobile = getMobilePlugin();
 	if (mobile && mobile.copyTextToClipboard) {
 		return mobile.copyTextToClipboard({ text: safeText });

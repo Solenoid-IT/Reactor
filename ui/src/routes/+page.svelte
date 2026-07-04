@@ -16,7 +16,9 @@
 		getEndpointsInfo,
 		getUiSettings,
 		getPermissionsConfig,
+		getEnvConfig,
 		savePermissionsConfig,
+		saveEnvConfig,
 		requestSystemPermissions,
 		openSystemPermissionSettings,
 		copyTextToClipboard,
@@ -120,6 +122,12 @@
 	let permissionsPlatform = '';
 	let permissionsConfig = {};
 	let permissionsEntries = [];
+	let envOpen = false;
+	let envLoading = false;
+	let envSaving = false;
+	let envDirPath = '';
+	let envDraftRows = [];
+	let envRowIdCounter = 0;
 	let status = 'Ready';
 	let settingsOpen = false;
 	let renameOpen = false;
@@ -153,6 +161,87 @@
 
 	function isBridgeUnavailable(result) {
 		return String(result?.error || '').toLowerCase().includes('bridge unavailable');
+	}
+
+	function createEnvRow(name = '', content = '') {
+		envRowIdCounter += 1;
+		return {
+			id: `${Date.now()}-${envRowIdCounter}`,
+			name: String(name || ''),
+			content: String(content == null ? '' : content),
+		};
+	}
+
+	function normalizeEnvRows(envConfig) {
+		const source = envConfig && typeof envConfig === 'object' && !Array.isArray(envConfig) ? envConfig : {};
+		const rows = Object.entries(source)
+			.sort(([leftKey], [rightKey]) => String(leftKey || '').localeCompare(String(rightKey || '')))
+			.map(([key, value]) => createEnvRow(key, value));
+		return rows.length > 0 ? rows : [createEnvRow()];
+	}
+
+	function rowsToEnvConfig(rows) {
+		const envConfig = {};
+		for (const row of Array.isArray(rows) ? rows : []) {
+			const name = String(row?.name || '').trim();
+			if (!name) {
+				continue;
+			}
+			envConfig[name] = String(row?.content == null ? '' : row.content);
+		}
+		return envConfig;
+	}
+
+	function addEnvRow() {
+		envDraftRows = [...envDraftRows, createEnvRow()];
+	}
+
+	function removeEnvRow(index) {
+		const nextRows = [...envDraftRows];
+		nextRows.splice(index, 1);
+		envDraftRows = nextRows.length > 0 ? nextRows : [createEnvRow()];
+	}
+
+	async function loadEnvConfig() {
+		envLoading = true;
+		try {
+			const result = await getEnvConfig();
+			if (!result?.ok) {
+				status = `Error: ${result?.error || 'unable to load envs'}`;
+				return;
+			}
+
+			envDirPath = String(result.path || envDirPath || '');
+			envDraftRows = normalizeEnvRows(result.envs || {});
+		} finally {
+			envLoading = false;
+		}
+	}
+
+	async function openEnvManager() {
+		envOpen = true;
+		await loadEnvConfig();
+	}
+
+	function closeEnvManager() {
+		envOpen = false;
+	}
+
+	async function saveEnvManager() {
+		envSaving = true;
+		try {
+			const result = await saveEnvConfig(rowsToEnvConfig(envDraftRows));
+			if (!result?.ok) {
+				status = `Error: ${result?.error || 'unable to save envs'}`;
+				return;
+			}
+
+			envDirPath = String(result.path || envDirPath || '');
+			envDraftRows = normalizeEnvRows(result.envs || rowsToEnvConfig(envDraftRows));
+			status = 'Saved envs';
+		} finally {
+			envSaving = false;
+		}
 	}
 
 	async function ensureCodeEditorComponent(silent = false) {
@@ -1118,82 +1207,87 @@
 	}
 
 	async function refreshAll() {
-		const [info, settings, permissionsConfigResult, serverConfig, currentReactorName, exchangeConfigResult, p2pStatusResult, exchangeTokenResult, tlsConfigResult, queueStatusResult] = await Promise.all([
-			getEndpointsInfo(),
-			getUiSettings(),
-			getPermissionsConfig(),
-			getHttpServerConfig(),
-			getReactorName(),
-			getExchangeConfig(),
-			getP2PStatus(),
-			getExchangeToken(),
-			getTlsConfig(),
-			getMessageQueueStatus(),
-		]);
+		try {
+			const [info, settings, permissionsConfigResult, serverConfig, currentReactorName, exchangeConfigResult, p2pStatusResult, exchangeTokenResult, tlsConfigResult, queueStatusResult] = await Promise.all([
+				getEndpointsInfo(),
+				getUiSettings(),
+				getPermissionsConfig(),
+				getHttpServerConfig(),
+				getReactorName(),
+				getExchangeConfig(),
+				getP2PStatus(),
+				getExchangeToken(),
+				getTlsConfig(),
+				getMessageQueueStatus(),
+			]);
 
-		if (info?.ok === false) {
-			status = `Error endpoints list: ${info?.error || 'unknown'}`;
+			if (info?.ok === false) {
+				status = `Error endpoints list: ${info?.error || 'unknown'}`;
+			}
+
+			endpoints = Array.isArray(info?.endpoints) ? info.endpoints : [];
+			endpointsPath = info?.path || '';
+			httpPort = Number(serverConfig?.config?.port || settings?.httpServerPort || 7070);
+			reactorName = String(currentReactorName?.name || '');
+			applyPermissionsConfigResult(permissionsConfigResult);
+
+			if (tlsConfigResult?.ok && tlsConfigResult?.tls) {
+				const tls = tlsConfigResult.tls;
+				tlsEnabled = Boolean(tls.enabled);
+				tlsSubject = tls.subject || '';
+				tlsNotAfter = tls.notAfter || '';
+				tlsFingerprint = tls.fingerprint || '';
+			} else {
+				tlsEnabled = false;
+				tlsSubject = '';
+				tlsNotAfter = '';
+				tlsFingerprint = '';
+			}
+
+			if (exchangeConfigResult?.ok && exchangeConfigResult?.config) {
+				const ec = exchangeConfigResult.config;
+				stunHost = String(ec.stun?.host || '');
+				stunPort = Number(ec.stun?.port) || 3478;
+				turnHost = String(ec.turn?.host || '');
+				turnPort = Number(ec.turn?.port) || 3478;
+				turnTls = Boolean(ec.turn?.tls);
+				turnUsername = String(ec.turn?.username || '');
+				turnPassword = String(ec.turn?.password || '');
+			}
+
+			applyExchangeConfigResult(exchangeConfigResult);
+
+			applyP2PStatusResult(p2pStatusResult);
+
+			if (exchangeTokenResult?.ok && exchangeTokenResult?.exchangeToken?.token) {
+				exchangeToken = exchangeTokenResult.exchangeToken.token;
+			}
+
+			if (queueStatusResult?.ok && queueStatusResult?.queue) {
+				const queue = queueStatusResult.queue;
+				messageQueuePending = Number(queue.pending || 0);
+				messageQueueDirectPending = Number(queue.directPending || 0);
+				messageQueueExchangePending = Number(queue.exchangePending || 0);
+				messageQueueTtlDays = Number(queue.ttlDays || 7);
+			}
+
+			if (selectedIndex >= endpoints.length) {
+				selectedIndex = -1;
+			}
+
+			const canLoadLinkedNodes = (exchangeMode === 'exchange' && exchangeDiscovery) || (exchangeMode === 'node' && exchangeEnabled && exchangeActive);
+			if (canLoadLinkedNodes) {
+				await refreshExchangeLinkedNodes(true);
+			} else {
+				exchangeLinkedNodes = [];
+				exchangeLinkedNodesTotal = 0;
+			}
+
+			status = 'Data refreshed';
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error || 'unknown error');
+			status = `Error refreshing UI: ${message}`;
 		}
-
-		endpoints = Array.isArray(info?.endpoints) ? info.endpoints : [];
-		endpointsPath = info?.path || '';
-		httpPort = Number(serverConfig?.config?.port || settings?.httpServerPort || 7070);
-		reactorName = String(currentReactorName?.name || '');
-		applyPermissionsConfigResult(permissionsConfigResult);
-
-		if (tlsConfigResult?.ok && tlsConfigResult?.tls) {
-			const tls = tlsConfigResult.tls;
-			tlsEnabled = Boolean(tls.enabled);
-			tlsSubject = tls.subject || '';
-			tlsNotAfter = tls.notAfter || '';
-			tlsFingerprint = tls.fingerprint || '';
-		} else {
-			tlsEnabled = false;
-			tlsSubject = '';
-			tlsNotAfter = '';
-			tlsFingerprint = '';
-		}
-
-		if (exchangeConfigResult?.ok && exchangeConfigResult?.config) {
-			const ec = exchangeConfigResult.config;
-			stunHost = String(ec.stun?.host || '');
-			stunPort = Number(ec.stun?.port) || 3478;
-			turnHost = String(ec.turn?.host || '');
-			turnPort = Number(ec.turn?.port) || 3478;
-			turnTls = Boolean(ec.turn?.tls);
-			turnUsername = String(ec.turn?.username || '');
-			turnPassword = String(ec.turn?.password || '');
-		}
-
-		applyExchangeConfigResult(exchangeConfigResult);
-
-		applyP2PStatusResult(p2pStatusResult);
-
-		if (exchangeTokenResult?.ok && exchangeTokenResult?.exchangeToken?.token) {
-			exchangeToken = exchangeTokenResult.exchangeToken.token;
-		}
-
-		if (queueStatusResult?.ok && queueStatusResult?.queue) {
-			const queue = queueStatusResult.queue;
-			messageQueuePending = Number(queue.pending || 0);
-			messageQueueDirectPending = Number(queue.directPending || 0);
-			messageQueueExchangePending = Number(queue.exchangePending || 0);
-			messageQueueTtlDays = Number(queue.ttlDays || 7);
-		}
-
-		if (selectedIndex >= endpoints.length) {
-			selectedIndex = -1;
-		}
-
-		const canLoadLinkedNodes = (exchangeMode === 'exchange' && exchangeDiscovery) || (exchangeMode === 'node' && exchangeEnabled && exchangeActive);
-		if (canLoadLinkedNodes) {
-			await refreshExchangeLinkedNodes(true);
-		} else {
-			exchangeLinkedNodes = [];
-			exchangeLinkedNodesTotal = 0;
-		}
-
-		status = 'Data refreshed';
 	}
 
 	async function reorderEndpointItems(fromIndex, toIndex) {
@@ -1933,6 +2027,7 @@
 		onRefresh={refreshAll}
 		onOpenFolder={openEndpointsFolder}
 		onOpenSettings={openSettings}
+			onOpenEnvManager={openEnvManager}
 		onOpenNetworkView={openNetworkView}
 		onOpenGlobalLog={openGlobalLog}
 		onClearGlobalLog={clearGlobalLog}
@@ -2036,6 +2131,50 @@
 			onClearMessageQueue={clearMessageQueueHandler}
 			onCopyText={(text) => copyTextToClipboard(text)}
 		/>
+	</Modal>
+
+	<Modal
+		open={envOpen}
+		title="Variables"
+		subtitle={ "" }
+		ariaLabel="Environment variables editor"
+		cardClass="modal-card env-modal-card"
+		onClose={closeEnvManager}
+	>
+		<div class="env-toolbar">
+			<div class="env-toolbar-actions">
+				<!-- svelte-ignore a11y_consider_explicit_label -->
+				<button type="button" class="btn-secondary" on:click={addEnvRow} title="add variable">
+					<i class="fa-solid fa-plus"></i>
+				</button>
+				<button type="button" class="btn-secondary" on:click={loadEnvConfig} disabled={envLoading}>
+					<i class="fa-solid fa-rotate me-1"></i>{envLoading ? 'Reloading...' : 'Reload'}
+				</button>
+			</div>
+		</div>
+
+		<div class="env-list">
+			{#if envDraftRows.length === 0}
+				<div class="env-empty">No env files defined</div>
+			{:else}
+				{#each envDraftRows as row, index (row.id)}
+					<div class="env-row">
+						<input class="modal-input env-name-input" type="text" bind:value={row.name} autocomplete="off" placeholder="MY_CUSTOM_VAR" />
+						<textarea class="modal-input env-content-input" bind:value={row.content} autocomplete="off" placeholder="Any file content" rows="4"></textarea>
+						<button type="button" class="btn-secondary env-remove-button" title="Remove file" on:click={() => removeEnvRow(index)}>
+							<i class="fa-solid fa-trash"></i>
+						</button>
+					</div>
+				{/each}
+			{/if}
+		</div>
+
+		<svelte:fragment slot="actions">
+			<button type="button" class="btn-secondary" on:click={closeEnvManager}>Close</button>
+			<button type="button" class="btn-primary" disabled={envSaving} on:click={saveEnvManager}>
+				<i class="fa-solid fa-floppy-disk me-2"></i>{envSaving ? 'Saving...' : 'Save'}
+			</button>
+		</svelte:fragment>
 	</Modal>
 
 	<Modal
@@ -2303,6 +2442,84 @@
 		width: min(1080px, 95vw);
 		max-height: 90vh;
 		overflow: auto;
+	}
+
+	:global(.env-modal-card) {
+		width: min(980px, 95vw);
+		max-height: 90vh;
+		overflow: auto;
+	}
+
+	.env-toolbar {
+		display: flex;
+		justify-content: space-between;
+		gap: 12px;
+		flex-wrap: wrap;
+		margin-bottom: 12px;
+	}
+
+	.env-path {
+		padding: 8px 12px;
+		border-radius: 12px;
+		background: rgba(255, 255, 255, 0.06);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		font-size: 0.82rem;
+		word-break: break-all;
+	}
+
+	.env-toolbar-actions {
+		display: flex;
+		gap: 10px;
+		flex-wrap: wrap;
+	}
+
+	.env-list {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+
+	.env-empty {
+		padding: 12px 14px;
+		border-radius: 12px;
+		border: 1px dashed rgba(255, 255, 255, 0.14);
+		opacity: 0.72;
+	}
+
+	.env-row {
+		display: grid;
+		grid-template-columns: 0.85fr 1.45fr auto;
+		gap: 10px;
+		align-items: start;
+	}
+
+	.env-name-input,
+	.env-content-input {
+		width: 100%;
+	}
+
+	.env-content-input {
+		min-height: 104px;
+		resize: vertical;
+	}
+
+	.env-remove-button {
+		height: 42px;
+		min-width: 42px;
+		padding: 0 12px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	@media (max-width: 720px) {
+		.env-row {
+			grid-template-columns: 1fr;
+		}
+
+		.env-remove-button {
+			width: 100%;
+		}
 	}
 
 	.network-view-shell {

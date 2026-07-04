@@ -36,6 +36,9 @@ function transposeLine(line) {
     
     // Remove type annotations in function parameters/declarations
     line = removeTypeAnnotations(line);
+
+    // Remove function return type annotations: `function x(...): Type {`
+    line = removeReturnTypeAnnotations(line);
     
     // Remove generic types <T, U, ...>
     line = line.replace(/<[^>]+>/g, '');
@@ -123,6 +126,77 @@ function removeTypeAnnotations(line) {
         i++;
     }
     
+    return result;
+}
+
+function removeReturnTypeAnnotations(line) {
+    let result = '';
+    let i = 0;
+    let inString = false;
+    let stringChar = null;
+    let parenDepth = 0;
+
+    while (i < line.length) {
+        const ch = line[i];
+        const prevCh = i > 0 ? line[i - 1] : '';
+
+        if ((ch === '"' || ch === "'" || ch === '`') && prevCh !== '\\') {
+            if (!inString) {
+                inString = true;
+                stringChar = ch;
+            } else if (ch === stringChar) {
+                inString = false;
+                stringChar = null;
+            }
+            result += ch;
+            i++;
+            continue;
+        }
+
+        if (inString) {
+            result += ch;
+            i++;
+            continue;
+        }
+
+        if (ch === '(') parenDepth++;
+        else if (ch === ')') parenDepth = Math.max(0, parenDepth - 1);
+
+        if (parenDepth === 0 && ch === ':') {
+            const trimmedBefore = result.trimEnd();
+            if (trimmedBefore.endsWith(')')) {
+                i++; // skip ':'
+                while (i < line.length && line[i] === ' ') i++;
+
+                let angleDepth = 0;
+                let squareDepth = 0;
+                let nestedParenDepth = 0;
+
+                while (i < line.length) {
+                    const t = line[i];
+                    if (t === '<') angleDepth++;
+                    else if (t === '>') angleDepth = Math.max(0, angleDepth - 1);
+                    else if (t === '[') squareDepth++;
+                    else if (t === ']') squareDepth = Math.max(0, squareDepth - 1);
+                    else if (t === '(') nestedParenDepth++;
+                    else if (t === ')') nestedParenDepth = Math.max(0, nestedParenDepth - 1);
+
+                    const atTopLevelType = angleDepth === 0 && squareDepth === 0 && nestedParenDepth === 0;
+                    if (atTopLevelType && (t === '{' || t === '=' || t === ';')) {
+                        break;
+                    }
+
+                    i++;
+                }
+
+                continue;
+            }
+        }
+
+        result += ch;
+        i++;
+    }
+
     return result;
 }
 

@@ -13,6 +13,15 @@ const thirtyMinutesAgo = Time.at('now - 30 minute');
 const ttl = Unit.Second.conv('2h 30m');
 ```
 
+## ENV: app-defined variables
+
+```ts
+import { Env } from 'core';
+
+const apiBaseUrl = Env.get('API_BASE_URL', 'https://example.com');
+const featureFlag = Env.get('FEATURE_FLAG', '0') === '1';
+```
+
 ## FileSystem: scan old files
 
 ```ts
@@ -62,6 +71,33 @@ if (response.statusCode >= 400)
 
 // Response body is written to a local file path.
 const bodyStream = await FileSystem.File.open(response.body);
+```
+
+## Sekrypt: encrypt stream before upload
+
+```ts
+import { FileSystem, Sekrypt, HttpClient } from 'core';
+
+const stream = await FileSystem.File.open('/tmp/inbox/report.bin');
+const targetPublicKey = '-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----';
+const encrypted = await Sekrypt.encryptFile(stream, targetPublicKey);
+
+const response = await HttpClient.sendRequest(
+  new HttpClient.Request(
+    'POST',
+    'https://example.com/upload',
+    encrypted.content,
+    {
+      'Content-Type': 'application/octet-stream',
+      'X-Reactor-Crypto': JSON.stringify(encrypted.crypto),
+    },
+  ),
+);
+
+if (response.statusCode >= 400)
+{
+  throw new Error('Encrypted upload failed: ' + response.statusCode + ' ' + response.statusText);
+}
 ```
 
 ## System: portable base path

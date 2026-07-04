@@ -91,6 +91,7 @@ public class ReactorMobilePlugin extends Plugin {
     private static final String TAG = "ReactorMobilePlugin";
     private static final String WORKING_MODE_FILE = "working-mode.json";
     private static final String REACTOR_NAME_FILE = "name";
+    private static final String ENV_DIR = "envs";
     private static final String ENDPOINT_TEMPLATES_DIR = "templates";
     private static final String ENDPOINT_TEMPLATE_ASSETS_DIR = "public/templates";
     private static final Set<String> ALLOWED_ENDPOINT_TEMPLATE_KEYS = new LinkedHashSet<>(Arrays.asList("blank", "schedule", "event", "watch"));
@@ -100,6 +101,12 @@ public class ReactorMobilePlugin extends Plugin {
     @Override
     public void load() {
         super.load();
+        try {
+            JSObject startupEnv = readEnvConfig();
+            Log.d(TAG, "ENV_PLUGIN_LOAD path=" + getEnvDir().getAbsolutePath() + " envCount=" + startupEnv.length());
+        } catch (Exception error) {
+            Log.e(TAG, "ENV_PLUGIN_LOAD_ERROR: " + error.getMessage(), error);
+        }
         nativeP2PManager = AndroidP2PWebRtcManager.getInstance(getContext());
         nativeP2PManager.initialize();
         ReactorHttpService.setP2PStatusListener((p2pStatus) -> {
@@ -213,6 +220,14 @@ public class ReactorMobilePlugin extends Plugin {
 
     private File getReactorNameFile() {
         return new File(getContext().getFilesDir(), REACTOR_NAME_FILE);
+    }
+
+    private File getEnvDir() {
+        File envDir = new File(getContext().getFilesDir(), ENV_DIR);
+        if (!envDir.exists()) {
+            envDir.mkdirs();
+        }
+        return envDir;
     }
 
     @PluginMethod
@@ -812,6 +827,7 @@ public class ReactorMobilePlugin extends Plugin {
                 getEndpointsDir(),
                 getWorkingModeFile(),
                 getReactorNameFile(),
+                getEnvDir(),
             getPermissionsFile(),
                 getUiSettingsFile(),
                 getWorkflowFile(),
@@ -877,6 +893,7 @@ public class ReactorMobilePlugin extends Plugin {
                 "endpoints",
                 "working-mode.json",
                 "name",
+                "envs",
                 "permissions.json",
                 "ui-settings.json",
                 "workflow.json",
@@ -1203,6 +1220,67 @@ public class ReactorMobilePlugin extends Plugin {
         return safePermissions;
     }
 
+    private JSObject readEnvConfig() throws Exception {
+        File envDir = getEnvDir();
+        JSObject envs = new JSObject();
+        File[] entries = envDir.listFiles();
+        if (entries == null) {
+            return envs;
+        }
+
+        for (File entry : entries) {
+            if (entry == null || !entry.isFile()) {
+                continue;
+            }
+
+            String name = String.valueOf(entry.getName() == null ? "" : entry.getName()).trim();
+            if (name.isEmpty() || name.contains("/") || name.contains("\\") || "..".equals(name) || ".".equals(name)) {
+                continue;
+            }
+
+            envs.put(name, readTextFile(entry));
+        }
+
+        return envs;
+    }
+
+    private JSObject writeEnvConfig(JSObject env) throws Exception {
+        JSObject safeEnv = env != null ? env : new JSObject();
+        File envDir = getEnvDir();
+        JSObject normalized = new JSObject();
+        Set<String> keepNames = new LinkedHashSet<>();
+
+        JSONArray keys = safeEnv.names();
+        if (keys != null) {
+            for (int index = 0; index < keys.length(); index++) {
+                String name = String.valueOf(keys.optString(index, "")).trim();
+                if (name.isEmpty() || name.contains("/") || name.contains("\\") || "..".equals(name) || ".".equals(name)) {
+                    continue;
+                }
+
+                String content = String.valueOf(safeEnv.opt(name));
+                writeTextFile(new File(envDir, name), content);
+                normalized.put(name, content);
+                keepNames.add(name);
+            }
+        }
+
+        File[] existing = envDir.listFiles();
+        if (existing != null) {
+            for (File entry : existing) {
+                if (entry == null || !entry.isFile()) {
+                    continue;
+                }
+
+                if (!keepNames.contains(entry.getName())) {
+                    entry.delete();
+                }
+            }
+        }
+
+        return normalized;
+    }
+
     @PluginMethod
     public void getPermissionsConfig(PluginCall call) {
         try {
@@ -1234,6 +1312,55 @@ public class ReactorMobilePlugin extends Plugin {
                     .put("error", e.getMessage())
                     .put("platform", "Android")
                     .put("permissions", new JSObject()));
+        }
+    }
+
+    @PluginMethod
+    public void getEnvConfig(PluginCall call) {
+        try {
+            ReactorHttpService.refreshEnvCacheNow("plugin-get-env-config");
+            JSObject fromService = ReactorHttpService.getEnvCacheSnapshotForUi();
+            if (Boolean.TRUE.equals(fromService.getBool("ok"))) {
+                call.resolve(fromService);
+                return;
+            }
+
+            JSObject env = readEnvConfig();
+            call.resolve(new JSObject()
+                    .put("ok", true)
+                    .put("path", getEnvDir().getAbsolutePath())
+                    .put("envs", env));
+        } catch (Exception e) {
+            call.resolve(new JSObject()
+                    .put("ok", false)
+                    .put("error", e.getMessage())
+                    .put("path", getEnvDir().getAbsolutePath())
+                    .put("envs", new JSObject()));
+        }
+    }
+
+    @PluginMethod
+    public void saveEnvConfig(PluginCall call) {
+        try {
+            writeEnvConfig(call.getObject("envs", call.getObject("env", new JSObject())));
+            ReactorHttpService.refreshEnvCacheNow("plugin-save-env-config");
+            JSObject fromService = ReactorHttpService.getEnvCacheSnapshotForUi();
+            if (Boolean.TRUE.equals(fromService.getBool("ok"))) {
+                call.resolve(fromService);
+                return;
+            }
+
+            JSObject saved = readEnvConfig();
+            call.resolve(new JSObject()
+                    .put("ok", true)
+                    .put("path", getEnvDir().getAbsolutePath())
+                    .put("envs", saved));
+        } catch (Exception e) {
+            call.resolve(new JSObject()
+                    .put("ok", false)
+                    .put("error", e.getMessage())
+                    .put("path", getEnvDir().getAbsolutePath())
+                    .put("envs", new JSObject()));
         }
     }
 

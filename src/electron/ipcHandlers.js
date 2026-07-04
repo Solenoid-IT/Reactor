@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, shell } = require('electron');
 const fs = require('fs/promises');
 const { spawn } = require('child_process');
 const path = require('path');
@@ -214,6 +214,33 @@ function setupIpcHandlers(runtime, options = {}) {
 		}
 	});
 
+	ipcMain.handle('get-env-config', async () => {
+		if (!runtime || !runtime.getEnvConfig) {
+			return { ok: false, error: 'runtime not ready', path: '', envs: {} };
+		}
+
+		try {
+			const envs = await runtime.getEnvConfig();
+			return { ok: true, path: runtime.envDirPath || '', envs };
+		} catch (error) {
+			return { ok: false, error: error.message, path: runtime.envDirPath || '', envs: {} };
+		}
+	});
+
+	ipcMain.handle('save-env-config', async (_, env) => {
+		if (!runtime || !runtime.setEnvConfig) {
+			return { ok: false, error: 'runtime not ready', path: '', envs: {} };
+		}
+
+		try {
+			const savedEnv = await runtime.setEnvConfig(env);
+			await runtime.reloadEndpoints('ui-save-env-config');
+			return { ok: true, path: runtime.envDirPath || '', envs: savedEnv };
+		} catch (error) {
+			return { ok: false, error: error.message, path: runtime.envDirPath || '', envs: {} };
+		}
+	});
+
 	ipcMain.handle('request-system-permissions', async (_, permissions) => {
 		const normalizedPermissions = normalizePermissionNames(permissions);
 		const granted = [];
@@ -281,6 +308,15 @@ function setupIpcHandlers(runtime, options = {}) {
 			return { ok: true };
 		} catch (error) {
 			return { ok: false, error: error.message };
+		}
+	});
+
+	ipcMain.handle('copy-text-to-clipboard', async (_, text) => {
+		try {
+			clipboard.writeText(String(text ?? ''));
+			return { ok: true };
+		} catch (error) {
+			return { ok: false, error: error.message || 'unable to copy text to clipboard' };
 		}
 	});
 

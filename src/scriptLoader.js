@@ -34,7 +34,7 @@ function loadEndpointModule(tsFilePath, sourceCode, options = {}) {
 		'module',
 		'__filename',
 		'__dirname',
-		transpiled.outputText,
+		'const Env = require("core").Env;\n' + transpiled.outputText,
 	);
 
 	executor(moduleObject.exports, scriptRequire, moduleObject, tsFilePath, scriptDir);
