@@ -2281,7 +2281,7 @@
 									class="network-geo-link"
 									title="Open WGS84 coordinates in Google Maps"
 								>
-									WGS84 {selectedNetworkNodeData.geoCoordinates.label}
+									{selectedNetworkNodeData.geoCoordinates.label}
 								</a>
 								<button
 									type="button"
@@ -2289,7 +2289,7 @@
 									title="Copy WGS84 coordinates"
 									on:click={() => copyNetworkGeoCoordinates(selectedNetworkNodeData)}
 								>
-									Copy
+									<i class="fa-solid fa-copy"></i>
 								</button>
 							{:else}
 								<span>{selectedNetworkNodeData?.geo || '-'}</span>
