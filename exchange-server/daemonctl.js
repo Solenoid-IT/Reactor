@@ -32,6 +32,7 @@ function usage() {
 	console.log('Usage:');
 	console.log('  node daemonctl.js status');
 	console.log('  node daemonctl.js generate-tls-cert [--bits <1024-8192>] [--days <1-36500>]');
+	console.log('  node daemonctl.js fix-tls-perms');
 	process.exit(1);
 }
 
@@ -185,6 +186,20 @@ function getCertPaths() {
 	};
 }
 
+async function ensureTlsPermissions(paths) {
+	const { tlsDir, certPath, keyPath } = paths || {};
+	if (!tlsDir || !certPath || !keyPath) {
+		throw new Error('TLS paths are required to set secure permissions');
+	}
+
+	// Restrictive default permissions for direct TLS usage.
+	await Promise.all([
+		fs.chmod(tlsDir, 0o700),
+		fs.chmod(certPath, 0o644),
+		fs.chmod(keyPath, 0o600),
+	]);
+}
+
 function parseOpenSslCertInfo(output) {
 	const info = { enabled: true };
 	for (const line of String(output || '').split('\n')) {
@@ -250,6 +265,7 @@ function generateSelfSignedCert(reactorName, bits, days) {
 			],
 			{ stdio: 'pipe' },
 		))
+		.then(() => ensureTlsPermissions({ tlsDir, certPath, keyPath }))
 		.then(() => getTlsCertInfo())
 		.then((info) => ({
 			...info,
@@ -396,6 +412,25 @@ async function handleGenerateTlsCert(rest) {
 	if (tls.fingerprint) console.log(`SHA256:  ${tls.fingerprint}`);
 }
 
+async function handleFixTlsPerms(rest) {
+	if (rest.length > 0) {
+		usage();
+	}
+
+	const tlsPaths = getCertPaths();
+	await Promise.all([
+		fs.access(tlsPaths.tlsDir),
+		fs.access(tlsPaths.certPath),
+		fs.access(tlsPaths.keyPath),
+	]);
+
+	await ensureTlsPermissions(tlsPaths);
+	console.log('TLS permissions normalized');
+	console.log(`dir:      ${tlsPaths.tlsDir} (700)`);
+	console.log(`cert.pem: ${tlsPaths.certPath} (644)`);
+	console.log(`key.pem:  ${tlsPaths.keyPath} (600)`);
+}
+
 async function main() {
 	const [, , command, ...rest] = process.argv;
 	if (!command) {
@@ -409,6 +444,11 @@ async function main() {
 
 	if (command === 'generate-tls-cert') {
 		await handleGenerateTlsCert(rest);
+		return;
+	}
+
+	if (command === 'fix-tls-perms') {
+		await handleFixTlsPerms(rest);
 		return;
 	}
 

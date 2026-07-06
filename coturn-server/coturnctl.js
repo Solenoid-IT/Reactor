@@ -4,6 +4,7 @@ const { TlsManager } = require('./src/tlsManager');
 function usage() {
 	console.log('Usage:');
 	console.log('  node coturnctl.js generate-tls-cert [--cn <name>] [--bits <1024-8192>] [--days <1-36500>]');
+	console.log('  node coturnctl.js fix-tls-perms');
 	process.exit(1);
 }
 
@@ -67,6 +68,19 @@ async function main() {
 		console.log(`key.pem:  ${path.join(certDir, 'key.pem')}`);
 		console.log(`subject:  ${result.subject || '-'}`);
 		console.log(`notAfter: ${result.notAfter || '-'}`);
+		return;
+	}
+
+	if (command === 'fix-tls-perms') {
+		if (rest.length > 0) {
+			usage();
+		}
+
+		await tlsManager.fixPermissions();
+		console.log('TLS permissions normalized');
+		console.log(`dir:      ${certDir} (700)`);
+		console.log(`cert.pem: ${path.join(certDir, 'cert.pem')} (644)`);
+		console.log(`key.pem:  ${path.join(certDir, 'key.pem')} (600)`);
 		return;
 	}
 

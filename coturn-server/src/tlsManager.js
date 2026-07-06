@@ -12,6 +12,14 @@ class TlsManager {
 		this.keyPath = path.join(tlsDir, KEY_FILE);
 	}
 
+	async fixPermissions() {
+		await Promise.all([
+			fs.chmod(this.tlsDir, 0o700),
+			fs.chmod(this.certPath, 0o644),
+			fs.chmod(this.keyPath, 0o600),
+		]);
+	}
+
 	async hasCert() {
 		try {
 			await Promise.all([fs.access(this.certPath), fs.access(this.keyPath)]);
@@ -70,6 +78,8 @@ class TlsManager {
 			const msg = err.stderr ? err.stderr.toString().trim() : err.message;
 			throw new Error(`openssl not available or certificate generation failed: ${msg}`);
 		}
+
+		await this.fixPermissions();
 
 		const info = await this.getCertInfo();
 		return {

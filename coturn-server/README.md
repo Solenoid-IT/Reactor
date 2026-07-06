@@ -17,6 +17,12 @@ cd coturn-server
 node coturnctl.js generate-tls-cert --cn turn.local
 ```
 
+Normalize permissions for existing certificate files:
+
+```bash
+node coturnctl.js fix-tls-perms
+```
+
 ## Start
 
 ```bash

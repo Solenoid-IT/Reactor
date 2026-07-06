@@ -61,6 +61,11 @@ node daemonctl.js generate-tls-cert
 ```
 
 This command is intended to be run before starting Docker.
+It now also enforces secure file permissions automatically:
+
+- TLS directory: `700`
+- `cert.pem`: `644`
+- `key.pem`: `600`
 
 Optional parameters:
 
@@ -68,11 +73,25 @@ Optional parameters:
 node daemonctl.js generate-tls-cert --bits 4096 --days 3650
 ```
 
+Normalize permissions for existing certificate files:
+
+```bash
+node daemonctl.js fix-tls-perms
+```
+
 Alternative (if the container is already running):
 
 ```bash
 docker compose exec reactor-exchange node daemonctl.js generate-tls-cert
 ```
+
+You can normalize permissions from inside the container too:
+
+```bash
+docker compose exec reactor-exchange node daemonctl.js fix-tls-perms
+```
+
+For Docker deployments, generating the certificate from inside the container is recommended because files are created with the same runtime user used by the daemon.
 
 Generated files are written on host at:
 
