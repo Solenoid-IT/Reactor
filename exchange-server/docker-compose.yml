@@ -13,6 +13,7 @@ services:
       - "${PORT:-7070}:${PORT:-7070}"
     volumes:
       - ./.env:/app/exchange-server/.env
+      - ./cert:/data/tls
       - reactor-exchange-data:/data
     healthcheck:
       test: ["CMD", "node", "daemonctl.js", "status"]

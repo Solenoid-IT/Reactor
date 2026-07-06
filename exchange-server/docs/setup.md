@@ -57,10 +57,17 @@ Optional parameters:
 docker compose exec reactor-exchange node daemonctl.js generate-tls-cert --bits 4096 --days 3650
 ```
 
-Generated files are stored in the Exchange data volume:
+Generated files are written inside the container at:
 
 - `/data/tls/cert.pem`
 - `/data/tls/key.pem`
+
+With Docker Compose in this repository, `/data/tls` is bind-mounted to:
+
+- `exchange-server/cert/cert.pem`
+- `exchange-server/cert/key.pem`
+
+So you can also provide your own certificate files directly from host by placing them in `exchange-server/cert/` before starting the container.
 
 Use cases:
 
