@@ -23,9 +23,10 @@ REACTOR_EXCHANGE_TOKEN=
 
 ## 3) Start the default containers (Exchange + coturn)
 
-From the project root:
+From the `exchange-server` directory:
 
 ```bash
+cd exchange-server
 docker compose up -d --build
 ```
 

@@ -3,7 +3,7 @@
 This guide explains how to install Reactor on an Ubuntu or Debian-like server, run it as a headless daemon, configure it as an Exchange server, and generate the shared authentication token used by Reactor nodes.
 
 If you prefer containerized deployment, use the Docker Compose guide:
-- `docs/docker-compose-exchange.md`
+- `docker-compose-exchange.md`
 
 ## What Exchange mode does
 

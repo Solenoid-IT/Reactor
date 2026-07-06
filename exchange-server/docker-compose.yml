@@ -4,7 +4,7 @@ services:
     container_name: reactor-coturn
     restart: always
     env_file:
-      - .env
+      - ../.env
     command:
       - -n
       - --realm=${COTURN_REALM:-reactor.local}
@@ -30,12 +30,12 @@ services:
 
   reactor-exchange:
     build:
-      context: .
-      dockerfile: Dockerfile.daemon
+      context: ..
+      dockerfile: exchange-server/Dockerfile.daemon
     container_name: reactor-exchange
     restart: always
     env_file:
-      - .env
+      - ../.env
     environment:
       REACTOR_DATA_DIR: /data
       REACTOR_HTTP_PORT: ${REACTOR_EXCHANGE_PORT:-7070}
@@ -55,12 +55,12 @@ services:
   reactor-client:
     profiles: ["client"]
     build:
-      context: .
-      dockerfile: Dockerfile.daemon
+      context: ..
+      dockerfile: exchange-server/Dockerfile.daemon
     container_name: reactor-client
     restart: unless-stopped
     env_file:
-      - .env
+      - ../.env
     environment:
       REACTOR_DATA_DIR: /data
       REACTOR_HTTP_PORT: ${REACTOR_CLIENT_PORT:-7071}

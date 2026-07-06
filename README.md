@@ -181,13 +181,13 @@ Important: if you use daemonctl with a custom data directory, use the same REACT
 A service template is included: reactor.service.
 
 For a complete Linux server installation and Exchange configuration guide, see:
-- `docs/linux-server-exchange-setup.md`
+- `exchange-server/linux-server-exchange-setup.md`
 
 For Docker Compose setup as Exchange server, see:
-- `docs/docker-compose-exchange.md`
+- `exchange-server/docker-compose-exchange.md`
 
 For WebRTC STUN/TURN server setup (coturn), see:
-- `docs/setup-webrtc.md`
+- `exchange-server/docker-compose-exchange.md`
 
 Recommended setup:
 

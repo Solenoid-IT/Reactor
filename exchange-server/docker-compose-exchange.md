@@ -9,7 +9,7 @@ You can run:
 
 - `Dockerfile.daemon`
 - `docker-compose.yml`
-- `.env.example`
+- `.env.example` (in project root)
 
 The services run `daemon.js` in headless mode and use `REACTOR_WORKING_MODE`.
 
@@ -20,10 +20,12 @@ The services run `daemon.js` in headless mode and use `REACTOR_WORKING_MODE`.
 
 ## Prepare environment file
 
-Create your local `.env` file from template:
+Create your local `.env` file from template (from project root):
 
 ```bash
+cd ..
 cp .env.example .env
+cd exchange-server
 ```
 
 Edit `.env` for your setup:
@@ -38,6 +40,8 @@ Edit `.env` for your setup:
 - `COTURN_EXTERNAL_IP`
 
 ## Start services
+
+From the `exchange-server` directory:
 
 Start the default stack (Exchange + coturn):
 
