@@ -42,6 +42,16 @@ const DEFAULT_WATCH_CREATED_LARGE_QUIET_MS = 30 * 1000;
 const DEFAULT_WATCH_CREATED_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_WATCH_CREATED_LARGE_FILE_BYTES = 1024 * 1024 * 1024;
 const PROJECT_UUID_FILE = 'uuid';
+const STUN_MAGIC_COOKIE = 0x2112A442;
+const STUN_HEADER_LENGTH = 20;
+const STUN_ATTR_USERNAME = 0x0006;
+const STUN_ATTR_MESSAGE_INTEGRITY = 0x0008;
+const STUN_ATTR_ERROR_CODE = 0x0009;
+const STUN_ATTR_REALM = 0x0014;
+const STUN_ATTR_NONCE = 0x0015;
+const TURN_ATTR_REQUESTED_TRANSPORT = 0x0019;
+const TURN_ALLOCATE_REQUEST = 0x0003;
+const TURN_ALLOCATE_SUCCESS_RESPONSE = 0x0103;
 
 function delay(ms) {
 	return new Promise((resolve) => {
@@ -506,6 +516,411 @@ async function resolveRelayHostAddresses(host) {
 	return resolved;
 }
 
+function createStunHeader(messageType, bodyLength, transactionId) {
+	const header = Buffer.alloc(STUN_HEADER_LENGTH);
+	header.writeUInt16BE(Number(messageType) & 0xffff, 0);
+	header.writeUInt16BE(Number(bodyLength) & 0xffff, 2);
+	header.writeUInt32BE(STUN_MAGIC_COOKIE, 4);
+	transactionId.copy(header, 8, 0, 12);
+	return header;
+}
+
+function encodeStunAttribute(type, value) {
+	const rawValue = Buffer.isBuffer(value) ? value : Buffer.from(value || '');
+	const padding = (4 - (rawValue.length % 4)) % 4;
+	const attribute = Buffer.alloc(4 + rawValue.length + padding);
+	attribute.writeUInt16BE(Number(type) & 0xffff, 0);
+	attribute.writeUInt16BE(rawValue.length, 2);
+	rawValue.copy(attribute, 4);
+	return attribute;
+}
+
+function parseStunMessage(message) {
+	if (!Buffer.isBuffer(message) || message.length < STUN_HEADER_LENGTH) {
+		return null;
+	}
+
+	const bodyLength = message.readUInt16BE(2);
+	const totalLength = STUN_HEADER_LENGTH + bodyLength;
+	if (message.length < totalLength) {
+		return null;
+	}
+	if (message.readUInt32BE(4) !== STUN_MAGIC_COOKIE) {
+		return null;
+	}
+
+	const attributes = [];
+	let offset = STUN_HEADER_LENGTH;
+	while (offset + 4 <= totalLength) {
+		const type = message.readUInt16BE(offset);
+		const length = message.readUInt16BE(offset + 2);
+		const valueStart = offset + 4;
+		const valueEnd = valueStart + length;
+		if (valueEnd > totalLength) {
+			return null;
+		}
+		attributes.push({
+			type,
+			length,
+			value: message.subarray(valueStart, valueEnd),
+		});
+		offset = valueEnd + ((4 - (length % 4)) % 4);
+	}
+
+	return {
+		type: message.readUInt16BE(0),
+		transactionId: message.subarray(8, 20),
+		attributes,
+		raw: message.subarray(0, totalLength),
+	};
+}
+
+function getFirstStunAttribute(message, attributeType) {
+	if (!message || !Array.isArray(message.attributes)) {
+		return null;
+	}
+
+	return message.attributes.find((attribute) => Number(attribute?.type) === Number(attributeType)) || null;
+}
+
+function getStunTextAttribute(message, attributeType) {
+	const attribute = getFirstStunAttribute(message, attributeType);
+	if (!attribute || !Buffer.isBuffer(attribute.value)) {
+		return '';
+	}
+
+	return attribute.value.toString('utf8').trim();
+}
+
+function getStunErrorDetails(message) {
+	const attribute = getFirstStunAttribute(message, STUN_ATTR_ERROR_CODE);
+	if (!attribute || !Buffer.isBuffer(attribute.value) || attribute.value.length < 4) {
+		return null;
+	}
+
+	const errorClass = Number(attribute.value[2] || 0) & 0x07;
+	const errorNumber = Number(attribute.value[3] || 0);
+	const code = errorClass * 100 + errorNumber;
+	const reason = attribute.value.subarray(4).toString('utf8').trim();
+	return {
+		code,
+		reason,
+	};
+}
+
+function buildTurnAllocateRequest({ username = '', realm = '', nonce = '', password = '' } = {}) {
+	const transactionId = crypto.randomBytes(12);
+	const requestedTransport = encodeStunAttribute(TURN_ATTR_REQUESTED_TRANSPORT, Buffer.from([17, 0, 0, 0]));
+
+	if (!username || !realm || !nonce || !password) {
+		const body = requestedTransport;
+		return {
+			transactionId,
+			message: Buffer.concat([createStunHeader(TURN_ALLOCATE_REQUEST, body.length, transactionId), body]),
+		};
+	}
+
+	const authAttributes = Buffer.concat([
+		requestedTransport,
+		encodeStunAttribute(STUN_ATTR_USERNAME, Buffer.from(String(username), 'utf8')),
+		encodeStunAttribute(STUN_ATTR_REALM, Buffer.from(String(realm), 'utf8')),
+		encodeStunAttribute(STUN_ATTR_NONCE, Buffer.from(String(nonce), 'utf8')),
+	]);
+	const bodyLengthWithIntegrity = authAttributes.length + 24;
+	const headerForIntegrity = createStunHeader(TURN_ALLOCATE_REQUEST, bodyLengthWithIntegrity, transactionId);
+	const integrityKey = crypto.createHash('md5').update(`${username}:${realm}:${password}`, 'utf8').digest();
+	const integrityValue = crypto.createHmac('sha1', integrityKey).update(Buffer.concat([headerForIntegrity, authAttributes])).digest();
+	const messageIntegrity = encodeStunAttribute(STUN_ATTR_MESSAGE_INTEGRITY, integrityValue);
+	const body = Buffer.concat([authAttributes, messageIntegrity]);
+
+	return {
+		transactionId,
+		message: Buffer.concat([createStunHeader(TURN_ALLOCATE_REQUEST, body.length, transactionId), body]),
+	};
+}
+
+function describeTurnResponseFailure(message, fallback = 'TURN request failed') {
+	const error = getStunErrorDetails(message);
+	if (!error) {
+		return fallback;
+	}
+
+	return error.reason ? `${error.code} ${error.reason}` : `TURN error ${error.code}`;
+}
+
+function buildTurnTestFailure(error, errorType = 'connection', extra = {}) {
+	return {
+		ok: false,
+		error: String(error || 'TURN test failed'),
+		errorType,
+		...extra,
+	};
+}
+
+function extractTurnAuthChallenge(message) {
+	const error = getStunErrorDetails(message);
+	if (!error) {
+		return buildTurnTestFailure('TURN server returned an invalid auth challenge', 'protocol');
+	}
+	if (![401, 438].includes(error.code)) {
+		return buildTurnTestFailure(describeTurnResponseFailure(message, 'TURN allocate failed'), 'connection');
+	}
+
+	const realm = getStunTextAttribute(message, STUN_ATTR_REALM);
+	const nonce = getStunTextAttribute(message, STUN_ATTR_NONCE);
+	if (!realm || !nonce) {
+		return buildTurnTestFailure('TURN auth challenge missing realm or nonce', 'protocol');
+	}
+
+	return {
+		ok: true,
+		realm,
+		nonce,
+		errorCode: error.code,
+	};
+}
+
+function normalizeTurnCredentials(username, password) {
+	return {
+		username: String(username || '').trim(),
+		password: String(password || '').trim(),
+	};
+}
+
+function sendTurnAllocateRequestUdp(address, family, port, request, timeoutMs = 5000) {
+	return new Promise((resolve) => {
+		const safeAddress = String(address || '').trim();
+		const safeFamily = Number(family) === 6 ? 6 : 4;
+		const safePort = Number(port);
+		if (!safeAddress || !Buffer.isBuffer(request?.message) || !Buffer.isBuffer(request?.transactionId) || request.transactionId.length !== 12 || !Number.isFinite(safePort) || safePort < 1 || safePort > 65535) {
+			resolve({ ok: false, error: 'invalid TURN UDP request parameters' });
+			return;
+		}
+
+		const socket = dgram.createSocket(safeFamily === 6 ? 'udp6' : 'udp4');
+		let finished = false;
+		const finish = (result) => {
+			if (finished) {
+				return;
+			}
+			finished = true;
+			clearTimeout(timer);
+			try {
+				socket.close();
+			} catch {
+				// ignore
+			}
+			resolve(result);
+		};
+
+		socket.once('error', (error) => {
+			finish({ ok: false, error: error.message || 'udp error' });
+		});
+
+		socket.on('message', (message) => {
+			const parsed = parseStunMessage(message);
+			if (!parsed) {
+				return;
+			}
+			if (!parsed.transactionId.equals(request.transactionId)) {
+				return;
+			}
+
+			finish({
+				ok: true,
+				protocol: 'udp-auth',
+				message: parsed,
+			});
+		});
+
+		socket.send(request.message, safePort, safeAddress, (error) => {
+			if (error) {
+				finish({ ok: false, error: error.message || 'unable to send TURN allocate request' });
+			}
+		});
+
+		const timer = setTimeout(() => {
+			finish({ ok: false, error: 'timeout waiting TURN UDP response' });
+		}, Number(timeoutMs) > 0 ? Number(timeoutMs) : 5000);
+	});
+}
+
+function sendTurnAllocateRequestTls(host, address, port, request, timeoutMs = 5000) {
+	return new Promise((resolve) => {
+		const safeHost = normalizeRelayHost(host);
+		const safeAddress = String(address || '').trim();
+		const safePort = Number(port);
+		if (!safeHost || !safeAddress || !Buffer.isBuffer(request?.message) || !Buffer.isBuffer(request?.transactionId) || request.transactionId.length !== 12 || !Number.isFinite(safePort) || safePort < 1 || safePort > 65535) {
+			resolve({ ok: false, error: 'invalid TURN TLS request parameters' });
+			return;
+		}
+
+		let finished = false;
+		let pending = Buffer.alloc(0);
+		const socket = tls.connect({
+			host: safeAddress,
+			port: safePort,
+			rejectUnauthorized: false,
+			servername: safeHost,
+		});
+		const finish = (result) => {
+			if (finished) {
+				return;
+			}
+			finished = true;
+			clearTimeout(timer);
+			try {
+				socket.destroy();
+			} catch {
+				// ignore
+			}
+			resolve(result);
+		};
+
+		socket.once('secureConnect', () => {
+			const frame = Buffer.alloc(2 + request.message.length);
+			frame.writeUInt16BE(request.message.length, 0);
+			request.message.copy(frame, 2);
+			socket.write(frame);
+		});
+
+		socket.on('data', (chunk) => {
+			pending = Buffer.concat([pending, Buffer.from(chunk)]);
+			while (pending.length >= 2) {
+				const frameLength = pending.readUInt16BE(0);
+				if (pending.length < frameLength + 2) {
+					return;
+				}
+
+				const frame = pending.subarray(2, 2 + frameLength);
+				pending = pending.subarray(2 + frameLength);
+				const parsed = parseStunMessage(frame);
+				if (!parsed) {
+					continue;
+				}
+				if (!parsed.transactionId.equals(request.transactionId)) {
+					continue;
+				}
+
+				finish({
+					ok: true,
+					protocol: 'tls-auth',
+					message: parsed,
+				});
+				return;
+			}
+		});
+
+		socket.once('error', (error) => {
+			finish({ ok: false, error: error.message || 'tls connection failed' });
+		});
+
+		socket.once('end', () => {
+			finish({ ok: false, error: 'TURN TLS socket closed before response' });
+		});
+
+		const timer = setTimeout(() => {
+			finish({ ok: false, error: 'timeout waiting TURN TLS response' });
+		}, Number(timeoutMs) > 0 ? Number(timeoutMs) : 5000);
+	});
+}
+
+async function performTurnAuthenticatedAllocate(sendRequest, credentials) {
+	const initialRequest = buildTurnAllocateRequest();
+	const initialResponse = await sendRequest(initialRequest);
+	if (!initialResponse.ok) {
+		return buildTurnTestFailure(initialResponse.error || 'TURN connection failed', 'connection');
+	}
+	if (initialResponse.message?.type === TURN_ALLOCATE_SUCCESS_RESPONSE) {
+		return {
+			ok: true,
+			protocol: initialResponse.protocol,
+			message: 'TURN allocation succeeded',
+		};
+	}
+
+	const challenge = extractTurnAuthChallenge(initialResponse.message);
+	if (!challenge.ok) {
+		return challenge;
+	}
+
+	if (!credentials.username || !credentials.password) {
+		return buildTurnTestFailure('TURN credentials are required for authenticated test', 'authentication');
+	}
+
+	for (let attemptIndex = 0; attemptIndex < 2; attemptIndex += 1) {
+		const authenticatedRequest = buildTurnAllocateRequest({
+			username: credentials.username,
+			realm: challenge.realm,
+			nonce: challenge.nonce,
+			password: credentials.password,
+		});
+		const authenticatedResponse = await sendRequest(authenticatedRequest);
+		if (!authenticatedResponse.ok) {
+			return buildTurnTestFailure(authenticatedResponse.error || 'TURN connection failed', 'connection');
+		}
+		if (authenticatedResponse.message?.type === TURN_ALLOCATE_SUCCESS_RESPONSE) {
+			return {
+				ok: true,
+				protocol: authenticatedResponse.protocol,
+				message: 'TURN allocation authenticated',
+			};
+		}
+
+		const error = getStunErrorDetails(authenticatedResponse.message);
+		if (error?.code === 438) {
+			const refreshedChallenge = extractTurnAuthChallenge(authenticatedResponse.message);
+			if (!refreshedChallenge.ok) {
+				return refreshedChallenge;
+			}
+			challenge.realm = refreshedChallenge.realm;
+			challenge.nonce = refreshedChallenge.nonce;
+			continue;
+		}
+
+		return buildTurnTestFailure(describeTurnResponseFailure(authenticatedResponse.message, 'TURN authentication failed'), 'authentication');
+	}
+
+	return buildTurnTestFailure('TURN authentication failed: stale nonce retry limit reached', 'authentication');
+}
+
+async function testTurnRelayAuthentication(host, port, useTls, username, password, timeoutMs = 5000) {
+	const safeHost = normalizeRelayHost(host);
+	const safePort = Number(port);
+	if (!safeHost || !Number.isFinite(safePort) || safePort < 1 || safePort > 65535) {
+		return buildTurnTestFailure('invalid host or port', 'configuration');
+	}
+
+	const addresses = await resolveRelayHostAddresses(safeHost);
+	if (!addresses.length) {
+		return buildTurnTestFailure(`unable to resolve host '${safeHost}'`, 'connection');
+	}
+
+	const credentials = normalizeTurnCredentials(username, password);
+	const candidates = useTls ? [...addresses] : [...addresses].sort((a, b) => Number(a.family || 4) - Number(b.family || 4));
+	const errors = [];
+	for (const candidate of candidates) {
+		const sendRequest = useTls
+			? (request) => sendTurnAllocateRequestTls(safeHost, candidate.address, safePort, request, timeoutMs)
+			: (request) => sendTurnAllocateRequestUdp(candidate.address, candidate.family, safePort, request, timeoutMs);
+		const attempt = await performTurnAuthenticatedAllocate(sendRequest, credentials);
+		if (attempt.ok) {
+			return {
+				...attempt,
+				host: safeHost,
+				resolvedAddress: candidate.address,
+				family: candidate.family,
+			};
+		}
+		errors.push(`${candidate.address}: ${attempt.error || 'failed'}`);
+	}
+
+	return {
+		...buildTurnTestFailure(errors[0] || 'unable to authenticate TURN relay', 'connection'),
+		host: safeHost,
+	};
+}
+
 function testUdpStunBindingWithAddress(address, family, port, timeoutMs = 5000) {
 	return new Promise((resolve) => {
 		const safeAddress = String(address || '').trim();
@@ -521,7 +936,7 @@ function testUdpStunBindingWithAddress(address, family, port, timeoutMs = 5000) 
 		const request = Buffer.alloc(20);
 		request.writeUInt16BE(0x0001, 0);
 		request.writeUInt16BE(0x0000, 2);
-		request.writeUInt32BE(0x2112A442, 4);
+		request.writeUInt32BE(STUN_MAGIC_COOKIE, 4);
 		transactionId.copy(request, 8);
 
 		let finished = false;
@@ -550,7 +965,7 @@ function testUdpStunBindingWithAddress(address, family, port, timeoutMs = 5000) 
 
 			const cookie = message.readUInt32BE(4);
 			const responseTxId = message.subarray(8, 20);
-			if (cookie !== 0x2112A442) {
+			if (cookie !== STUN_MAGIC_COOKIE) {
 				return;
 			}
 			if (!responseTxId.equals(transactionId)) {
@@ -1982,9 +2397,16 @@ class ReactorRuntime {
 			return { ok: false, error: `${safeKind.toUpperCase()} host is required` };
 		}
 
-		const testResult = endpoint.tls
-			? await testTlsRelay(endpoint.host, endpoint.port, 5000)
-			: await testUdpStunBinding(endpoint.host, endpoint.port, 5000);
+		let testResult;
+		if (safeKind === 'stun') {
+			testResult = endpoint.tls
+				? await testTlsRelay(endpoint.host, endpoint.port, 5000)
+				: await testUdpStunBinding(endpoint.host, endpoint.port, 5000);
+		} else {
+			const turnUsername = String(endpoint.username || this.exchangeAuthToken || '').trim();
+			const turnPassword = String(endpoint.password || this.exchangeAuthToken || '').trim();
+			testResult = await testTurnRelayAuthentication(endpoint.host, endpoint.port, endpoint.tls, turnUsername, turnPassword, 5000);
+		}
 
 		return {
 			...testResult,

@@ -585,6 +585,27 @@
 		exchangeStatus = { state: 'disconnected', connected: false, authenticated: false, reason: 'Exchange connection unavailable', mode: 'node' };
 	}
 
+	function formatExchangeConnectionFailure(connectionTest) {
+		const reason = String(connectionTest?.reason || '').trim() || 'connection test failed';
+		if (String(connectionTest?.errorType || '').trim().toLowerCase() === 'authentication') {
+			return `Exchange config saved but authentication failed (${reason})`;
+		}
+		return `Exchange config saved but connection failed (${reason})`;
+	}
+
+	function formatRelayFailure(kind, test) {
+		const safeKind = String(kind || '').trim().toUpperCase();
+		const reason = String(test?.error || '').trim() || 'unreachable';
+		const errorType = String(test?.errorType || '').trim().toLowerCase();
+		if (errorType === 'authentication') {
+			return `${safeKind} authentication failed: ${reason}`;
+		}
+		if (errorType === 'configuration') {
+			return `${safeKind} configuration invalid: ${reason}`;
+		}
+		return `${safeKind} connection failed: ${reason}`;
+	}
+
 	function applyRuntimeStatusSnapshot(snapshot) {
 		if (!snapshot || typeof snapshot !== 'object') {
 			return;
@@ -1702,7 +1723,7 @@
 		} else if (mode === 'node' && connectionTest) {
 			status = connectionTest.connected
 				? `Exchange config saved and connected (${Boolean(tls) ? 'WSS' : 'WS'})`
-				: `Exchange config saved but not connected (${connectionTest.reason || 'connection test failed'})`;
+				: formatExchangeConnectionFailure(connectionTest);
 		} else {
 			status = `Exchange config saved: mode=${mode}${Boolean(tls) ? ' (TLS)' : ''}`;
 		}
@@ -1750,7 +1771,7 @@
 			stunTestConnected = true;
 			status = 'STUN saved and reachable';
 		} else {
-			stunTestStatus = `STUN test failed: ${test.error || 'unreachable'}`;
+			stunTestStatus = formatRelayFailure('STUN', test);
 			stunTestConnected = false;
 			status = stunTestStatus;
 		}
@@ -1780,9 +1801,9 @@
 		if (test.ok) {
 			turnTestStatus = `TURN OK (${test.protocol || (safeConfig.tls ? 'tls' : 'udp')})`;
 			turnTestConnected = true;
-			status = 'TURN saved and reachable';
+			status = 'TURN saved and authenticated';
 		} else {
-			turnTestStatus = `TURN test failed: ${test.error || 'unreachable'}`;
+			turnTestStatus = formatRelayFailure('TURN', test);
 			turnTestConnected = false;
 			status = turnTestStatus;
 		}
@@ -2106,6 +2127,7 @@
 			{exchangeToken}
 			discovery={exchangeDiscovery}
 			{exchangeActive}
+			{exchangeStatus}
 			{exchangeClients}
 			{p2pStatus}
 			linkedNodes={exchangeLinkedNodes}

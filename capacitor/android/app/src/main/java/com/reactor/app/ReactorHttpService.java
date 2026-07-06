@@ -144,6 +144,10 @@ public class ReactorHttpService extends Service {
     private static volatile boolean currentExchangeTls = false;
     private static volatile String currentExchangeToken = "";
     private static volatile WebSocket wsExchangeClientSocket = null;
+    private static volatile boolean exchangeClientAuthenticated = false;
+    private static volatile String exchangeClientLastError = "";
+    private static volatile String exchangeClientLastCloseReason = "";
+    private static volatile int exchangeClientLastCloseCode = 0;
     private static final ConcurrentHashMap<String, JSONObject> p2pSessions = new ConcurrentHashMap<>();
     private static final Set<String> exchangeRemotePeers = ConcurrentHashMap.newKeySet();
     private static final ConcurrentHashMap<String, Long> p2pAutodialAttempts = new ConcurrentHashMap<>();
@@ -363,6 +367,10 @@ public class ReactorHttpService extends Service {
         return "exchange".equals(currentExchangeMode) && running;
     }
     public static boolean isExchangeClientConnected() { return wsExchangeClientSocket != null; }
+    public static boolean isExchangeClientAuthenticated() { return exchangeClientAuthenticated; }
+    public static String getExchangeClientLastError() { return exchangeClientLastError; }
+    public static String getExchangeClientLastCloseReason() { return exchangeClientLastCloseReason; }
+    public static int getExchangeClientLastCloseCode() { return exchangeClientLastCloseCode; }
     public static boolean isExchangeClientConnecting() {
         ReactorHttpService current = instance;
         return current != null
@@ -6294,6 +6302,10 @@ public class ReactorHttpService extends Service {
 
         String url = (currentExchangeTls ? "wss://" : "ws://") + endpoint.host + ":" + endpoint.port;
         appendGlobalLog(buildExchangeLog("CLIENT_CONNECTING", "connecting to " + url));
+        exchangeClientAuthenticated = false;
+        exchangeClientLastError = "";
+        exchangeClientLastCloseReason = "";
+        exchangeClientLastCloseCode = 0;
         Request.Builder requestBuilder = new Request.Builder().url(url);
         String token = readExchangeToken();
         if (token.isEmpty()) {
@@ -6315,6 +6327,10 @@ public class ReactorHttpService extends Service {
                     }
                     wsExchangeClientSocket = webSocket;
                 }
+                exchangeClientAuthenticated = false;
+                exchangeClientLastError = "";
+                exchangeClientLastCloseReason = "";
+                exchangeClientLastCloseCode = 0;
                 emitExchangeConnectionStatusUpdate();
                 synchronized (lock) {
                     connected[0] = true;
@@ -6416,6 +6432,9 @@ public class ReactorHttpService extends Service {
                         wsExchangeClientSocket = null;
                     }
                 }
+                exchangeClientAuthenticated = false;
+                exchangeClientLastCloseCode = code;
+                exchangeClientLastCloseReason = reason != null ? reason : "";
                 emitExchangeConnectionStatusUpdate();
                 exchangeRemotePeers.clear();
                 p2pAutodialAttempts.clear();
@@ -6436,15 +6455,17 @@ public class ReactorHttpService extends Service {
                         wsExchangeClientSocket = null;
                     }
                 }
+                String detail = t.getMessage() != null ? t.getMessage() : "unknown error";
+                if (response != null) {
+                    detail += " (HTTP " + response.code() + ")";
+                }
+                exchangeClientAuthenticated = false;
+                exchangeClientLastError = detail;
                 emitExchangeConnectionStatusUpdate();
                 exchangeRemotePeers.clear();
                 p2pAutodialAttempts.clear();
                 synchronized (wsClientPendingBinaryChunks) {
                     wsClientPendingBinaryChunks.clear();
-                }
-                String detail = t.getMessage() != null ? t.getMessage() : "unknown error";
-                if (response != null) {
-                    detail += " (HTTP " + response.code() + ")";
                 }
                 appendGlobalLog(buildExchangeLog("CLIENT_FAILURE", detail));
                 synchronized (lock) {
@@ -6794,10 +6815,18 @@ public class ReactorHttpService extends Service {
             JSONObject packet = new JSONObject(text);
             String type = packet.optString("type", "").trim().toLowerCase(Locale.ROOT);
             if ("registered".equals(type)) {
+                exchangeClientAuthenticated = true;
+                exchangeClientLastError = "";
+                exchangeClientLastCloseReason = "";
+                exchangeClientLastCloseCode = 0;
+                emitExchangeConnectionStatusUpdate();
                 appendGlobalLog(buildExchangeLog("CLIENT_REGISTERED", "exchange registration acknowledged as " + packet.optString("name", "unknown")));
                 return;
             }
             if ("auth-error".equals(type)) {
+                exchangeClientAuthenticated = false;
+                exchangeClientLastError = packet.optString("error", "invalid token");
+                emitExchangeConnectionStatusUpdate();
                 appendGlobalLog(buildExchangeLog("AUTH_REJECTED", "exchange auth error: " + packet.optString("error", "invalid token")));
                 return;
             }

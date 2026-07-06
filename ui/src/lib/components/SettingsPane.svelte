@@ -30,6 +30,7 @@
 	export let exchangeToken = '';
 	export let discovery = false;
 	export let exchangeActive = false;
+	export let exchangeStatus = { state: 'disconnected', connected: false, authenticated: false, reason: '', errorType: '' };
 	export let exchangeClients = [];
 	export let p2pStatus = { enabled: false, signalingViaExchange: true, sessions: [], remotePeers: [], iceServersConfigured: false, iceServers: [] };
 	export let linkedNodes = [];
@@ -574,6 +575,9 @@
 						<div class="detail-value mt-4" style="color: var(--color-success, #4caf50);"><i class="fa-solid fa-plug me-1"></i>Connected{exchangeTls ? ' (WSS)' : ' (WS)'}</div>
 					{:else}
 						<div class="detail-value mt-4" style="opacity:0.5;"><i class="fa-solid fa-plug-circle-xmark me-1"></i>Not connected</div>
+						{#if exchangeStatus?.reason}
+							<div class="detail-value mt-1" style="font-size:0.8em; opacity:0.75; color: {exchangeStatus?.errorType === 'authentication' || exchangeStatus?.state === 'auth-failed' ? 'var(--color-danger, #ff6b6b)' : 'inherit'};">{exchangeStatus.reason}</div>
+						{/if}
 					{/if}
 				</fieldset>
 			{/if}

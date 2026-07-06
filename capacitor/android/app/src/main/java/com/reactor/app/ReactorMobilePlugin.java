@@ -44,6 +44,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.util.Comparator;
@@ -71,8 +72,11 @@ import java.util.LinkedHashSet;
 import java.util.Set;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -95,8 +99,40 @@ public class ReactorMobilePlugin extends Plugin {
     private static final String ENDPOINT_TEMPLATES_DIR = "templates";
     private static final String ENDPOINT_TEMPLATE_ASSETS_DIR = "public/templates";
     private static final Set<String> ALLOWED_ENDPOINT_TEMPLATE_KEYS = new LinkedHashSet<>(Arrays.asList("blank", "schedule", "event", "watch"));
+    private static final int STUN_MAGIC_COOKIE = 0x2112A442;
+    private static final int STUN_HEADER_LENGTH = 20;
+    private static final int STUN_ATTR_USERNAME = 0x0006;
+    private static final int STUN_ATTR_MESSAGE_INTEGRITY = 0x0008;
+    private static final int STUN_ATTR_ERROR_CODE = 0x0009;
+    private static final int STUN_ATTR_REALM = 0x0014;
+    private static final int STUN_ATTR_NONCE = 0x0015;
+    private static final int TURN_ATTR_REQUESTED_TRANSPORT = 0x0019;
+    private static final int TURN_ALLOCATE_REQUEST = 0x0003;
+    private static final int TURN_ALLOCATE_SUCCESS_RESPONSE = 0x0103;
     private File pendingBackupExportFile = null;
     private AndroidP2PWebRtcManager nativeP2PManager;
+
+    private static final class TurnRequest {
+        final byte[] transactionId;
+        final byte[] message;
+
+        TurnRequest(byte[] transactionId, byte[] message) {
+            this.transactionId = transactionId;
+            this.message = message;
+        }
+    }
+
+    private static final class TurnMessage {
+        final int type;
+        final byte[] transactionId;
+        final Map<Integer, byte[]> attributes;
+
+        TurnMessage(int type, byte[] transactionId, Map<Integer, byte[]> attributes) {
+            this.type = type;
+            this.transactionId = transactionId;
+            this.attributes = attributes;
+        }
+    }
 
     @Override
     public void load() {
@@ -657,13 +693,13 @@ public class ReactorMobilePlugin extends Plugin {
     private JSObject testTcpRelay(String host, int port, String label) {
         String safeHost = sanitizeNetworkHost(host);
         if (safeHost.isEmpty()) {
-            return new JSObject().put("ok", false).put("error", label + " host is empty");
+            return buildRelayTestFailure(label + " host is empty", "configuration");
         }
 
         long startedAt = System.currentTimeMillis();
         List<InetAddress> addresses = resolveHostAddresses(safeHost);
         if (addresses.isEmpty()) {
-            return new JSObject().put("ok", false).put("error", "Unable to resolve host \"" + safeHost + "\"");
+            return buildRelayTestFailure("Unable to resolve host \"" + safeHost + "\"", "connection");
         }
 
         String lastError = "";
@@ -679,7 +715,350 @@ public class ReactorMobilePlugin extends Plugin {
             }
         }
 
-        return new JSObject().put("ok", false).put("error", lastError.isEmpty() ? (label + " tcp test failed") : lastError);
+        return buildRelayTestFailure(lastError.isEmpty() ? (label + " tcp test failed") : lastError, "connection");
+    }
+
+    private JSObject buildRelayTestFailure(String error, String errorType) {
+        return new JSObject()
+                .put("ok", false)
+                .put("error", error != null ? error : "relay test failed")
+                .put("errorType", errorType != null ? errorType : "connection");
+    }
+
+    private String classifyExchangeFailureType(String reason, int closeCode) {
+        String safeReason = String.valueOf(reason == null ? "" : reason).trim().toLowerCase(Locale.ROOT);
+        if (closeCode == 4001) {
+            return "authentication";
+        }
+        if (safeReason.contains("invalid exchange token")
+                || safeReason.contains("auth error")
+                || safeReason.contains("unauthorized")
+                || safeReason.contains("http 401")
+                || safeReason.contains("bearer token")) {
+            return "authentication";
+        }
+        return "connection";
+    }
+
+    private byte[] buildStunHeader(int messageType, int bodyLength, byte[] transactionId) {
+        byte[] header = new byte[STUN_HEADER_LENGTH];
+        header[0] = (byte) ((messageType >> 8) & 0xff);
+        header[1] = (byte) (messageType & 0xff);
+        header[2] = (byte) ((bodyLength >> 8) & 0xff);
+        header[3] = (byte) (bodyLength & 0xff);
+        header[4] = 0x21;
+        header[5] = 0x12;
+        header[6] = (byte) 0xA4;
+        header[7] = 0x42;
+        System.arraycopy(transactionId, 0, header, 8, Math.min(12, transactionId.length));
+        return header;
+    }
+
+    private byte[] encodeStunAttribute(int type, byte[] value) {
+        byte[] safeValue = value != null ? value : new byte[0];
+        int padding = (4 - (safeValue.length % 4)) % 4;
+        byte[] attribute = new byte[4 + safeValue.length + padding];
+        attribute[0] = (byte) ((type >> 8) & 0xff);
+        attribute[1] = (byte) (type & 0xff);
+        attribute[2] = (byte) ((safeValue.length >> 8) & 0xff);
+        attribute[3] = (byte) (safeValue.length & 0xff);
+        System.arraycopy(safeValue, 0, attribute, 4, safeValue.length);
+        return attribute;
+    }
+
+    private TurnMessage parseTurnMessage(byte[] data, int length) {
+        if (data == null || length < STUN_HEADER_LENGTH) {
+            return null;
+        }
+
+        int bodyLength = ((data[2] & 0xff) << 8) | (data[3] & 0xff);
+        int totalLength = STUN_HEADER_LENGTH + bodyLength;
+        if (length < totalLength) {
+            return null;
+        }
+        int magicCookie = ((data[4] & 0xff) << 24) | ((data[5] & 0xff) << 16) | ((data[6] & 0xff) << 8) | (data[7] & 0xff);
+        if (magicCookie != STUN_MAGIC_COOKIE) {
+            return null;
+        }
+
+        Map<Integer, byte[]> attributes = new HashMap<>();
+        int offset = STUN_HEADER_LENGTH;
+        while (offset + 4 <= totalLength) {
+            int type = ((data[offset] & 0xff) << 8) | (data[offset + 1] & 0xff);
+            int attrLength = ((data[offset + 2] & 0xff) << 8) | (data[offset + 3] & 0xff);
+            int valueStart = offset + 4;
+            int valueEnd = valueStart + attrLength;
+            if (valueEnd > totalLength) {
+                return null;
+            }
+            byte[] value = Arrays.copyOfRange(data, valueStart, valueEnd);
+            attributes.put(type, value);
+            offset = valueEnd + ((4 - (attrLength % 4)) % 4);
+        }
+
+        int type = ((data[0] & 0xff) << 8) | (data[1] & 0xff);
+        byte[] transactionId = Arrays.copyOfRange(data, 8, 20);
+        return new TurnMessage(type, transactionId, attributes);
+    }
+
+    private String getTurnTextAttribute(TurnMessage message, int attributeType) {
+        if (message == null || message.attributes == null) {
+            return "";
+        }
+
+        byte[] raw = message.attributes.get(attributeType);
+        if (raw == null || raw.length == 0) {
+            return "";
+        }
+        return new String(raw, StandardCharsets.UTF_8).trim();
+    }
+
+    private JSObject getTurnErrorDetails(TurnMessage message) {
+        if (message == null || message.attributes == null) {
+            return null;
+        }
+
+        byte[] raw = message.attributes.get(STUN_ATTR_ERROR_CODE);
+        if (raw == null || raw.length < 4) {
+            return null;
+        }
+
+        int errorClass = raw[2] & 0x07;
+        int errorNumber = raw[3] & 0xff;
+        int code = (errorClass * 100) + errorNumber;
+        String reason = raw.length > 4 ? new String(Arrays.copyOfRange(raw, 4, raw.length), StandardCharsets.UTF_8).trim() : "";
+        return new JSObject().put("code", code).put("reason", reason);
+    }
+
+    private String describeTurnResponseFailure(TurnMessage message, String fallback) {
+        JSObject error = getTurnErrorDetails(message);
+        if (error == null) {
+            return fallback;
+        }
+        int code = error.optInt("code", 0);
+        String reason = error.optString("reason", "").trim();
+        return reason.isEmpty() ? ("TURN error " + code) : (code + " " + reason);
+    }
+
+    private TurnRequest buildTurnAllocateRequest(String username, String realm, String nonce, String password) throws Exception {
+        byte[] transactionId = new byte[12];
+        new SecureRandom().nextBytes(transactionId);
+        byte[] requestedTransport = encodeStunAttribute(TURN_ATTR_REQUESTED_TRANSPORT, new byte[] { 17, 0, 0, 0 });
+
+        if (username == null || username.trim().isEmpty() || realm == null || realm.trim().isEmpty() || nonce == null || nonce.trim().isEmpty() || password == null || password.trim().isEmpty()) {
+            byte[] header = buildStunHeader(TURN_ALLOCATE_REQUEST, requestedTransport.length, transactionId);
+            byte[] message = new byte[header.length + requestedTransport.length];
+            System.arraycopy(header, 0, message, 0, header.length);
+            System.arraycopy(requestedTransport, 0, message, header.length, requestedTransport.length);
+            return new TurnRequest(transactionId, message);
+        }
+
+        byte[] usernameAttr = encodeStunAttribute(STUN_ATTR_USERNAME, username.trim().getBytes(StandardCharsets.UTF_8));
+        byte[] realmAttr = encodeStunAttribute(STUN_ATTR_REALM, realm.trim().getBytes(StandardCharsets.UTF_8));
+        byte[] nonceAttr = encodeStunAttribute(STUN_ATTR_NONCE, nonce.trim().getBytes(StandardCharsets.UTF_8));
+        int authBodyLength = requestedTransport.length + usernameAttr.length + realmAttr.length + nonceAttr.length;
+        byte[] authBody = new byte[authBodyLength];
+        int offset = 0;
+        System.arraycopy(requestedTransport, 0, authBody, offset, requestedTransport.length);
+        offset += requestedTransport.length;
+        System.arraycopy(usernameAttr, 0, authBody, offset, usernameAttr.length);
+        offset += usernameAttr.length;
+        System.arraycopy(realmAttr, 0, authBody, offset, realmAttr.length);
+        offset += realmAttr.length;
+        System.arraycopy(nonceAttr, 0, authBody, offset, nonceAttr.length);
+
+        byte[] headerForIntegrity = buildStunHeader(TURN_ALLOCATE_REQUEST, authBody.length + 24, transactionId);
+        byte[] key = MessageDigest.getInstance("MD5").digest((username.trim() + ":" + realm.trim() + ":" + password.trim()).getBytes(StandardCharsets.UTF_8));
+        Mac mac = Mac.getInstance("HmacSHA1");
+        mac.init(new SecretKeySpec(key, "HmacSHA1"));
+        mac.update(headerForIntegrity);
+        mac.update(authBody);
+        byte[] integrity = mac.doFinal();
+        byte[] integrityAttr = encodeStunAttribute(STUN_ATTR_MESSAGE_INTEGRITY, integrity);
+
+        byte[] body = new byte[authBody.length + integrityAttr.length];
+        System.arraycopy(authBody, 0, body, 0, authBody.length);
+        System.arraycopy(integrityAttr, 0, body, authBody.length, integrityAttr.length);
+        byte[] header = buildStunHeader(TURN_ALLOCATE_REQUEST, body.length, transactionId);
+        byte[] message = new byte[header.length + body.length];
+        System.arraycopy(header, 0, message, 0, header.length);
+        System.arraycopy(body, 0, message, header.length, body.length);
+        return new TurnRequest(transactionId, message);
+    }
+
+    private JSObject testTurnAllocateUdp(InetAddress address, int port, TurnRequest request) {
+        DatagramSocket socket = null;
+        try {
+            socket = new DatagramSocket();
+            socket.setSoTimeout(2500);
+            socket.connect(address, port);
+            socket.send(new DatagramPacket(request.message, request.message.length, address, port));
+            byte[] response = new byte[2048];
+            DatagramPacket packet = new DatagramPacket(response, response.length);
+            socket.receive(packet);
+            TurnMessage parsed = parseTurnMessage(packet.getData(), packet.getLength());
+            if (parsed == null || !Arrays.equals(parsed.transactionId, request.transactionId)) {
+                return buildRelayTestFailure("TURN UDP response invalid", "protocol");
+            }
+            return new JSObject().put("ok", true).put("protocol", "udp-auth").put("messageType", parsed.type).put("message", parsed);
+        } catch (Exception error) {
+            return buildRelayTestFailure(error.getMessage() != null ? error.getMessage() : "TURN UDP request failed", "connection");
+        } finally {
+            if (socket != null) {
+                socket.close();
+            }
+        }
+    }
+
+    private JSObject testTurnAllocateTls(String host, InetAddress address, int port, TurnRequest request) {
+        SSLSocket socket = null;
+        try {
+            X509TrustManager trustAll = new X509TrustManager() {
+                @Override public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+                @Override public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+                @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+            };
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, new TrustManager[] { trustAll }, new SecureRandom());
+            socket = (SSLSocket) sslContext.getSocketFactory().createSocket();
+            socket.connect(new InetSocketAddress(address, port), 2500);
+            socket.setSoTimeout(2500);
+            socket.startHandshake();
+
+            byte[] frame = new byte[2 + request.message.length];
+            frame[0] = (byte) ((request.message.length >> 8) & 0xff);
+            frame[1] = (byte) (request.message.length & 0xff);
+            System.arraycopy(request.message, 0, frame, 2, request.message.length);
+            socket.getOutputStream().write(frame);
+            socket.getOutputStream().flush();
+
+            InputStream input = socket.getInputStream();
+            int frameSizeHigh = input.read();
+            int frameSizeLow = input.read();
+            if (frameSizeHigh < 0 || frameSizeLow < 0) {
+                return buildRelayTestFailure("TURN TLS socket closed before response", "connection");
+            }
+            int frameLength = ((frameSizeHigh & 0xff) << 8) | (frameSizeLow & 0xff);
+            byte[] response = new byte[frameLength];
+            int offset = 0;
+            while (offset < frameLength) {
+                int read = input.read(response, offset, frameLength - offset);
+                if (read < 0) {
+                    return buildRelayTestFailure("TURN TLS socket closed before full response", "connection");
+                }
+                offset += read;
+            }
+
+            TurnMessage parsed = parseTurnMessage(response, response.length);
+            if (parsed == null || !Arrays.equals(parsed.transactionId, request.transactionId)) {
+                return buildRelayTestFailure("TURN TLS response invalid", "protocol");
+            }
+
+            return new JSObject().put("ok", true).put("protocol", "tls-auth").put("messageType", parsed.type).put("message", parsed);
+        } catch (Exception error) {
+            return buildRelayTestFailure(error.getMessage() != null ? error.getMessage() : "TURN TLS request failed", "connection");
+        } finally {
+            if (socket != null) {
+                try {
+                    socket.close();
+                } catch (Exception ignored) {
+                    // Ignore close failures.
+                }
+            }
+        }
+    }
+
+    private JSObject testTurnRelayAuthentication(String host, int port, boolean tls, String username, String password) {
+        String safeHost = sanitizeNetworkHost(host);
+        if (safeHost.isEmpty()) {
+            return buildRelayTestFailure("turn host is empty", "configuration");
+        }
+
+        List<InetAddress> addresses = resolveHostAddresses(safeHost);
+        if (addresses.isEmpty()) {
+            return buildRelayTestFailure("Unable to resolve host \"" + safeHost + "\"", "connection");
+        }
+
+        if (String.valueOf(username == null ? "" : username).trim().isEmpty() || String.valueOf(password == null ? "" : password).trim().isEmpty()) {
+            return buildRelayTestFailure("TURN credentials are required", "authentication");
+        }
+
+        String lastError = "TURN authentication failed";
+        String lastErrorType = "connection";
+        long startedAt = System.currentTimeMillis();
+        for (InetAddress address : addresses) {
+            try {
+                TurnRequest challengeRequest = buildTurnAllocateRequest("", "", "", "");
+                JSObject challengeResponse = tls
+                        ? testTurnAllocateTls(safeHost, address, port, challengeRequest)
+                        : testTurnAllocateUdp(address, port, challengeRequest);
+                if (!challengeResponse.optBoolean("ok", false)) {
+                    lastError = challengeResponse.optString("error", lastError);
+                    lastErrorType = challengeResponse.optString("errorType", lastErrorType);
+                    continue;
+                }
+
+                TurnMessage challengeMessage = (TurnMessage) challengeResponse.get("message");
+                if (challengeMessage.type == TURN_ALLOCATE_SUCCESS_RESPONSE) {
+                    return new JSObject().put("ok", true).put("protocol", tls ? "tls-auth" : "udp-auth").put("elapsedMs", Math.max(0L, System.currentTimeMillis() - startedAt));
+                }
+
+                JSObject error = getTurnErrorDetails(challengeMessage);
+                int errorCode = error != null ? error.optInt("code", 0) : 0;
+                if (errorCode != 401 && errorCode != 438) {
+                    lastError = describeTurnResponseFailure(challengeMessage, "TURN allocate failed");
+                    lastErrorType = "connection";
+                    continue;
+                }
+
+                String realm = getTurnTextAttribute(challengeMessage, STUN_ATTR_REALM);
+                String nonce = getTurnTextAttribute(challengeMessage, STUN_ATTR_NONCE);
+                if (realm.isEmpty() || nonce.isEmpty()) {
+                    lastError = "TURN auth challenge missing realm or nonce";
+                    lastErrorType = "protocol";
+                    continue;
+                }
+
+                for (int attemptIndex = 0; attemptIndex < 2; attemptIndex += 1) {
+                    TurnRequest authenticatedRequest = buildTurnAllocateRequest(username, realm, nonce, password);
+                    JSObject authenticatedResponse = tls
+                            ? testTurnAllocateTls(safeHost, address, port, authenticatedRequest)
+                            : testTurnAllocateUdp(address, port, authenticatedRequest);
+                    if (!authenticatedResponse.optBoolean("ok", false)) {
+                        lastError = authenticatedResponse.optString("error", "TURN connection failed");
+                        lastErrorType = authenticatedResponse.optString("errorType", "connection");
+                        break;
+                    }
+
+                    TurnMessage authenticatedMessage = (TurnMessage) authenticatedResponse.get("message");
+                    if (authenticatedMessage.type == TURN_ALLOCATE_SUCCESS_RESPONSE) {
+                        return new JSObject().put("ok", true).put("protocol", tls ? "tls-auth" : "udp-auth").put("elapsedMs", Math.max(0L, System.currentTimeMillis() - startedAt));
+                    }
+
+                    JSObject authError = getTurnErrorDetails(authenticatedMessage);
+                    int authErrorCode = authError != null ? authError.optInt("code", 0) : 0;
+                    if (authErrorCode == 438) {
+                        realm = getTurnTextAttribute(authenticatedMessage, STUN_ATTR_REALM);
+                        nonce = getTurnTextAttribute(authenticatedMessage, STUN_ATTR_NONCE);
+                        if (realm.isEmpty() || nonce.isEmpty()) {
+                            lastError = "TURN auth challenge missing realm or nonce";
+                            lastErrorType = "protocol";
+                            break;
+                        }
+                        continue;
+                    }
+
+                    lastError = describeTurnResponseFailure(authenticatedMessage, "TURN authentication failed");
+                    lastErrorType = "authentication";
+                    break;
+                }
+            } catch (Exception error) {
+                lastError = error.getMessage() != null ? error.getMessage() : "TURN authentication failed";
+                lastErrorType = "connection";
+            }
+        }
+
+        return buildRelayTestFailure(lastError, lastErrorType);
     }
 
     private JSObject testRelayEndpoint(String kind, JSObject relayConfig) {
@@ -690,7 +1069,7 @@ public class ReactorMobilePlugin extends Plugin {
         boolean tls = safeConfig.optBoolean("tls", false);
 
         if (host.isEmpty()) {
-            return new JSObject().put("ok", false).put("error", safeKind + " host is empty");
+            return buildRelayTestFailure(safeKind + " host is empty", "configuration");
         }
 
         if ("stun".equals(safeKind)) {
@@ -698,10 +1077,13 @@ public class ReactorMobilePlugin extends Plugin {
         }
 
         if ("turn".equals(safeKind)) {
-            if (tls) {
-                return testTcpRelay(host, port, "turn");
-            }
-            return testUdpRelay(host, port, "turn");
+            return testTurnRelayAuthentication(
+                    host,
+                    port,
+                    tls,
+                    safeConfig.optString("username", "").trim(),
+                    safeConfig.optString("password", "").trim()
+            );
         }
 
         return new JSObject().put("ok", false).put("error", "unsupported relay kind");
@@ -753,11 +1135,12 @@ public class ReactorMobilePlugin extends Plugin {
         long startedAt = System.currentTimeMillis();
         while (System.currentTimeMillis() - startedAt <= safeTimeoutMs) {
             String currentMode = String.valueOf(ReactorHttpService.getCurrentExchangeMode());
-            if ("node".equals(currentMode) && ReactorHttpService.isExchangeClientConnected()) {
+            if ("node".equals(currentMode) && ReactorHttpService.isExchangeClientAuthenticated()) {
                 return new JSObject()
                         .put("connected", true)
                         .put("skipped", false)
                         .put("reason", "")
+                        .put("errorType", "")
                         .put("elapsedMs", System.currentTimeMillis() - startedAt);
             }
 
@@ -770,10 +1153,19 @@ public class ReactorMobilePlugin extends Plugin {
         }
 
     String finalMode = String.valueOf(ReactorHttpService.getCurrentExchangeMode());
+        String reason = String.valueOf(ReactorHttpService.getExchangeClientLastError()).trim();
+        if (reason.isEmpty()) {
+            reason = String.valueOf(ReactorHttpService.getExchangeClientLastCloseReason()).trim();
+        }
+        if (reason.isEmpty() && "node".equals(finalMode)) {
+            reason = ReactorHttpService.isExchangeClientConnected() ? "waiting for exchange registration" : "timeout waiting for connection";
+        }
+        String errorType = classifyExchangeFailureType(reason, ReactorHttpService.getExchangeClientLastCloseCode());
         return new JSObject()
-                .put("connected", ReactorHttpService.isExchangeClientConnected())
-        .put("skipped", !"node".equals(finalMode))
-        .put("reason", "node".equals(finalMode) ? "timeout waiting for connection" : "exchange mode is " + finalMode)
+                .put("connected", ReactorHttpService.isExchangeClientAuthenticated())
+                .put("skipped", !"node".equals(finalMode))
+                .put("reason", "node".equals(finalMode) ? reason : "exchange mode is " + finalMode)
+                .put("errorType", "node".equals(finalMode) ? errorType : "")
                 .put("elapsedMs", System.currentTimeMillis() - startedAt);
     }
 
@@ -2595,16 +2987,32 @@ public class ReactorMobilePlugin extends Plugin {
             connection.put("connected", connected);
             connection.put("authenticated", true);
             connection.put("reason", "");
+            connection.put("errorType", "");
             return connection;
         }
 
         if ("node".equals(safeMode)) {
-            boolean connected = ReactorHttpService.isExchangeClientConnected();
+            boolean socketConnected = ReactorHttpService.isExchangeClientConnected();
+            boolean connected = ReactorHttpService.isExchangeClientAuthenticated();
             boolean connecting = ReactorHttpService.isExchangeClientConnecting();
-            connection.put("state", connected ? "connected" : (connecting ? "connecting" : "disconnected"));
+            String reason = String.valueOf(ReactorHttpService.getExchangeClientLastError()).trim();
+            if (reason.isEmpty()) {
+                reason = String.valueOf(ReactorHttpService.getExchangeClientLastCloseReason()).trim();
+            }
+            String errorType = classifyExchangeFailureType(reason, ReactorHttpService.getExchangeClientLastCloseCode());
+            String state = connected
+                    ? "connected"
+                    : (socketConnected
+                        ? ("authentication".equals(errorType) ? "auth-failed" : "connecting")
+                        : (connecting ? "connecting" : ("authentication".equals(errorType) ? "auth-failed" : "disconnected")));
+            if (reason.isEmpty()) {
+                reason = connected ? "" : (socketConnected ? "waiting for exchange registration" : (connecting ? "Connecting to Exchange" : "Exchange connection unavailable"));
+            }
+            connection.put("state", state);
             connection.put("connected", connected);
             connection.put("authenticated", connected);
-            connection.put("reason", connected ? "" : (connecting ? "Connecting to Exchange" : "Exchange connection unavailable"));
+            connection.put("reason", reason);
+            connection.put("errorType", connected ? "" : errorType);
             return connection;
         }
 
@@ -2612,6 +3020,7 @@ public class ReactorMobilePlugin extends Plugin {
         connection.put("connected", false);
         connection.put("authenticated", false);
         connection.put("reason", "Exchange connection unavailable");
+        connection.put("errorType", "connection");
         return connection;
     }
 
@@ -2804,7 +3213,7 @@ public class ReactorMobilePlugin extends Plugin {
                 .put("discovery", discovery)
                 .put("stun", stun)
                 .put("turn", turn)
-        .put("active", ReactorHttpService.isExchangeClientConnected()));
+        .put("active", ReactorHttpService.isExchangeClientAuthenticated()));
 		result.put("connectionTest", connectionTest);
         call.resolve(result);
     }

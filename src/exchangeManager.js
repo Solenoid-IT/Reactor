@@ -212,7 +212,7 @@ class ExchangeManager {
 		}
 
 		const wsState = this.wsClient ? this.wsClient.readyState : WebSocket.CLOSED;
-		if (wsState === WebSocket.OPEN) {
+		if (wsState === WebSocket.OPEN && this._clientRegistered) {
 			return {
 				mode: this.mode,
 				state: 'connected',
@@ -224,6 +224,23 @@ class ExchangeManager {
 				lastCloseReason: '',
 				lastCloseCode: 0,
 				lastPongAt: this._clientLastPongAt ? new Date(this._clientLastPongAt).toISOString() : null,
+			};
+		}
+
+		const errorType = this._classifyClientFailureType(this._clientLastError || this._clientLastCloseReason, this._clientLastCloseCode);
+		if (wsState === WebSocket.OPEN) {
+			return {
+				mode: this.mode,
+				state: errorType === 'authentication' ? 'auth-failed' : 'connecting',
+				connected: false,
+				connectedAt: this._clientConnectedAt ? new Date(this._clientConnectedAt).toISOString() : null,
+				authenticated: false,
+				reason: this._clientLastError || (errorType === 'authentication' ? 'authentication failed' : 'waiting for exchange registration'),
+				lastError: this._clientLastError,
+				lastCloseReason: this._clientLastCloseReason,
+				lastCloseCode: this._clientLastCloseCode,
+				lastPongAt: this._clientLastPongAt ? new Date(this._clientLastPongAt).toISOString() : null,
+				errorType,
 			};
 		}
 
@@ -239,13 +256,14 @@ class ExchangeManager {
 				lastCloseReason: this._clientLastCloseReason,
 				lastCloseCode: this._clientLastCloseCode,
 				lastPongAt: this._clientLastPongAt ? new Date(this._clientLastPongAt).toISOString() : null,
+				errorType: 'connection',
 			};
 		}
 
 		const reason = this._clientLastError || this._clientLastCloseReason || (this._clientLastTimeoutAt ? 'heartbeat timeout' : '') || 'disconnected';
 		return {
 			mode: this.mode,
-			state: 'disconnected',
+			state: errorType === 'authentication' ? 'auth-failed' : 'disconnected',
 			connected: false,
 			connectedAt: null,
 			authenticated: false,
@@ -254,7 +272,28 @@ class ExchangeManager {
 			lastCloseReason: this._clientLastCloseReason,
 			lastCloseCode: this._clientLastCloseCode,
 			lastPongAt: this._clientLastPongAt ? new Date(this._clientLastPongAt).toISOString() : null,
+			errorType,
 		};
+	}
+
+	_classifyClientFailureType(reason, closeCode = 0) {
+		const safeReason = String(reason || '').trim().toLowerCase();
+		if (Number(closeCode) === 4001) {
+			return 'authentication';
+		}
+		if (!safeReason) {
+			return 'connection';
+		}
+		if (
+			safeReason.includes('invalid exchange token')
+			|| safeReason.includes('auth error')
+			|| safeReason.includes('unauthorized')
+			|| safeReason.includes('bearer token')
+			|| safeReason.includes('http 401')
+		) {
+			return 'authentication';
+		}
+		return 'connection';
 	}
 
 	_readHeartbeatValue(envName, fallback, minValue) {
@@ -1190,11 +1229,13 @@ class ExchangeManager {
 		if (!reason && this._clientLastCloseCode) {
 			reason = `connection closed (${this._clientLastCloseCode})`;
 		}
+		const errorType = this._classifyClientFailureType(reason, this._clientLastCloseCode);
 
 		return {
 			connected: Boolean(this.wsClient && this.wsClient.readyState === WebSocket.OPEN && this._clientRegistered),
 			skipped: false,
 			reason,
+			errorType,
 			elapsedMs: Date.now() - startedAt,
 		};
 	}
