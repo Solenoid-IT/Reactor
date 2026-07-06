@@ -14,13 +14,32 @@ Set at least:
 
 - `PORT` (default `7070`)
 - `TOKEN` (shared secret used by Reactor nodes)
+- `TLS` (`false` for plain HTTP/WS, `true` when clients must connect through HTTPS/WSS)
 
 Example:
 
 ```env
 PORT=7070
+TLS=false
 TOKEN=your_shared_token_here
 ```
+
+## TLS configuration
+
+`TLS` in `.env` is a client-facing mode flag for Reactor nodes.
+
+- `TLS=false`: nodes connect to Exchange with `http://` and `ws://`
+- `TLS=true`: nodes connect to Exchange with `https://` and `wss://`
+
+Recommended production setup:
+
+1. Keep Exchange container on internal plain HTTP (`reactor-exchange:7070`)
+2. Put a reverse proxy in front (Nginx/Caddy/Traefik) for TLS termination
+3. Configure certificates on the proxy
+4. Expose only proxy `443`
+5. Set `TLS=true` in `exchange-server/.env` and use the public host in Reactor node config
+
+Note: the current Exchange daemon process itself does not directly terminate TLS. HTTPS/WSS should be terminated by the reverse proxy.
 
 ## 2) Start the container
 
