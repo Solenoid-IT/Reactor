@@ -339,21 +339,10 @@ function requestJson(url) {
 
 function formatInfo(exchange) {
 	console.log(`Mode:   exchange`);
-	if (exchange.scheme) {
-		console.log(`Scheme: ${exchange.scheme}`);
-	}
 	console.log(`Host:   ${exchange.host || '-'}`);
 	console.log(`Port:   ${exchange.port || 7070}`);
 	console.log(`Active: ${exchange.active ? 'yes' : 'no'}`);
-	if (exchange.tls) {
-		console.log(`TLS:    ${exchange.tls.enabled ? 'on' : 'off'} (${exchange.tls.mode || 'direct'})`);
-		if (typeof exchange.tls.directTermination === 'boolean') {
-			console.log(`TLS End:${exchange.tls.directTermination ? 'daemon' : 'proxy/offload'}`);
-		}
-		if (exchange.tls.certPath) {
-			console.log(`TLS Crt:${exchange.tls.certPath}`);
-		}
-	}
+	console.log(`TLS:    ${exchange.tls ? 'on' : 'off'}`);
 	if (exchange.connectionLogPath) {
 		console.log(`ConnLog:${exchange.connectionLogPath}`);
 	}
@@ -388,8 +377,7 @@ async function readExchangeInfo() {
 		connectionLogPath: path.join(getDataDir(), 'exchange-connections.log'),
 		activeConnectionsPath: path.join(getDataDir(), 'exchange-active-connections.json'),
 		active: false,
-		scheme: null,
-		tls: null,
+		tls: false,
 		connectedClients: [],
 		connectedClientsDetails: [],
 		heartbeat: null,
@@ -399,8 +387,7 @@ async function readExchangeInfo() {
 		const response = await requestJson(buildHealthUrl(env));
 		const body = response.body || {};
 		exchange.active = response.statusCode >= 200 && response.statusCode < 300 && Boolean(body.ok);
-		exchange.scheme = String(body.scheme || '').trim() || null;
-		exchange.tls = body.tls && typeof body.tls === 'object' ? body.tls : null;
+		exchange.tls = Boolean(body.tls);
 		exchange.connectedClients = Array.isArray(body.connectedClients) ? body.connectedClients : [];
 		exchange.connectedClientsDetails = Array.isArray(body.connectedClientsDetails) ? body.connectedClientsDetails : [];
 		exchange.heartbeat = body.heartbeat || null;

@@ -535,12 +535,8 @@ class ReactorExchangeDaemon {
 				ok: true,
 				service: 'reactor-exchange',
 				startedAt: this.startedAt,
-				scheme: directTls ? 'https' : 'http',
+				tls: directTls,
 				connectedClients: this.clientsByName.size,
-				tls: {
-					enabled: this.tlsEnabled,
-					mode: this.tlsMode,
-				},
 			};
 
 			if (request.method === 'HEAD') {
