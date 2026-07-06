@@ -4,19 +4,18 @@ RUN apt-get update \
 	&& apt-get install -y --no-install-recommends openssl tini ca-certificates \
 	&& rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /app/exchange-server
 
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+COPY exchange-server/package.json ./
+RUN npm install --omit=dev && npm cache clean --force
 
-COPY daemon.js daemonctl.js ./
-COPY src ./src
-COPY bin ./bin
+COPY exchange-server/daemon.js ./
+COPY exchange-server/daemonctl.js ./
+COPY exchange-server/src ./src
 
 ENV NODE_ENV=production \
 	REACTOR_DATA_DIR=/data \
-	REACTOR_HTTP_PORT=7070 \
-	REACTOR_WORKING_MODE=exchange
+	REACTOR_HTTP_PORT=7070
 
 RUN mkdir -p /data /data/projects && chown -R node:node /app /data
 

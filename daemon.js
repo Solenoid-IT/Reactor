@@ -4,7 +4,6 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { ReactorRuntime } = require('./src/runtime');
-const { readWorkingModeConfig, writeWorkingModeConfig } = require('./src/workingModeConfig');
 
 function installTimestampedConsoleLogging() {
 	if (process.env.REACTOR_LOG_TIMESTAMPS === '0' || process.env.REACTOR_LOG_TIMESTAMPS === 'false') {
@@ -40,6 +39,116 @@ function getDefaultDataDir() {
 
 function getDaemonSocketPath(dataDir) {
 	return process.env.REACTOR_DAEMON_SOCKET || path.join(dataDir, 'reactor-daemon.sock');
+}
+
+function getExchangeEnvFilePath() {
+	return process.env.REACTOR_ENV_FILE || path.join(__dirname, '.env');
+}
+
+function parseEnvFileValue(rawValue) {
+	const value = String(rawValue || '').trim();
+	if (!value) {
+		return '';
+	}
+
+	if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+		return value.slice(1, -1);
+	}
+
+	return value;
+}
+
+async function readEnvFileConfig(filePath) {
+	try {
+		const raw = await fs.readFile(filePath, 'utf8');
+		const parsed = {};
+
+		for (const rawLine of String(raw || '').split(/\r?\n/)) {
+			const line = String(rawLine || '').trim();
+			if (!line || line.startsWith('#')) {
+				continue;
+			}
+
+			const equalIndex = line.indexOf('=');
+			if (equalIndex < 1) {
+				continue;
+			}
+
+			let key = line.slice(0, equalIndex).trim();
+			if (key.startsWith('export ')) {
+				key = key.slice(7).trim();
+			}
+
+			if (!key) {
+				continue;
+			}
+
+			parsed[key] = parseEnvFileValue(line.slice(equalIndex + 1));
+		}
+
+		return parsed;
+	} catch {
+		return {};
+	}
+}
+
+function formatEnvFileValue(value) {
+	const text = String(value ?? '');
+	if (!text) {
+		return '';
+	}
+
+	if (/^[A-Za-z0-9_./:-]+$/.test(text)) {
+		return text;
+	}
+
+	return JSON.stringify(text);
+}
+
+async function writeEnvFileConfig(filePath, updates = {}) {
+	const existing = await fs.readFile(filePath, 'utf8').catch(() => '');
+	const lines = String(existing || '').split(/\r?\n/);
+	const updateEntries = new Map(Object.entries(updates));
+	const seenKeys = new Set();
+	const rewritten = [];
+
+	for (const rawLine of lines) {
+		const line = String(rawLine || '');
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith('#')) {
+			rewritten.push(line);
+			continue;
+		}
+
+		const equalIndex = line.indexOf('=');
+		if (equalIndex < 1) {
+			rewritten.push(line);
+			continue;
+		}
+
+		let key = line.slice(0, equalIndex).trim();
+		if (key.startsWith('export ')) {
+			key = key.slice(7).trim();
+		}
+
+		if (!updateEntries.has(key)) {
+			rewritten.push(line);
+			continue;
+		}
+
+		seenKeys.add(key);
+		rewritten.push(`${key}=${formatEnvFileValue(updateEntries.get(key))}`);
+	}
+
+	for (const [key, value] of updateEntries.entries()) {
+		if (!seenKeys.has(key)) {
+			rewritten.push(`${key}=${formatEnvFileValue(value)}`);
+		}
+	}
+
+	await fs.mkdir(path.dirname(filePath), { recursive: true });
+	const output = rewritten.join('\n');
+	await fs.writeFile(filePath, output ? `${output}\n` : '', 'utf8');
 }
 
 function buildEndpointAliases(endpoint) {
@@ -229,10 +338,33 @@ async function createControlServer(runtime, socketPath, onStopRequested, saveExc
 					if (!['node', 'exchange'].includes(mode)) {
 						response = { ok: false, error: 'invalid mode: use node or exchange' };
 					} else {
-						const config = await runtime.setExchangeConfig(mode, host, port, tls, token, discovery);
-						await saveExchangeConfig(mode, host, port, tls, token, discovery);
+						const config = await runtime.setExchangeConfig(mode, host, port, tls, token, discovery, runtime.stun, runtime.turn);
+						await saveExchangeConfig(mode, host, port, tls, token, discovery, runtime.stun, runtime.turn);
 						response = { ok: true, exchange: config };
 					}
+				} else if (command === 'set-exchange-token') {
+					const token = String(payload.token || '').trim();
+					const config = await runtime.setExchangeConfig(
+						runtime.exchangeMode,
+						runtime.exchangeHost,
+						runtime.exchangePort,
+						runtime.exchangeTls,
+						token,
+						runtime.exchangeDiscoveryEndpointEnabled,
+						runtime.stun,
+						runtime.turn,
+					);
+					await saveExchangeConfig(
+						runtime.exchangeMode,
+						runtime.exchangeHost,
+						runtime.exchangePort,
+						runtime.exchangeTls,
+						token,
+						runtime.exchangeDiscoveryEndpointEnabled,
+						runtime.stun,
+						runtime.turn,
+					);
+					response = { ok: true, exchange: config };
 				} else if (command === 'set-discovery' || command === 'set-exchange-discovery') {
 					const enabled = Boolean(payload.enabled);
 					const config = await runtime.setExchangeConfig(
@@ -242,14 +374,34 @@ async function createControlServer(runtime, socketPath, onStopRequested, saveExc
 						runtime.exchangeTls,
 						runtime.exchangeAuthToken,
 						enabled,
+						runtime.stun,
+						runtime.turn,
 					);
-					await saveExchangeConfig(runtime.exchangeMode, runtime.exchangeHost, runtime.exchangePort, runtime.exchangeTls, runtime.exchangeAuthToken, enabled);
+					await saveExchangeConfig(
+						runtime.exchangeMode,
+						runtime.exchangeHost,
+						runtime.exchangePort,
+						runtime.exchangeTls,
+						runtime.exchangeAuthToken,
+						enabled,
+						runtime.stun,
+						runtime.turn,
+					);
 					response = { ok: true, exchange: config };
 				} else if (command === 'get-exchange-token') {
 					response = { ok: true, exchangeToken: await runtime.getExchangeToken() };
 				} else if (command === 'generate-exchange-token') {
 					const exchangeToken = await runtime.generateExchangeToken();
-					await saveExchangeConfig(runtime.exchangeMode, runtime.exchangeHost, runtime.exchangePort, runtime.exchangeManager.tls, exchangeToken.token, runtime.exchangeDiscoveryEndpointEnabled);
+					await saveExchangeConfig(
+						runtime.exchangeMode,
+						runtime.exchangeHost,
+						runtime.exchangePort,
+						runtime.exchangeManager.tls,
+						exchangeToken.token,
+						runtime.exchangeDiscoveryEndpointEnabled,
+						runtime.stun,
+						runtime.turn,
+					);
 					response = { ok: true, exchangeToken };
 				} else if (command === 'generate-tls-cert') {
 					const tlsBits = payload.bits;
@@ -322,28 +474,88 @@ async function main() {
 	const endpointsDir = process.env.REACTOR_ENDPOINTS_DIR || path.join(dataDir, 'endpoints');
 	const eventLogPath = process.env.REACTOR_EVENT_LOG_PATH || path.join(dataDir, 'activity.log');
 	const daemonSocketPath = getDaemonSocketPath(dataDir);
-	const workingModeConfigPath = path.join(dataDir, 'working-mode.json');
+	const exchangeEnvFilePath = getExchangeEnvFilePath();
 
 	await fs.mkdir(dataDir, { recursive: true });
 	await fs.mkdir(endpointsDir, { recursive: true });
 	await fs.mkdir(path.dirname(eventLogPath), { recursive: true });
 
-	// Carica la configurazione exchange (env vars hanno priorità > file > default)
-	async function loadExchangeConfig() {
-		const readEnvString = (name) => {
-			if (!Object.prototype.hasOwnProperty.call(process.env, name)) {
-				return null;
+	async function readCoturnConfig(configPath) {
+		if (!configPath) {
+			return null;
+		}
+
+		try {
+			const raw = await fs.readFile(configPath, 'utf8');
+			const lines = String(raw || '').split(/\r?\n/);
+			const parsed = {};
+
+			for (const rawLine of lines) {
+				const line = String(rawLine || '').trim();
+				if (!line || line.startsWith('#')) {
+					continue;
+				}
+				const equalIndex = line.indexOf('=');
+				if (equalIndex < 1) {
+					continue;
+				}
+				const key = line.slice(0, equalIndex).trim().toLowerCase();
+				const value = line.slice(equalIndex + 1).trim();
+				parsed[key] = value;
 			}
-			const value = String(process.env[name] || '').trim();
-			return value.length > 0 ? value : null;
+
+			const userEntry = String(parsed.user || '').trim();
+			let username = '';
+			let password = '';
+			if (userEntry.includes(':')) {
+				const splitIndex = userEntry.indexOf(':');
+				username = userEntry.slice(0, splitIndex).trim();
+				password = userEntry.slice(splitIndex + 1).trim();
+			}
+
+			const port = Number(parsed['listening-port']);
+			return {
+				username,
+				password,
+				port: Number.isFinite(port) && port > 0 ? port : null,
+			};
+		} catch {
+			return null;
+		}
+	}
+
+	async function loadExchangeConfig() {
+		const envFileConfig = await readEnvFileConfig(exchangeEnvFilePath);
+
+		const readConfigString = (...names) => {
+			for (const name of names) {
+				if (Object.prototype.hasOwnProperty.call(process.env, name)) {
+					const value = String(process.env[name] || '').trim();
+					if (value.length > 0) {
+						return value;
+					}
+				}
+			}
+
+			for (const name of names) {
+				if (Object.prototype.hasOwnProperty.call(envFileConfig, name)) {
+					const value = String(envFileConfig[name] || '').trim();
+					if (value.length > 0) {
+						return value;
+					}
+				}
+			}
+
+			return null;
 		};
 
-		const readEnvBool = (name) => {
-			if (!Object.prototype.hasOwnProperty.call(process.env, name)) {
+		const readConfigBool = (...names) => {
+			const rawValue = readConfigString(...names);
+			if (rawValue === null) {
 				return null;
 			}
 
-			const value = String(process.env[name] || '').trim().toLowerCase();
+			const value = String(rawValue).trim().toLowerCase();
 			if (!value) {
 				return null;
 			}
@@ -358,8 +570,8 @@ async function main() {
 			return null;
 		};
 
-		const readEnvPort = (name) => {
-			const value = readEnvString(name);
+		const readConfigPort = (...names) => {
+			const value = readConfigString(...names);
 			if (!value) {
 				return null;
 			}
@@ -372,29 +584,46 @@ async function main() {
 			return numericPort;
 		};
 
-		const fileConfig = await readWorkingModeConfig(workingModeConfigPath);
-		const envWorkingMode = String(process.env.REACTOR_WORKING_MODE || '').trim().toLowerCase();
+		const envWorkingMode = String(readConfigString('MODE') || '').trim().toLowerCase();
 		const normalizedWorkingMode = envWorkingMode === 'exchange' ? 'exchange' : envWorkingMode ? 'node' : '';
+		const coturnConfigPath = process.env.REACTOR_COTURN_CONFIG_PATH
+			? String(process.env.REACTOR_COTURN_CONFIG_PATH).trim()
+			: path.join(dataDir, 'coturn', 'turnserver.conf');
+		const coturnConfig = await readCoturnConfig(coturnConfigPath);
+		const envTurnPort = readConfigPort('REACTOR_TURN_PORT');
+		const envTurnUsername = readConfigString('REACTOR_TURN_USERNAME');
+		const envTurnPassword = readConfigString('REACTOR_TURN_PASSWORD');
+		const coturnUsername = String(coturnConfig?.username || '').trim();
+		const coturnPassword = String(coturnConfig?.password || '').trim();
+		const turnPort = Number(coturnConfig?.port) > 0
+			? Number(coturnConfig.port)
+			: envTurnPort
+			?? 3478;
 
 		return {
-			mode: normalizedWorkingMode || String(fileConfig.type || 'node'),
-			host: readEnvString('REACTOR_EXCHANGE_HOST') ?? String(fileConfig.host || ''),
-			port: readEnvPort('REACTOR_EXCHANGE_PORT') ?? (Number(fileConfig.port) > 0 ? Number(fileConfig.port) : 7070),
-			tls: readEnvBool('REACTOR_EXCHANGE_TLS') ?? Boolean(fileConfig.tls),
-			token: readEnvString('REACTOR_EXCHANGE_TOKEN') ?? String(fileConfig.token || ''),
-			discovery: readEnvBool('REACTOR_EXCHANGE_DISCOVERY_ENDPOINT') ?? Boolean(fileConfig.discovery),
+			mode: normalizedWorkingMode || 'node',
+			host: readConfigString('HOST') || '',
+			port: readConfigPort('PORT') ?? 7070,
+			tls: readConfigBool('TLS') ?? false,
+			token: readConfigString('TOKEN') || '',
+			discovery: readConfigBool('DISCOVERY') ?? false,
+			stun: {},
+			turn: {
+				port: turnPort,
+				username: coturnUsername || envTurnUsername || '',
+				password: coturnPassword || envTurnPassword || '',
+			},
 		};
 	}
 
-	async function saveExchangeConfig(mode, host, port, tls, token, discovery = false) {
-		await fs.mkdir(dataDir, { recursive: true });
-		await writeWorkingModeConfig(workingModeConfigPath, {
-			type: mode,
-			host,
-			port,
-			tls: Boolean(tls),
-			token: String(token || ''),
-			discovery: Boolean(discovery),
+	async function saveExchangeConfig(mode, host, port, tls, token, discovery = false, stun = {}, turn = {}) {
+		await writeEnvFileConfig(exchangeEnvFilePath, {
+			MODE: mode,
+			HOST: host,
+			PORT: port,
+			TLS: Boolean(tls),
+			TOKEN: String(token || ''),
+			DISCOVERY: Boolean(discovery),
 		});
 	}
 
@@ -407,7 +636,9 @@ async function main() {
 		exchangePort: exchangeCfg.port,
 		exchangeTls: exchangeCfg.tls,
 		exchangeToken: exchangeCfg.token,
-				discovery: exchangeCfg.discovery,
+		discovery: exchangeCfg.discovery,
+		stun: exchangeCfg.stun,
+		turn: exchangeCfg.turn,
 	});
 	let controlServer = null;
 	let isShuttingDown = false;
@@ -464,6 +695,7 @@ async function main() {
 	});
 
 	await runtime.init();
+	await saveExchangeConfig(runtime.exchangeMode, runtime.exchangeHost, runtime.exchangePort, runtime.exchangeTls, runtime.exchangeAuthToken, runtime.exchangeDiscoveryEndpointEnabled);
 	controlServer = await createControlServer(runtime, daemonSocketPath, shutdown, saveExchangeConfig);
 	runtime.log(`Daemon mode active (endpointsDir=${endpointsDir}, eventLogPath=${eventLogPath}, socket=${daemonSocketPath})`);
 }

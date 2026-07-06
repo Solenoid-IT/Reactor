@@ -1339,10 +1339,10 @@ class ReactorRuntime {
 		const envWorkingMode = process.env.REACTOR_WORKING_MODE || '';
 		const requestedWorkingMode = String(options.exchangeMode || envWorkingMode || 'node').trim().toLowerCase();
 		this.exchangeMode = requestedWorkingMode === 'exchange' ? 'exchange' : 'node';
-		this.exchangeHost = String(options.exchangeHost || process.env.REACTOR_EXCHANGE_HOST || '');
-		this.exchangePort = Number(options.exchangePort || process.env.REACTOR_EXCHANGE_PORT || 7070);
-		this.exchangeTls = Boolean(options.exchangeTls || process.env.REACTOR_EXCHANGE_TLS === '1' || process.env.REACTOR_EXCHANGE_TLS === 'true');
-		this.exchangeAuthToken = String(options.exchangeToken || process.env.REACTOR_EXCHANGE_TOKEN || '');
+		this.exchangeHost = String(options.exchangeHost || process.env.HOST || '');
+		this.exchangePort = Number(options.exchangePort || process.env.PORT || 7070);
+		this.exchangeTls = Boolean(options.exchangeTls || process.env.TLS === '1' || process.env.TLS === 'true');
+		this.exchangeAuthToken = String(options.exchangeToken || process.env.TOKEN || '');
 		this.stun = normalizeRelayEndpointConfig(options.stun, {
 			host: String(options.stunHost || process.env.REACTOR_STUN_HOST || ''),
 			port: Number(options.stunPort || process.env.REACTOR_STUN_PORT || 3478) > 0 ? Number(options.stunPort || process.env.REACTOR_STUN_PORT || 3478) : 3478,

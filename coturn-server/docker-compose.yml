@@ -1,0 +1,22 @@
+services:
+  coturn:
+    image: coturn/coturn:latest
+    container_name: reactor-coturn
+    restart: always
+    command:
+      - -n
+      - -c
+      - /etc/coturn/turnserver.conf
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/tcp"
+      - "49160-49200:49160-49200/udp"
+    volumes:
+      - coturn-data:/var/lib/coturn
+      - ./cert:/var/lib/coturn/certs
+      - ./turnserver.conf:/etc/coturn/turnserver.conf
+
+volumes:
+  coturn-data:
+    name: reactor-coturn-data

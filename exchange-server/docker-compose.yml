@@ -1,49 +1,18 @@
 services:
-  coturn:
-    image: coturn/coturn:latest
-    container_name: reactor-coturn
-    restart: always
-    env_file:
-      - .env
-    command:
-      - -n
-      - --realm=${COTURN_REALM:-reactor.local}
-      - --lt-cred-mech
-      - --user=${COTURN_USER:-reactor}:${COTURN_PASSWORD:-reactor-turn-password}
-      - --fingerprint
-      - --no-cli
-      - --log-file=stdout
-      - --external-ip=${COTURN_EXTERNAL_IP:-}
-      - --listening-port=${COTURN_PORT:-3478}
-      - --tls-listening-port=${COTURN_TLS_PORT:-5349}
-      - --cert=${COTURN_TLS_CERT_PATH:-/var/lib/coturn/certs/cert.pem}
-      - --pkey=${COTURN_TLS_KEY_PATH:-/var/lib/coturn/certs/key.pem}
-      - --min-port=${COTURN_MIN_RELAY_PORT:-49160}
-      - --max-port=${COTURN_MAX_RELAY_PORT:-49200}
-    ports:
-      - "${COTURN_PORT:-3478}:${COTURN_PORT:-3478}/udp"
-      - "${COTURN_PORT:-3478}:${COTURN_PORT:-3478}/tcp"
-      - "${COTURN_TLS_PORT:-5349}:${COTURN_TLS_PORT:-5349}/tcp"
-      - "${COTURN_MIN_RELAY_PORT:-49160}-${COTURN_MAX_RELAY_PORT:-49200}:${COTURN_MIN_RELAY_PORT:-49160}-${COTURN_MAX_RELAY_PORT:-49200}/udp"
-    volumes:
-      - coturn-data:/var/lib/coturn
-
   reactor-exchange:
     build:
       context: ..
       dockerfile: exchange-server/Dockerfile.daemon
     container_name: reactor-exchange
     restart: always
-    env_file:
-      - .env
     environment:
       REACTOR_DATA_DIR: /data
-      REACTOR_HTTP_PORT: ${REACTOR_EXCHANGE_PORT:-7070}
-      REACTOR_WORKING_MODE: exchange
-      REACTOR_EXCHANGE_TOKEN: ${REACTOR_EXCHANGE_TOKEN:-}
+      REACTOR_HTTP_PORT: ${PORT:-7070}
+      REACTOR_ENV_FILE: /app/exchange-server/.env
     ports:
-      - "${REACTOR_EXCHANGE_PORT:-7070}:${REACTOR_EXCHANGE_PORT:-7070}"
+      - "${PORT:-7070}:${PORT:-7070}"
     volumes:
+      - ./.env:/app/exchange-server/.env
       - reactor-exchange-data:/data
     healthcheck:
       test: ["CMD", "node", "daemonctl.js", "status"]
@@ -52,38 +21,6 @@ services:
       retries: 5
       start_period: 20s
 
-  reactor-client:
-    profiles: ["client"]
-    build:
-      context: ..
-      dockerfile: exchange-server/Dockerfile.daemon
-    container_name: reactor-client
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      REACTOR_DATA_DIR: /data
-      REACTOR_HTTP_PORT: ${REACTOR_CLIENT_PORT:-7071}
-      REACTOR_WORKING_MODE: node
-      REACTOR_EXCHANGE_HOST: ${REACTOR_EXCHANGE_HOST:-}
-      REACTOR_EXCHANGE_PORT: ${REACTOR_EXCHANGE_PORT:-7070}
-      REACTOR_EXCHANGE_TLS: ${REACTOR_EXCHANGE_TLS:-false}
-      REACTOR_EXCHANGE_TOKEN: ${REACTOR_EXCHANGE_TOKEN:-}
-    ports:
-      - "${REACTOR_CLIENT_PORT:-7071}:${REACTOR_CLIENT_PORT:-7071}"
-    volumes:
-      - reactor-client-data:/data
-    healthcheck:
-      test: ["CMD", "node", "daemonctl.js", "status"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
-
 volumes:
-  coturn-data:
-    name: reactor-coturn-data
   reactor-exchange-data:
     name: reactor-exchange-data
-  reactor-client-data:
-    name: reactor-client-data

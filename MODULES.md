@@ -240,16 +240,17 @@ Nodo A (Node)              Nodo EXCHANGE            Nodo B (Node)
 | Piattaforma | File |
 |-------------|------|
 | Electron (macOS/Win/Linux desktop) | `ui-settings.json` in userData |
-| Daemon headless (Linux server) | `$REACTOR_DATA_DIR/exchange-config.json` |
+| Daemon headless (Linux server) | `.env` montato o file di ambiente equivalente |
 | Android | SharedPreferences (`exchangeMode`, `exchangeHost`, `exchangePort`, `exchangeTls`) |
 
 ### Variabili d'ambiente (priorità massima su tutte le piattaforme Node.js)
 
 ```bash
-REACTOR_WORKING_MODE=exchange           # oppure: node
-REACTOR_EXCHANGE_HOST=192.168.1.10     # solo per modalità node
-REACTOR_EXCHANGE_PORT=7070             # porta HTTP dell'exchange
-REACTOR_EXCHANGE_TLS=true              # usa WSS
+MODE=exchange           # oppure: node
+HOST=192.168.1.10       # solo per modalità node
+PORT=7070               # porta HTTP dell'exchange
+TLS=true                # usa WSS
+TOKEN=shared-token
 ```
 
 ### Android
@@ -279,10 +280,10 @@ node daemon.js
 REACTOR_DATA_DIR=/var/lib/reactor node daemon.js
 
 # Come EXCHANGE server
-REACTOR_WORKING_MODE=exchange REACTOR_DATA_DIR=/var/lib/reactor node daemon.js
+MODE=exchange REACTOR_DATA_DIR=/var/lib/reactor node daemon.js
 
 # Come CLIENT
-REACTOR_WORKING_MODE=node REACTOR_EXCHANGE_HOST=10.0.0.1 node daemon.js
+MODE=node HOST=10.0.0.1 PORT=7070 node daemon.js
 ```
 
 ### Variabili d'ambiente del daemon
@@ -293,9 +294,11 @@ REACTOR_WORKING_MODE=node REACTOR_EXCHANGE_HOST=10.0.0.1 node daemon.js
 | `REACTOR_ENDPOINTS_DIR` | `$DATA_DIR/endpoints` | Cartella endpoint |
 | `REACTOR_EVENT_LOG_PATH` | `$DATA_DIR/activity.log` | Log attività globale |
 | `REACTOR_HTTP_PORT` | `7070` | Porta HTTP server |
-| `REACTOR_WORKING_MODE` | `node` | Modalità di lavoro (`node` oppure `exchange`) |
-| `REACTOR_EXCHANGE_HOST` | `''` | Host exchange (client) |
-| `REACTOR_EXCHANGE_PORT` | `7070` | Porta exchange (client) |
+| `MODE` | `node` | Modalità di lavoro (`node` oppure `exchange`) |
+| `HOST` | `''` | Host exchange (client) |
+| `PORT` | `7070` | Porta exchange (client) |
+| `TLS` | `false` | Usa WSS |
+| `TOKEN` | `''` | Token exchange |
 
 ### Comandi `daemonctl.js`
 
@@ -338,7 +341,9 @@ journalctl -u reactor -f
 sudo systemctl edit reactor
 # → aggiungi:
 #   [Service]
-#   Environment=REACTOR_WORKING_MODE=exchange
+#   Environment=MODE=exchange
+#   Environment=HOST=192.168.1.10
+#   Environment=PORT=7070
 
 # 5. Configurazione exchange (opzione B: daemonctl a runtime)
 node /opt/reactor/daemonctl.js set-exchange exchange
@@ -352,7 +357,7 @@ $REACTOR_DATA_DIR/
 ├── endpoints/          # Endpoint e progetti
 ├── activity.log        # Log attività globale
 ├── name                # Nome del nodo reactor
-├── exchange-config.json # Config exchange (se impostata via daemonctl)
+├── .env                # Config exchange quando montata/scritta dal daemon
 └── reactor-daemon.sock # Unix socket di controllo
 ```
 

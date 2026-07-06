@@ -1,6 +1,6 @@
-# WebRTC Setup (STUN/TURN) with Docker Compose
+# WebRTC Setup (STUN/TURN) with Dedicated coturn-server Stack
 
-This guide explains how to configure a WebRTC relay server (STUN/TURN) using `coturn` in the current Reactor Docker Compose stack.
+This guide explains how to configure a WebRTC relay server (STUN/TURN) using `coturn` with the dedicated `coturn-server/` Docker Compose stack.
 
 Goal:
 - keep current Exchange logic unchanged (control-plane)
@@ -21,75 +21,67 @@ Recommended model:
 - Public server reachable from peers
 - Open firewall ports for TURN/STUN
 
-## 1) Configure Environment Variables
+## 1) Configure turnserver.conf
 
-From project root:
+Edit:
 
-```bash
-cp .env.example .env
-```
+- `coturn-server/turnserver.conf`
 
-Edit `.env` and set at least:
+Set at least:
 
-```dotenv
-# TURN/STUN server (coturn)
-COTURN_REALM=reactor.example.com
-COTURN_USER=reactor
-COTURN_PASSWORD=replace-with-strong-password
-
-# Public IP or DNS reachable by clients
-# For production this should be set
-COTURN_EXTERNAL_IP=YOUR_PUBLIC_IP_OR_DNS
-
-COTURN_PORT=3478
-COTURN_TLS_PORT=5349
-COTURN_TLS_CERT_PATH=/var/lib/coturn/certs/cert.pem
-COTURN_TLS_KEY_PATH=/var/lib/coturn/certs/key.pem
-COTURN_MIN_RELAY_PORT=49160
-COTURN_MAX_RELAY_PORT=49200
+```conf
+realm=reactor.example.com
+user=reactor:replace-with-strong-password
+listening-port=3478
+tls-listening-port=5349
+cert=/var/lib/coturn/certs/cert.pem
+pkey=/var/lib/coturn/certs/key.pem
+min-port=49160
+max-port=49200
+# external-ip=YOUR_PUBLIC_IP_OR_DNS
 ```
 
 Notes:
-- `COTURN_EXTERNAL_IP` is strongly recommended in production.
-- Use a strong password for `COTURN_PASSWORD`.
+- `external-ip` is strongly recommended in production.
+- Use a strong password in the `user=` directive.
 - Keep relay port range reasonably small for easier firewall management.
 
-### Generate TURN TLS certificate inside container (one command)
+### Generate TURN TLS certificate with the coturn CLI
 
-Run this command from project root:
+Run this command from the `coturn-server` folder:
 
 ```bash
-docker compose --profile turn run --rm --entrypoint sh coturn -lc 'mkdir -p /var/lib/coturn/certs && openssl req -x509 -newkey rsa:4096 -keyout /var/lib/coturn/certs/key.pem -out /var/lib/coturn/certs/cert.pem -days 3650 -nodes -subj "/CN=turn.local"'
+cd coturn-server && node coturnctl.js generate-tls-cert --cn turn.local
 ```
 
 Then start (or restart) coturn:
 
 ```bash
-docker compose --profile turn up -d
+cd coturn-server && docker compose up -d
 ```
 
-If you changed `.env` values and need to apply them to the TURN container, recreate it:
+If you changed `turnserver.conf` and need to apply it, recreate coturn:
 
 ```bash
-docker compose --profile turn up -d --force-recreate coturn
+cd coturn-server && docker compose up -d --force-recreate coturn
 ```
 
 Notes:
-- Certificate and key are persisted in Docker volume `reactor-coturn-data`.
+- Certificate and key are persisted in `coturn-server/cert/` and mounted into the container.
 - For production use a real certificate and set CN/SAN to your public TURN hostname.
 
 ## 2) Start Services
 
-Start the default stack (Exchange + TURN/coturn):
+Start Exchange stack:
 
 ```bash
-docker compose up -d --build
+cd exchange-server && docker compose up -d
 ```
 
-Optional: start the client container too:
+Start coturn stack:
 
 ```bash
-docker compose --profile client up -d --build
+cd coturn-server && docker compose up -d
 ```
 
 Check service status:
@@ -101,7 +93,7 @@ docker compose ps
 Read coturn logs:
 
 ```bash
-docker compose logs -f coturn
+cd coturn-server && docker compose logs -f coturn
 ```
 
 ## 3) Firewall / Network Rules
@@ -125,13 +117,13 @@ Use these ICE server entries in your WebRTC implementation:
 - `turns:YOUR_HOST:5349?transport=tcp` (if TLS configured)
 
 Credentials:
-- username: `COTURN_USER`
-- credential: `COTURN_PASSWORD`
+- username: from `user=<username>:<password>` in `turnserver.conf`
+- credential: from `user=<username>:<password>` in `turnserver.conf`
 
 ## 5) Production Hardening (Recommended)
 
 - Prefer DNS hostname in `COTURN_REALM` and client URLs.
-- Use strong secrets (`COTURN_PASSWORD`).
+- Use strong secrets in the `user=` directive.
 - Enable TLS for TURN (`5349`) with valid certificates.
 - Restrict relay port range and monitor usage.
 - Rotate TURN credentials periodically.
@@ -141,11 +133,11 @@ Credentials:
 Basic checks:
 
 ```bash
-docker compose --profile turn config
+cd coturn-server && docker compose config
 ```
 
 ```bash
-docker compose logs -f coturn
+cd coturn-server && docker compose logs -f coturn
 ```
 
 When peers connect, check logs for allocations/relay usage.
@@ -158,10 +150,10 @@ Expected behavior:
 
 If peers cannot connect:
 
-1. Verify `COTURN_EXTERNAL_IP` is correct.
+1. Verify `external-ip` in `turnserver.conf` is correct.
 2. Verify host firewall and cloud security groups allow required ports.
 3. Verify client ICE config includes both STUN and TURN entries.
-4. Verify TURN credentials match `.env` values.
+4. Verify TURN credentials match `turnserver.conf`.
 5. Verify NAT-heavy mobile networks may require TURN relay more often.
 
 If TURN allocates but traffic is unstable:
@@ -175,13 +167,14 @@ If TURN allocates but traffic is unstable:
 Stop TURN only:
 
 ```bash
-docker compose --profile turn down
+cd coturn-server && docker compose down
 ```
 
 Stop whole stack:
 
 ```bash
-docker compose down
+cd exchange-server && docker compose down
+cd ../coturn-server && docker compose down
 ```
 
 Preserve runtime data by default (named volume `reactor-coturn-data`).

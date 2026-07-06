@@ -146,6 +146,7 @@ node daemonctl.js delete "endpoint-name"
 node daemonctl.js set-name "my-reactor"
 node daemonctl.js set-port 7071
 node daemonctl.js set-exchange exchange 7070 --token "<token>" --discovery
+node daemonctl.js set-exchange-token "<token>"
 node daemonctl.js set-discovery on
 ```
 
@@ -181,13 +182,17 @@ Important: if you use daemonctl with a custom data directory, use the same REACT
 A service template is included: reactor.service.
 
 For a complete Linux server installation and Exchange configuration guide, see:
-- `exchange-server/linux-server-exchange-setup.md`
+- `exchange-server/docs/linux-server-exchange-setup.md`
 
 For Docker Compose setup as Exchange server, see:
-- `exchange-server/docker-compose-exchange.md`
+- `exchange-server/docs/docker-compose-exchange.md`
 
 For WebRTC STUN/TURN server setup (coturn), see:
-- `exchange-server/docker-compose-exchange.md`
+- `docs/simple-webrtc-setup.md`
+
+Exchange and coturn are deployable as fully independent stacks:
+- Exchange stack: `exchange-server/docker-compose.yml`
+- TURN/STUN stack: `coturn-server/docker-compose.yml`
 
 Recommended setup:
 

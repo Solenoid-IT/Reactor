@@ -30,6 +30,7 @@ function usage() {
 	console.log('  node daemonctl.js set-port <1-65535>');
 	console.log('  node daemonctl.js set-exchange exchange [port] [--tls] [--token <token>] [--discovery|--no-discovery]');
 	console.log('  node daemonctl.js set-exchange node <host> [port] [--tls] [--token <token>] [--discovery|--no-discovery]');
+	console.log('  node daemonctl.js set-exchange-token <token>');
 	console.log('  node daemonctl.js set-discovery <on|off>');
 	console.log('  node daemonctl.js get-exchange');
 	console.log('  node daemonctl.js get-exchange-token');
@@ -477,6 +478,29 @@ async function main() {
 		console.log(`TLS: ${ex.tls ? 'enabled' : 'disabled'}`);
 		console.log(`Discovery: ${ex.discovery ? 'enabled' : 'disabled'}${ex.discoveryEndpointPath ? ` (${ex.discoveryEndpointPath})` : ''}`);
 		if (ex.token) console.log('Token: configured');
+		return;
+	}
+
+	if (command === 'set-exchange-token') {
+		const token = rest.join(' ').trim();
+		if (!token) {
+			console.error('[daemonctl] set-exchange-token: token is required');
+			process.exit(1);
+		}
+
+		const response = await sendCommand({ command: 'set-exchange-token', token });
+		if (!response.ok) {
+			console.error(`[daemonctl] ${response.error || 'set-exchange-token failed'}`);
+			process.exit(1);
+		}
+
+		const ex = response.exchange || {};
+		console.log(`Mode: ${ex.mode || '-'}`);
+		if (ex.mode === 'node') console.log(`Exchange: ${ex.tls ? 'wss' : 'ws'}://${ex.host}:${ex.port}`);
+		if (ex.mode === 'exchange') console.log(`Exchange server active on port: ${ex.port}`);
+		console.log(`TLS: ${ex.tls ? 'enabled' : 'disabled'}`);
+		console.log(`Discovery: ${ex.discovery ? 'enabled' : 'disabled'}${ex.discoveryEndpointPath ? ` (${ex.discoveryEndpointPath})` : ''}`);
+		console.log(`Token: ${ex.token ? 'configured' : 'missing'}`);
 		return;
 	}
 

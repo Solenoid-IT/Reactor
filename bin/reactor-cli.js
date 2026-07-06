@@ -34,6 +34,7 @@ function printHelp() {
 	console.log('  reactor-cli exchange set node <host> [port] [--tls] [--token <token>] [--discovery|--no-discovery]');
 	console.log('  reactor-cli exchange discovery <on|off>');
 	console.log('  reactor-cli exchange token get');
+	console.log('  reactor-cli exchange token set <token>');
 	console.log('  reactor-cli exchange token generate');
 	console.log('  reactor-cli endpoint id <endpoint-name>');
 }
@@ -105,6 +106,16 @@ async function main() {
 
 	if (command === 'exchange' && subcommand === 'token' && arg === 'get') {
 		await runDaemonCtl(['get-exchange-token']);
+		return;
+	}
+
+	if (command === 'exchange' && subcommand === 'token' && arg === 'set') {
+		const token = rest.join(' ').trim();
+		if (!token) {
+			printHelp();
+			throw new Error('token is required');
+		}
+		await runDaemonCtl(['set-exchange-token', token]);
 		return;
 	}
 
