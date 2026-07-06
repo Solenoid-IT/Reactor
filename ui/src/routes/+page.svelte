@@ -159,6 +159,8 @@
 		],
 	};
 
+	const REMOTE_ENDPOINTS_P2P_TIMEOUT_MS = 12000;
+
 	function isBridgeUnavailable(result) {
 		return String(result?.error || '').toLowerCase().includes('bridge unavailable');
 	}
@@ -1058,7 +1060,7 @@
 		networkRequestError = '';
 		networkRequestInFlight = safeName;
 		try {
-			const result = await requestRemoteEndpointsP2P(safeName, 10000);
+			const result = await requestRemoteEndpointsP2P(safeName, REMOTE_ENDPOINTS_P2P_TIMEOUT_MS);
 			if (!result?.ok) {
 				throw new Error(result?.error || 'p2p endpoints request failed');
 			}

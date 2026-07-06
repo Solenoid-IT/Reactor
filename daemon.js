@@ -584,6 +584,23 @@ async function main() {
 			return numericPort;
 		};
 
+		const applyRuntimeTimeoutEnv = (name) => {
+			const rawValue = readConfigString(name);
+			if (!rawValue) {
+				return;
+			}
+
+			const numericValue = Number(rawValue);
+			if (!Number.isFinite(numericValue) || numericValue <= 0) {
+				return;
+			}
+
+			process.env[name] = String(Math.floor(numericValue));
+		};
+
+		applyRuntimeTimeoutEnv('REACTOR_TURN_TEST_TIMEOUT_MS');
+		applyRuntimeTimeoutEnv('REACTOR_P2P_ENDPOINTS_TIMEOUT_MS');
+
 		const envWorkingMode = String(readConfigString('MODE') || '').trim().toLowerCase();
 		const normalizedWorkingMode = envWorkingMode === 'exchange' ? 'exchange' : envWorkingMode ? 'node' : '';
 		const coturnConfigPath = process.env.REACTOR_COTURN_CONFIG_PATH

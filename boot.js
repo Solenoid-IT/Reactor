@@ -1,5 +1,6 @@
 const { app, BrowserWindow, session } = require('electron');
 const fs = require('fs/promises');
+const fsNative = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -10,6 +11,65 @@ const { setupIpcHandlers } = require('./src/electron/ipcHandlers');
 // Constants
 const EXTERNAL_ENDPOINTS_DIR = path.join(app.getPath('userData'), 'endpoints');
 const EVENT_LOG_PATH = path.join(app.getPath('userData'), 'activity.log');
+
+function parseEnvFileValue(rawValue) {
+	const value = String(rawValue || '').trim();
+	if (!value) {
+		return '';
+	}
+
+	if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+		return value.slice(1, -1);
+	}
+
+	return value;
+}
+
+function loadEnvFileIfPresentSync(filePath) {
+	if (!filePath) {
+		return false;
+	}
+
+	try {
+		if (!fsNative.existsSync(filePath)) {
+			return false;
+		}
+
+		const raw = fsNative.readFileSync(filePath, 'utf8');
+		for (const rawLine of String(raw || '').split(/\r?\n/)) {
+			const line = String(rawLine || '').trim();
+			if (!line || line.startsWith('#')) {
+				continue;
+			}
+
+			const equalIndex = line.indexOf('=');
+			if (equalIndex < 1) {
+				continue;
+			}
+
+			let key = line.slice(0, equalIndex).trim();
+			if (key.startsWith('export ')) {
+				key = key.slice(7).trim();
+			}
+
+			if (!key) {
+				continue;
+			}
+
+			if (Object.prototype.hasOwnProperty.call(process.env, key) && String(process.env[key] || '').trim()) {
+				continue;
+			}
+
+			process.env[key] = parseEnvFileValue(line.slice(equalIndex + 1));
+		}
+
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+loadEnvFileIfPresentSync(process.env.REACTOR_ENV_FILE || path.join(__dirname, '.env'));
 
 function shouldShowWindowOnLaunch() {
 	if (process.argv.includes('--reactor-background-startup')) {

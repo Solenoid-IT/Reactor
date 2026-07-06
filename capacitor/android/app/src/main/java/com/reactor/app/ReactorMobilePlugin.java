@@ -109,6 +109,10 @@ public class ReactorMobilePlugin extends Plugin {
     private static final int TURN_ATTR_REQUESTED_TRANSPORT = 0x0019;
     private static final int TURN_ALLOCATE_REQUEST = 0x0003;
     private static final int TURN_ALLOCATE_SUCCESS_RESPONSE = 0x0103;
+    private static final int TURN_RELAY_TEST_TIMEOUT_MS = 12000;
+    private static final int P2P_REMOTE_ENDPOINTS_TIMEOUT_MS = 12000;
+    private static final String ENV_TURN_TEST_TIMEOUT_MS = "REACTOR_TURN_TEST_TIMEOUT_MS";
+    private static final String ENV_P2P_REMOTE_ENDPOINTS_TIMEOUT_MS = "REACTOR_P2P_ENDPOINTS_TIMEOUT_MS";
     private File pendingBackupExportFile = null;
     private AndroidP2PWebRtcManager nativeP2PManager;
 
@@ -886,11 +890,12 @@ public class ReactorMobilePlugin extends Plugin {
         return new TurnRequest(transactionId, message);
     }
 
-    private JSObject testTurnAllocateUdp(InetAddress address, int port, TurnRequest request) {
+    private JSObject testTurnAllocateUdp(InetAddress address, int port, TurnRequest request, int timeoutMs) {
         DatagramSocket socket = null;
         try {
             socket = new DatagramSocket();
-            socket.setSoTimeout(2500);
+            int safeTimeoutMs = timeoutMs > 0 ? timeoutMs : TURN_RELAY_TEST_TIMEOUT_MS;
+            socket.setSoTimeout(safeTimeoutMs);
             socket.connect(address, port);
             socket.send(new DatagramPacket(request.message, request.message.length, address, port));
             byte[] response = new byte[2048];
@@ -910,9 +915,10 @@ public class ReactorMobilePlugin extends Plugin {
         }
     }
 
-    private JSObject testTurnAllocateTls(String host, InetAddress address, int port, TurnRequest request) {
+    private JSObject testTurnAllocateTls(String host, InetAddress address, int port, TurnRequest request, int timeoutMs) {
         SSLSocket socket = null;
         try {
+            int safeTimeoutMs = timeoutMs > 0 ? timeoutMs : TURN_RELAY_TEST_TIMEOUT_MS;
             X509TrustManager trustAll = new X509TrustManager() {
                 @Override public void checkClientTrusted(X509Certificate[] chain, String authType) {}
                 @Override public void checkServerTrusted(X509Certificate[] chain, String authType) {}
@@ -921,35 +927,21 @@ public class ReactorMobilePlugin extends Plugin {
             SSLContext sslContext = SSLContext.getInstance("TLS");
             sslContext.init(null, new TrustManager[] { trustAll }, new SecureRandom());
             socket = (SSLSocket) sslContext.getSocketFactory().createSocket();
-            socket.connect(new InetSocketAddress(address, port), 2500);
-            socket.setSoTimeout(2500);
+            socket.connect(new InetSocketAddress(address, port), safeTimeoutMs);
+            socket.setSoTimeout(safeTimeoutMs);
             socket.startHandshake();
 
-            byte[] frame = new byte[2 + request.message.length];
-            frame[0] = (byte) ((request.message.length >> 8) & 0xff);
-            frame[1] = (byte) (request.message.length & 0xff);
-            System.arraycopy(request.message, 0, frame, 2, request.message.length);
-            socket.getOutputStream().write(frame);
+            socket.getOutputStream().write(request.message);
             socket.getOutputStream().flush();
 
             InputStream input = socket.getInputStream();
-            int frameSizeHigh = input.read();
-            int frameSizeLow = input.read();
-            if (frameSizeHigh < 0 || frameSizeLow < 0) {
+            byte[] response = new byte[4096];
+            int read = input.read(response);
+            if (read <= 0) {
                 return buildRelayTestFailure("TURN TLS socket closed before response", "connection");
             }
-            int frameLength = ((frameSizeHigh & 0xff) << 8) | (frameSizeLow & 0xff);
-            byte[] response = new byte[frameLength];
-            int offset = 0;
-            while (offset < frameLength) {
-                int read = input.read(response, offset, frameLength - offset);
-                if (read < 0) {
-                    return buildRelayTestFailure("TURN TLS socket closed before full response", "connection");
-                }
-                offset += read;
-            }
 
-            TurnMessage parsed = parseTurnMessage(response, response.length);
+            TurnMessage parsed = parseTurnMessage(response, read);
             if (parsed == null || !Arrays.equals(parsed.transactionId, request.transactionId)) {
                 return buildRelayTestFailure("TURN TLS response invalid", "protocol");
             }
@@ -968,7 +960,7 @@ public class ReactorMobilePlugin extends Plugin {
         }
     }
 
-    private JSObject testTurnRelayAuthentication(String host, int port, boolean tls, String username, String password) {
+    private JSObject testTurnRelayAuthentication(String host, int port, boolean tls, String username, String password, int timeoutMs) {
         String safeHost = sanitizeNetworkHost(host);
         if (safeHost.isEmpty()) {
             return buildRelayTestFailure("turn host is empty", "configuration");
@@ -987,11 +979,28 @@ public class ReactorMobilePlugin extends Plugin {
         String lastErrorType = "connection";
         long startedAt = System.currentTimeMillis();
         for (InetAddress address : addresses) {
+            SSLSocket persistentTlsSocket = null;
             try {
+                if (tls) {
+                    int safeTimeoutMs = timeoutMs > 0 ? timeoutMs : TURN_RELAY_TEST_TIMEOUT_MS;
+                    X509TrustManager trustAll = new X509TrustManager() {
+                        @Override public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+                        @Override public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+                        @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+                    };
+
+                    SSLContext sslContext = SSLContext.getInstance("TLS");
+                    sslContext.init(null, new TrustManager[] { trustAll }, new SecureRandom());
+                    persistentTlsSocket = (SSLSocket) sslContext.getSocketFactory().createSocket();
+                    persistentTlsSocket.connect(new InetSocketAddress(address, port), safeTimeoutMs);
+                    persistentTlsSocket.setSoTimeout(safeTimeoutMs);
+                    persistentTlsSocket.startHandshake();
+                }
+
                 TurnRequest challengeRequest = buildTurnAllocateRequest("", "", "", "");
                 JSObject challengeResponse = tls
-                        ? testTurnAllocateTls(safeHost, address, port, challengeRequest)
-                        : testTurnAllocateUdp(address, port, challengeRequest);
+                        ? testTurnAllocateTlsWithSocket(persistentTlsSocket, challengeRequest)
+                    : testTurnAllocateUdp(address, port, challengeRequest, timeoutMs);
                 if (!challengeResponse.optBoolean("ok", false)) {
                     lastError = challengeResponse.optString("error", lastError);
                     lastErrorType = challengeResponse.optString("errorType", lastErrorType);
@@ -1021,9 +1030,9 @@ public class ReactorMobilePlugin extends Plugin {
 
                 for (int attemptIndex = 0; attemptIndex < 2; attemptIndex += 1) {
                     TurnRequest authenticatedRequest = buildTurnAllocateRequest(username, realm, nonce, password);
-                    JSObject authenticatedResponse = tls
-                            ? testTurnAllocateTls(safeHost, address, port, authenticatedRequest)
-                            : testTurnAllocateUdp(address, port, authenticatedRequest);
+                        JSObject authenticatedResponse = tls
+                            ? testTurnAllocateTlsWithSocket(persistentTlsSocket, authenticatedRequest)
+                            : testTurnAllocateUdp(address, port, authenticatedRequest, timeoutMs);
                     if (!authenticatedResponse.optBoolean("ok", false)) {
                         lastError = authenticatedResponse.optString("error", "TURN connection failed");
                         lastErrorType = authenticatedResponse.optString("errorType", "connection");
@@ -1055,6 +1064,14 @@ public class ReactorMobilePlugin extends Plugin {
             } catch (Exception error) {
                 lastError = error.getMessage() != null ? error.getMessage() : "TURN authentication failed";
                 lastErrorType = "connection";
+            } finally {
+                if (persistentTlsSocket != null) {
+                    try {
+                        persistentTlsSocket.close();
+                    } catch (Exception ignored) {
+                        // Ignore close failures.
+                    }
+                }
             }
         }
 
@@ -1077,16 +1094,45 @@ public class ReactorMobilePlugin extends Plugin {
         }
 
         if ("turn".equals(safeKind)) {
+            int turnTimeoutMs = resolveTimeoutFromEnv(ENV_TURN_TEST_TIMEOUT_MS, TURN_RELAY_TEST_TIMEOUT_MS);
             return testTurnRelayAuthentication(
                     host,
                     port,
                     tls,
                     safeConfig.optString("username", "").trim(),
-                    safeConfig.optString("password", "").trim()
+                    safeConfig.optString("password", "").trim(),
+                turnTimeoutMs
             );
         }
 
         return new JSObject().put("ok", false).put("error", "unsupported relay kind");
+    }
+
+    private JSObject testTurnAllocateTlsWithSocket(SSLSocket socket, TurnRequest request) {
+        if (socket == null || request == null || request.message == null || request.transactionId == null || request.transactionId.length != 12) {
+            return buildRelayTestFailure("invalid TURN TLS request parameters", "configuration");
+        }
+
+        try {
+            socket.getOutputStream().write(request.message);
+            socket.getOutputStream().flush();
+
+            InputStream input = socket.getInputStream();
+            byte[] response = new byte[4096];
+            int read = input.read(response);
+            if (read <= 0) {
+                return buildRelayTestFailure("TURN TLS socket closed before response", "connection");
+            }
+
+            TurnMessage parsed = parseTurnMessage(response, read);
+            if (parsed == null || !Arrays.equals(parsed.transactionId, request.transactionId)) {
+                return buildRelayTestFailure("TURN TLS response invalid", "protocol");
+            }
+
+            return new JSObject().put("ok", true).put("protocol", "tls-auth").put("messageType", parsed.type).put("message", parsed);
+        } catch (Exception error) {
+            return buildRelayTestFailure(error.getMessage() != null ? error.getMessage() : "TURN TLS request failed", "connection");
+        }
     }
 
     private String readHttpResponseBody(HttpURLConnection connection, int status) throws IOException {
@@ -1634,6 +1680,90 @@ public class ReactorMobilePlugin extends Plugin {
         }
 
         return envs;
+    }
+
+    private String parseEnvFileValue(String rawValue) {
+        String value = String.valueOf(rawValue == null ? "" : rawValue).trim();
+        if (value.isEmpty()) {
+            return "";
+        }
+
+        if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+            return value.substring(1, Math.max(1, value.length() - 1));
+        }
+
+        return value;
+    }
+
+    private String readEnvValueFromContent(String content, String key) {
+        if (content == null || key == null || key.trim().isEmpty()) {
+            return "";
+        }
+
+        String safeKey = key.trim();
+        String[] lines = String.valueOf(content).split("\\r?\\n");
+        for (String rawLine : lines) {
+            String line = String.valueOf(rawLine == null ? "" : rawLine).trim();
+            if (line.isEmpty() || line.startsWith("#")) {
+                continue;
+            }
+
+            int equalIndex = line.indexOf('=');
+            if (equalIndex < 1) {
+                continue;
+            }
+
+            String rawName = line.substring(0, equalIndex).trim();
+            if (rawName.startsWith("export ")) {
+                rawName = rawName.substring(7).trim();
+            }
+
+            if (!safeKey.equals(rawName)) {
+                continue;
+            }
+
+            return parseEnvFileValue(line.substring(equalIndex + 1));
+        }
+
+        return "";
+    }
+
+    private int resolveTimeoutFromEnv(String envKey, int fallback) {
+        int safeFallback = fallback > 0 ? fallback : 12000;
+
+        try {
+            JSObject envs = readEnvConfig();
+            JSONArray keys = envs.names();
+            if (keys == null) {
+                return safeFallback;
+            }
+
+            int resolved = -1;
+            for (int index = 0; index < keys.length(); index += 1) {
+                String fileName = String.valueOf(keys.optString(index, "")).trim();
+                if (fileName.isEmpty()) {
+                    continue;
+                }
+
+                String content = String.valueOf(envs.opt(fileName));
+                String rawValue = readEnvValueFromContent(content, envKey);
+                if (rawValue.isEmpty()) {
+                    continue;
+                }
+
+                int numericValue = Integer.parseInt(rawValue.trim());
+                if (numericValue > 0) {
+                    resolved = numericValue;
+                    if (".env".equalsIgnoreCase(fileName)) {
+                        break;
+                    }
+                }
+            }
+
+            return resolved > 0 ? resolved : safeFallback;
+        } catch (Exception ignored) {
+            return safeFallback;
+        }
     }
 
     private JSObject writeEnvConfig(JSObject env) throws Exception {
@@ -3312,7 +3442,7 @@ public class ReactorMobilePlugin extends Plugin {
     @PluginMethod
     public void requestRemoteEndpointsP2P(PluginCall call) {
         String target = call.getString("target", "");
-        long timeoutMs = call.getLong("timeoutMs", 8000L);
+        long timeoutMs = call.getLong("timeoutMs", (long) resolveTimeoutFromEnv(ENV_P2P_REMOTE_ENDPOINTS_TIMEOUT_MS, P2P_REMOTE_ENDPOINTS_TIMEOUT_MS));
         JSObject workingMode = readWorkingModeConfig();
         String safeTarget = String.valueOf(target == null ? "" : target).trim().toLowerCase(Locale.ROOT);
 

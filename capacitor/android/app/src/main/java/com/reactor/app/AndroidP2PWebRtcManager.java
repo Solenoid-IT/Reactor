@@ -36,6 +36,7 @@ import java.util.concurrent.TimeUnit;
 
 public final class AndroidP2PWebRtcManager {
     private static final String TAG = "AndroidP2PWebRtc";
+    private static final long DEFAULT_REMOTE_ENDPOINTS_TIMEOUT_MS = 12000L;
 
     private static volatile AndroidP2PWebRtcManager instance;
 
@@ -188,7 +189,7 @@ public final class AndroidP2PWebRtcManager {
                 createOffer(session);
             }
 
-            long safeTimeoutMs = timeoutMs > 0 ? timeoutMs : 8000L;
+            long safeTimeoutMs = timeoutMs > 0 ? timeoutMs : DEFAULT_REMOTE_ENDPOINTS_TIMEOUT_MS;
             long openDeadline = System.currentTimeMillis() + safeTimeoutMs;
             while (System.currentTimeMillis() < openDeadline) {
                 if (session.dataChannel != null && session.dataChannel.state() == DataChannel.State.OPEN) {

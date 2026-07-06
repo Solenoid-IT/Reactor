@@ -783,7 +783,7 @@ export async function sendP2PData(target, text = '') {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
-export async function requestRemoteEndpointsP2P(target, timeoutMs = 8000) {
+export async function requestRemoteEndpointsP2P(target, timeoutMs = 12000) {
 	const bridge = getBridge();
 	if (bridge && bridge.requestRemoteEndpointsP2P) {
 		return bridge.requestRemoteEndpointsP2P(target, timeoutMs);

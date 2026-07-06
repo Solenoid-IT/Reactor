@@ -52,6 +52,12 @@ const STUN_ATTR_NONCE = 0x0015;
 const TURN_ATTR_REQUESTED_TRANSPORT = 0x0019;
 const TURN_ALLOCATE_REQUEST = 0x0003;
 const TURN_ALLOCATE_SUCCESS_RESPONSE = 0x0103;
+const TURN_RELAY_TEST_TIMEOUT_MS = Number(process.env.REACTOR_TURN_TEST_TIMEOUT_MS) > 0
+	? Number(process.env.REACTOR_TURN_TEST_TIMEOUT_MS)
+	: 12000;
+const P2P_REMOTE_ENDPOINTS_TIMEOUT_MS = Number(process.env.REACTOR_P2P_ENDPOINTS_TIMEOUT_MS) > 0
+	? Number(process.env.REACTOR_P2P_ENDPOINTS_TIMEOUT_MS)
+	: 12000;
 
 function delay(ms) {
 	return new Promise((resolve) => {
@@ -778,26 +784,18 @@ function sendTurnAllocateRequestTls(host, address, port, request, timeoutMs = 50
 		};
 
 		socket.once('secureConnect', () => {
-			const frame = Buffer.alloc(2 + request.message.length);
-			frame.writeUInt16BE(request.message.length, 0);
-			request.message.copy(frame, 2);
-			socket.write(frame);
+			socket.write(request.message);
 		});
 
 		socket.on('data', (chunk) => {
 			pending = Buffer.concat([pending, Buffer.from(chunk)]);
-			while (pending.length >= 2) {
-				const frameLength = pending.readUInt16BE(0);
-				if (pending.length < frameLength + 2) {
+			while (pending.length >= STUN_HEADER_LENGTH) {
+				const parsed = parseStunMessage(pending);
+				if (!parsed) {
 					return;
 				}
 
-				const frame = pending.subarray(2, 2 + frameLength);
-				pending = pending.subarray(2 + frameLength);
-				const parsed = parseStunMessage(frame);
-				if (!parsed) {
-					continue;
-				}
+				pending = pending.subarray(parsed.raw.length);
 				if (!parsed.transactionId.equals(request.transactionId)) {
 					continue;
 				}
@@ -823,6 +821,157 @@ function sendTurnAllocateRequestTls(host, address, port, request, timeoutMs = 50
 			finish({ ok: false, error: 'timeout waiting TURN TLS response' });
 		}, Number(timeoutMs) > 0 ? Number(timeoutMs) : 5000);
 	});
+}
+
+function createTurnTlsRequester(host, address, port, timeoutMs = 5000) {
+	const safeHost = normalizeRelayHost(host);
+	const safeAddress = String(address || '').trim();
+	const safePort = Number(port);
+	if (!safeHost || !safeAddress || !Number.isFinite(safePort) || safePort < 1 || safePort > 65535) {
+		return {
+			async send() {
+				return { ok: false, error: 'invalid TURN TLS request parameters' };
+			},
+			close() {
+				// noop
+			},
+		};
+	}
+
+	const socket = tls.connect({
+		host: safeAddress,
+		port: safePort,
+		rejectUnauthorized: false,
+		servername: safeHost,
+	});
+
+	let pending = Buffer.alloc(0);
+	const queue = [];
+	let queueResolver = null;
+	let closedError = '';
+
+	const pushMessage = (message) => {
+		if (queueResolver) {
+			const resolve = queueResolver;
+			queueResolver = null;
+			resolve(message);
+			return;
+		}
+		queue.push(message);
+	};
+
+	socket.on('data', (chunk) => {
+		pending = Buffer.concat([pending, Buffer.from(chunk)]);
+		while (pending.length >= STUN_HEADER_LENGTH) {
+			const parsed = parseStunMessage(pending);
+			if (!parsed) {
+				return;
+			}
+			pending = pending.subarray(parsed.raw.length);
+			pushMessage(parsed);
+		}
+	});
+
+	socket.once('end', () => {
+		closedError = 'TURN TLS socket closed before response';
+		if (queueResolver) {
+			const resolve = queueResolver;
+			queueResolver = null;
+			resolve(null);
+		}
+	});
+
+	socket.once('error', (error) => {
+		closedError = error?.message || 'tls connection failed';
+		if (queueResolver) {
+			const resolve = queueResolver;
+			queueResolver = null;
+			resolve(null);
+		}
+	});
+
+	const readyPromise = new Promise((resolve) => {
+		socket.once('secureConnect', () => {
+			resolve({ ok: true });
+		});
+
+		socket.once('error', (error) => {
+			resolve({ ok: false, error: error?.message || 'tls connection failed' });
+		});
+	});
+
+	const waitNextMessage = (waitMs) => {
+		if (queue.length > 0) {
+			return Promise.resolve(queue.shift());
+		}
+
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => {
+				if (queueResolver) {
+					queueResolver = null;
+				}
+				resolve(null);
+			}, Math.max(1, Number(waitMs) || 1));
+
+			queueResolver = (message) => {
+				clearTimeout(timer);
+				resolve(message);
+			};
+		});
+	};
+
+	return {
+		async send(request) {
+			if (!Buffer.isBuffer(request?.message) || !Buffer.isBuffer(request?.transactionId) || request.transactionId.length !== 12) {
+				return { ok: false, error: 'invalid TURN TLS request parameters' };
+			}
+
+			const ready = await readyPromise;
+			if (!ready?.ok) {
+				return { ok: false, error: ready?.error || 'tls connection failed' };
+			}
+
+			if (closedError) {
+				return { ok: false, error: closedError };
+			}
+
+			try {
+				socket.write(request.message);
+			} catch (error) {
+				return { ok: false, error: error?.message || 'unable to send TURN allocate request' };
+			}
+
+			const startedAt = Date.now();
+			const safeTimeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : 5000;
+			while (Date.now() - startedAt < safeTimeout) {
+				const remainingMs = Math.max(1, safeTimeout - (Date.now() - startedAt));
+				const message = await waitNextMessage(remainingMs);
+				if (!message) {
+					return { ok: false, error: closedError || 'timeout waiting TURN TLS response' };
+				}
+
+				if (!message.transactionId.equals(request.transactionId)) {
+					continue;
+				}
+
+				return {
+					ok: true,
+					protocol: 'tls-auth',
+					message,
+				};
+			}
+
+			return { ok: false, error: 'timeout waiting TURN TLS response' };
+		},
+
+		close() {
+			try {
+				socket.destroy();
+			} catch {
+				// ignore
+			}
+		},
+	};
 }
 
 async function performTurnAuthenticatedAllocate(sendRequest, credentials) {
@@ -900,10 +1049,15 @@ async function testTurnRelayAuthentication(host, port, useTls, username, passwor
 	const candidates = useTls ? [...addresses] : [...addresses].sort((a, b) => Number(a.family || 4) - Number(b.family || 4));
 	const errors = [];
 	for (const candidate of candidates) {
-		const sendRequest = useTls
-			? (request) => sendTurnAllocateRequestTls(safeHost, candidate.address, safePort, request, timeoutMs)
-			: (request) => sendTurnAllocateRequestUdp(candidate.address, candidate.family, safePort, request, timeoutMs);
-		const attempt = await performTurnAuthenticatedAllocate(sendRequest, credentials);
+		let attempt;
+		if (useTls) {
+			const requester = createTurnTlsRequester(safeHost, candidate.address, safePort, timeoutMs);
+			attempt = await performTurnAuthenticatedAllocate((request) => requester.send(request), credentials);
+			requester.close();
+		} else {
+			const sendRequest = (request) => sendTurnAllocateRequestUdp(candidate.address, candidate.family, safePort, request, timeoutMs);
+			attempt = await performTurnAuthenticatedAllocate(sendRequest, credentials);
+		}
 		if (attempt.ok) {
 			return {
 				...attempt,
@@ -2405,7 +2559,14 @@ class ReactorRuntime {
 		} else {
 			const turnUsername = String(endpoint.username || this.exchangeAuthToken || '').trim();
 			const turnPassword = String(endpoint.password || this.exchangeAuthToken || '').trim();
-			testResult = await testTurnRelayAuthentication(endpoint.host, endpoint.port, endpoint.tls, turnUsername, turnPassword, 5000);
+			testResult = await testTurnRelayAuthentication(
+				endpoint.host,
+				endpoint.port,
+				endpoint.tls,
+				turnUsername,
+				turnPassword,
+				TURN_RELAY_TEST_TIMEOUT_MS,
+			);
 		}
 
 		return {
@@ -3559,7 +3720,7 @@ class ReactorRuntime {
 		return this.dispatchIncomingMessageEnvelope(parsedBody, senderMeta, headers);
 	}
 
-	async requestRemoteEndpointsP2P(targetNodeName, timeoutMs = 8000) {
+	async requestRemoteEndpointsP2P(targetNodeName, timeoutMs = P2P_REMOTE_ENDPOINTS_TIMEOUT_MS) {
 		const safeTarget = String(targetNodeName || '').trim().toLowerCase();
 		if (!safeTarget) {
 			throw new Error('invalid p2p target');
@@ -3595,7 +3756,7 @@ class ReactorRuntime {
 		}
 
 		const requestId = crypto.randomUUID();
-		const safeTimeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 8000;
+		const safeTimeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : P2P_REMOTE_ENDPOINTS_TIMEOUT_MS;
 
 		const promise = new Promise((resolve, reject) => {
 			const timeout = setTimeout(() => {
