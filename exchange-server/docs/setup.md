@@ -16,6 +16,7 @@ Set at least:
 - `TOKEN` (shared secret used by Reactor nodes)
 - `TLS` (`false` for plain HTTP/WS, `true` when clients must connect through HTTPS/WSS)
 - `TLS_MODE` (`direct` for native TLS in Exchange, `proxy` for TLS offload on reverse proxy)
+- `USER_UID` / `USER_GID` (must match host owner of `exchange-server/cert/`; default `1000:1000`)
 
 Example:
 
@@ -47,7 +48,7 @@ Startup behavior when TLS files are missing:
 
 - if `TLS=true` + `TLS_MODE=direct` but `cert.pem` / `key.pem` are not found at boot, Exchange logs a warning
 - in that case, Exchange continues to run in plain `http://` and `ws://` mode (no TLS) instead of stopping
-- when certificate files are created later, Exchange promotes automatically to `https://` and `wss://` without Docker container restart
+- when certificate files are created later, Exchange can promote automatically to `https://` and `wss://` without Docker container restart
 
 ### Direct TLS mode (no proxy)
 
@@ -75,14 +76,16 @@ If you want direct TLS, generate certificate files from inside the running conta
 docker compose exec reactor-exchange node daemonctl.js generate-tls-cert
 ```
 
-If Exchange is already running in direct TLS mode, certificate changes are hot-reloaded automatically.
-You do not need to restart the daemon for certificate rotation.
-If Exchange booted in HTTP/WS fallback because certificates were missing at startup, it will switch automatically to HTTPS/WSS as soon as certificates become available.
+For Docker deployments in this repository, `generate-tls-cert` schedules an automatic container restart after certificate creation.
+This gives a predictable setup flow: build, generate certificate, automatic restart with TLS files available.
+If you prefer no restart, set `RESTART_AFTER_TLS_CERT=false` in `exchange-server/.env`.
+
+If restart is disabled, Exchange still supports TLS hot-reload in direct mode.
 
 Optional interval (milliseconds) for TLS file check in `.env`:
 
 ```env
-REACTOR_EXCHANGE_TLS_RELOAD_INTERVAL_MS=5000
+TLS_RELOAD_INTERVAL_MS=5000
 ```
 
 Optional parameters:
@@ -110,7 +113,16 @@ Inside container, the same files are available at:
 - `/data/tls/key.pem`
 
 With Docker Compose in this repository, `/data/tls` is bind-mounted from `exchange-server/cert/`.
-So you can also provide your own certificate files directly from host by placing them there before starting the container.
+Ownership is stabilized by running the container with `USER_UID:USER_GID`, so cert replacement from host is straightforward.
+
+Replace certificates from host (no container shell needed):
+
+1. Copy new `cert.pem` and `key.pem` into `exchange-server/cert/`
+2. Restart Exchange container:
+
+```bash
+docker compose restart reactor-exchange
+```
 
 Use cases:
 

@@ -5,6 +5,7 @@ services:
       dockerfile: exchange-server/Dockerfile.daemon
     container_name: reactor-exchange
     restart: always
+    user: "${USER_UID:-1000}:${USER_GID:-1000}"
     environment:
       REACTOR_DATA_DIR: /data
       REACTOR_HTTP_PORT: ${PORT:-7070}

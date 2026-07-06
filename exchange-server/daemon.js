@@ -1267,7 +1267,7 @@ async function createDaemonFromEnvironment() {
 	const tlsPaths = getTlsPaths(dataDir);
 	const heartbeatIntervalMs = parsePositiveInt(process.env.REACTOR_EXCHANGE_HEARTBEAT_INTERVAL_MS, 15000, 3000);
 	const heartbeatTimeoutMs = parsePositiveInt(process.env.REACTOR_EXCHANGE_HEARTBEAT_TIMEOUT_MS, 45000, heartbeatIntervalMs + 1000);
-	const tlsReloadIntervalMs = parsePositiveInt(process.env.REACTOR_EXCHANGE_TLS_RELOAD_INTERVAL_MS, 5000, 1000);
+	const tlsReloadIntervalMs = parsePositiveInt(process.env.TLS_RELOAD_INTERVAL_MS, 5000, 1000);
 
 	return new ReactorExchangeDaemon({
 		host,

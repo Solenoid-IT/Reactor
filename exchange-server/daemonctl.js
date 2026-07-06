@@ -3,6 +3,7 @@ const https = require('https');
 const { execFileSync } = require('child_process');
 const os = require('os');
 const path = require('path');
+const fsSync = require('fs');
 const fs = require('fs/promises');
 
 function getDefaultDataDir() {
@@ -34,6 +35,30 @@ function usage() {
 	console.log('  node daemonctl.js generate-tls-cert [--bits <1024-8192>] [--days <1-36500>]');
 	console.log('  node daemonctl.js fix-tls-perms');
 	process.exit(1);
+}
+
+function isRunningInsideDocker() {
+	return fsSync.existsSync('/.dockerenv');
+}
+
+function shouldRestartContainerAfterTlsCert() {
+	const raw = String(process.env.RESTART_AFTER_TLS_CERT || 'true').trim().toLowerCase();
+	return ['1', 'true', 'yes', 'on'].includes(raw);
+}
+
+function scheduleContainerRestart() {
+	if (!isRunningInsideDocker() || !shouldRestartContainerAfterTlsCert()) {
+		return false;
+	}
+
+	// Delay restart so the CLI can return success after writing cert files.
+	execFileSync(
+		'sh',
+		['-lc', '(sleep 1; kill -TERM 1) >/dev/null 2>&1 &'],
+		{ stdio: 'ignore' },
+	);
+
+	return true;
 }
 
 function extractTlsCertFlags(args) {
@@ -402,6 +427,7 @@ async function handleGenerateTlsCert(rest) {
 	const { bits, days } = extractTlsCertFlags(rest);
 	const reactorName = String(process.env.REACTOR_NAME || 'reactor').trim() || 'reactor';
 	const tls = await generateSelfSignedCert(reactorName, bits, days);
+	const restartScheduled = scheduleContainerRestart();
 	console.log('Self-signed TLS certificate generated');
 	console.log(`cert.pem: ${tls.certPath || '-'}`);
 	console.log(`key.pem:  ${tls.keyPath || '-'}`);
@@ -410,6 +436,9 @@ async function handleGenerateTlsCert(rest) {
 	if (tls.subject) console.log(`Subject: ${tls.subject}`);
 	if (tls.notAfter) console.log(`NotAfter:${tls.notAfter}`);
 	if (tls.fingerprint) console.log(`SHA256:  ${tls.fingerprint}`);
+	if (restartScheduled) {
+		console.log('Container restart scheduled to apply TLS certificate');
+	}
 }
 
 async function handleFixTlsPerms(rest) {

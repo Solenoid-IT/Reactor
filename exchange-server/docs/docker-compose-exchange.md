@@ -28,6 +28,7 @@ Edit `.env` for your setup:
 - `PORT`
 - `TLS`
 - `TLS_MODE` (`direct` or `proxy`)
+- `USER_UID` and `USER_GID` (must match host owner of `exchange-server/cert`, usually `1000:1000`)
 - `TOKEN` (optional; can be generated later)
 
 ## Start services
@@ -48,6 +49,16 @@ Check status:
 docker compose ps
 docker compose logs -f
 ```
+
+Generate direct TLS certificate (optional):
+
+```bash
+docker compose exec reactor-exchange node daemonctl.js generate-tls-cert
+```
+
+In this setup, certificate generation runs inside the container and schedules an automatic container restart.
+No manual permission fix is required when `USER_UID`/`USER_GID` match the host ownership of `exchange-server/cert`.
+The TLS directory is bind-mounted as `exchange-server/cert -> /data/tls`, so certificates can also be replaced directly from host.
 
 Notes:
 - the Exchange container reads its configuration from the mounted `.env` file.
