@@ -41,6 +41,34 @@ Recommended production setup:
 
 Note: the current Exchange daemon process itself does not directly terminate TLS. HTTPS/WSS should be terminated by the reverse proxy.
 
+## Generate TLS certificate
+
+You can generate a self-signed TLS certificate with `daemonctl.js`.
+
+From `exchange-server/`:
+
+```bash
+docker compose exec reactor-exchange node daemonctl.js generate-tls-cert
+```
+
+Optional parameters:
+
+```bash
+docker compose exec reactor-exchange node daemonctl.js generate-tls-cert --bits 4096 --days 3650
+```
+
+Generated files are stored in the Exchange data volume:
+
+- `/data/tls/cert.pem`
+- `/data/tls/key.pem`
+
+Use cases:
+
+- local testing with self-signed certs
+- bootstrap certs for a reverse proxy in internal environments
+
+For public production endpoints, use CA-issued certificates (for example Let's Encrypt) on the reverse proxy.
+
 ## 2) Start the container
 
 From `exchange-server/`:
