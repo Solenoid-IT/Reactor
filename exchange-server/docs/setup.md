@@ -26,6 +26,15 @@ TLS_MODE=direct
 TOKEN=your_shared_token_here
 ```
 
+
+## 2) Build the image
+Start Exchange first with Docker build:
+
+```bash
+docker compose up -d --build
+```
+
+
 ## TLS configuration
 
 `TLS` enables secure client transport. `TLS_MODE` controls where TLS is terminated.
@@ -33,6 +42,12 @@ TOKEN=your_shared_token_here
 - `TLS=false`: Exchange serves `http://` and `ws://`
 - `TLS=true` + `TLS_MODE=direct`: Exchange serves `https://` and `wss://` directly on `PORT`
 - `TLS=true` + `TLS_MODE=proxy`: Exchange serves internal `http://` and `ws://`; reverse proxy exposes HTTPS/WSS
+
+Startup behavior when TLS files are missing:
+
+- if `TLS=true` + `TLS_MODE=direct` but `cert.pem` / `key.pem` are not found at boot, Exchange logs a warning
+- in that case, Exchange continues to run in plain `http://` and `ws://` mode (no TLS) instead of stopping
+- when certificate files are created later, Exchange promotes automatically to `https://` and `wss://` without Docker container restart
 
 ### Direct TLS mode (no proxy)
 
@@ -54,35 +69,26 @@ TOKEN=your_shared_token_here
 
 You can generate a self-signed TLS certificate with `daemonctl.js`.
 
-From `exchange-server/`:
+If you want direct TLS, generate certificate files from inside the running container:
 
 ```bash
-node daemonctl.js generate-tls-cert
+docker compose exec reactor-exchange node daemonctl.js generate-tls-cert
 ```
 
-This command is intended to be run before starting Docker.
-It now also enforces secure file permissions automatically:
+If Exchange is already running in direct TLS mode, certificate changes are hot-reloaded automatically.
+You do not need to restart the daemon for certificate rotation.
+If Exchange booted in HTTP/WS fallback because certificates were missing at startup, it will switch automatically to HTTPS/WSS as soon as certificates become available.
 
-- TLS directory: `700`
-- `cert.pem`: `644`
-- `key.pem`: `600`
+Optional interval (milliseconds) for TLS file check in `.env`:
+
+```env
+REACTOR_EXCHANGE_TLS_RELOAD_INTERVAL_MS=5000
+```
 
 Optional parameters:
 
 ```bash
-node daemonctl.js generate-tls-cert --bits 4096 --days 3650
-```
-
-Normalize permissions for existing certificate files:
-
-```bash
-node daemonctl.js fix-tls-perms
-```
-
-Alternative (if the container is already running):
-
-```bash
-docker compose exec reactor-exchange node daemonctl.js generate-tls-cert
+docker compose exec reactor-exchange node daemonctl.js generate-tls-cert --bits 4096 --days 3650
 ```
 
 You can normalize permissions from inside the container too:
@@ -114,13 +120,7 @@ Use cases:
 
 For public production endpoints, use CA-issued certificates (for example Let's Encrypt) on the reverse proxy.
 
-## 2) Start the container
 
-From `exchange-server/`:
-
-```bash
-docker compose up -d --build
-```
 
 ## 3) Check status
 
@@ -129,6 +129,7 @@ docker compose ps
 docker compose logs -f reactor-exchange
 docker compose exec reactor-exchange node daemonctl.js status
 ```
+
 
 ## 4) Quick API check
 

@@ -46,21 +46,23 @@ Notes:
 - Use a strong password in the `user=` directive.
 - Keep relay port range reasonably small for easier firewall management.
 
-### Generate TURN TLS certificate with the coturn CLI
+### Generate TURN TLS certificate from inside the container
 
-Run this command from the `coturn-server` folder:
+To avoid host/container file permission mismatches on TLS key files, run certificate generation from inside the running coturn container.
 
-```bash
-cd coturn-server && node coturnctl.js generate-tls-cert --cn turn.local
-```
-
-Then start (or restart) coturn:
+Start coturn first:
 
 ```bash
 cd coturn-server && docker compose up -d
 ```
 
-If you changed `turnserver.conf` and need to apply it, recreate coturn:
+Generate certificate and normalize permissions:
+
+```bash
+cd coturn-server && docker compose exec coturn sh -lc "openssl req -x509 -newkey rsa:2048 -keyout /var/lib/coturn/certs/key.pem -out /var/lib/coturn/certs/cert.pem -days 3650 -nodes -subj '/CN=turn.local' && chmod 700 /var/lib/coturn/certs && chmod 644 /var/lib/coturn/certs/cert.pem && chmod 600 /var/lib/coturn/certs/key.pem"
+```
+
+Then recreate coturn to ensure updated TLS files are loaded:
 
 ```bash
 cd coturn-server && docker compose up -d --force-recreate coturn
@@ -69,6 +71,7 @@ cd coturn-server && docker compose up -d --force-recreate coturn
 Notes:
 - Certificate and key are persisted in `coturn-server/cert/` and mounted into the container.
 - For production use a real certificate and set CN/SAN to your public TURN hostname.
+- If you generated certs previously from host and still see TLS permission errors, regenerate with `docker compose exec` as shown above.
 
 ## 2) Start Services
 
