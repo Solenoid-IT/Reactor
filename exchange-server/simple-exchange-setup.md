@@ -12,21 +12,23 @@ This guide includes only the minimum required steps to:
 
 ## 2) Configure .env
 
-In the project root, create or update .env:
+From the `exchange-server` directory, copy the example:
 
-```env
-REACTOR_WORKING_MODE=exchange
-REACTOR_NAME=exchange-server
-REACTOR_EXCHANGE_PORT=7070
-REACTOR_EXCHANGE_TOKEN=
+```bash
+cd exchange-server
+cp .env.example .env
 ```
+
+Edit `.env` for your setup:
+- `REACTOR_EXCHANGE_PORT`
+- `REACTOR_EXCHANGE_TOKEN` (optional; can be generated later)
+- etc...
 
 ## 3) Start the default containers (Exchange + coturn)
 
 From the `exchange-server` directory:
 
 ```bash
-cd exchange-server
 docker compose up -d --build
 ```
 

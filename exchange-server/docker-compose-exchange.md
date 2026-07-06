@@ -9,7 +9,7 @@ You can run:
 
 - `Dockerfile.daemon`
 - `docker-compose.yml`
-- `.env.example` (in project root)
+- `.env.example`
 
 The services run `daemon.js` in headless mode and use `REACTOR_WORKING_MODE`.
 
@@ -20,12 +20,10 @@ The services run `daemon.js` in headless mode and use `REACTOR_WORKING_MODE`.
 
 ## Prepare environment file
 
-Create your local `.env` file from template (from project root):
+Create your local `.env` file from template:
 
 ```bash
-cd ..
 cp .env.example .env
-cd exchange-server
 ```
 
 Edit `.env` for your setup:
