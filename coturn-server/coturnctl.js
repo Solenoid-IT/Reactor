@@ -16,7 +16,16 @@ function isRunningInsideDocker() {
 
 function scheduleContainerRestart() {
 	if (!isRunningInsideDocker()) {
-		return false;
+		try {
+			execFileSync(
+				'sh',
+				['-lc', 'docker compose restart coturn >/dev/null 2>&1 || docker-compose restart coturn >/dev/null 2>&1'],
+				{ cwd: __dirname, stdio: 'ignore' },
+			);
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	execFileSync(
