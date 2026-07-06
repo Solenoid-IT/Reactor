@@ -1066,11 +1066,15 @@ async function testTurnRelayAuthentication(host, port, useTls, username, passwor
 				family: candidate.family,
 			};
 		}
-		errors.push(`${candidate.address}: ${attempt.error || 'failed'}`);
+		errors.push({
+			message: `${candidate.address}: ${attempt.error || 'failed'}`,
+			errorType: String(attempt.errorType || '').trim().toLowerCase() || 'connection',
+		});
 	}
 
+	const primaryError = errors[0] || { message: 'unable to authenticate TURN relay', errorType: 'connection' };
 	return {
-		...buildTurnTestFailure(errors[0] || 'unable to authenticate TURN relay', 'connection'),
+		...buildTurnTestFailure(primaryError.message || 'unable to authenticate TURN relay', primaryError.errorType || 'connection'),
 		host: safeHost,
 	};
 }
