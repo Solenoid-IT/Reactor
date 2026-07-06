@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const http = require('http');
+const https = require('https');
 const os = require('os');
 const path = require('path');
 const { WebSocketServer, WebSocket } = require('ws');
@@ -136,11 +137,53 @@ function normalizePortValue(value) {
 	return parsed;
 }
 
+function parseBooleanFlag(value) {
+	return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+}
+
+function parseTlsMode(value) {
+	const normalized = String(value || '').trim().toLowerCase();
+	if (normalized === 'proxy' || normalized === 'offload') {
+		return 'proxy';
+	}
+	return 'direct';
+}
+
+function getLocalCertDir() {
+	return path.join(__dirname, 'cert');
+}
+
+function getTlsDir(dataDir) {
+	const explicitTlsDir = String(process.env.REACTOR_TLS_DIR || '').trim();
+	if (explicitTlsDir) {
+		return explicitTlsDir;
+	}
+
+	if (String(process.env.REACTOR_DATA_DIR || '').trim()) {
+		return path.join(dataDir, 'tls');
+	}
+
+	return getLocalCertDir();
+}
+
+function getTlsPaths(dataDir) {
+	const tlsDir = getTlsDir(dataDir);
+	return {
+		tlsDir,
+		certPath: path.join(tlsDir, 'cert.pem'),
+		keyPath: path.join(tlsDir, 'key.pem'),
+	};
+}
+
 class ReactorExchangeDaemon {
 	constructor(options = {}) {
 		this.host = String(options.host || '0.0.0.0').trim() || '0.0.0.0';
 		this.port = normalizePortValue(options.port) || 7070;
 		this.token = String(options.token || '').trim();
+		this.tlsEnabled = Boolean(options.tlsEnabled);
+		this.tlsMode = parseTlsMode(options.tlsMode || 'direct');
+		this.tlsCertPath = String(options.tlsCertPath || '').trim() || null;
+		this.tlsKeyPath = String(options.tlsKeyPath || '').trim() || null;
 		this.heartbeatIntervalMs = parsePositiveInt(options.heartbeatIntervalMs, 15000, 3000);
 		this.heartbeatTimeoutMs = parsePositiveInt(options.heartbeatTimeoutMs, 45000, this.heartbeatIntervalMs + 1000);
 		this.dataDir = String(options.dataDir || getDefaultDataDir()).trim() || getDefaultDataDir();
@@ -163,9 +206,33 @@ class ReactorExchangeDaemon {
 
 		await fsp.mkdir(this.dataDir, { recursive: true });
 		this.startedAt = new Date().toISOString();
-		this.httpServer = http.createServer((request, response) => {
-			void this.handleHttpRequest(request, response);
-		});
+
+		const shouldUseDirectTls = this.tlsEnabled && this.tlsMode === 'direct';
+		if (shouldUseDirectTls) {
+			if (!this.tlsCertPath || !this.tlsKeyPath) {
+				throw new Error('TLS direct mode requires both certificate and key paths');
+			}
+
+			let cert;
+			let key;
+			try {
+				[cert, key] = await Promise.all([
+					fsp.readFile(this.tlsCertPath),
+					fsp.readFile(this.tlsKeyPath),
+				]);
+			} catch (error) {
+				throw new Error(`failed to load TLS certificate files (${this.tlsCertPath}, ${this.tlsKeyPath}): ${error.message}`);
+			}
+
+			this.httpServer = https.createServer({ cert, key }, (request, response) => {
+				void this.handleHttpRequest(request, response);
+			});
+		} else {
+			this.httpServer = http.createServer((request, response) => {
+				void this.handleHttpRequest(request, response);
+			});
+		}
+
 		this.wss = new WebSocketServer({ noServer: true });
 		this.wss.on('connection', (ws, request) => this.handleSocketConnection(ws, request));
 		this.httpServer.on('upgrade', (request, socket, head) => {
@@ -182,7 +249,11 @@ class ReactorExchangeDaemon {
 
 		this.startHeartbeatSweep();
 		this.writeActiveConnectionsSnapshot().catch(() => {});
-		this.log(`Exchange daemon listening on http://${this.host}:${this.port}`);
+		const protocol = shouldUseDirectTls ? 'https' : 'http';
+		this.log(`Exchange daemon listening on ${protocol}://${this.host}:${this.port}`);
+		if (this.tlsEnabled) {
+			this.log(`TLS mode: ${this.tlsMode}${shouldUseDirectTls ? ` (cert: ${this.tlsCertPath})` : ' (terminated by proxy)'}`);
+		}
 		this.log('Discovery endpoint available at GET /nodes');
 	}
 
@@ -273,11 +344,19 @@ class ReactorExchangeDaemon {
 				return;
 			}
 
+			const directTls = this.tlsEnabled && this.tlsMode === 'direct';
 			const body = {
 				ok: true,
 				service: 'reactor-exchange',
 				startedAt: this.startedAt,
+				scheme: directTls ? 'https' : 'http',
 				connectedClients: this.clientsByName.size,
+				tls: {
+					enabled: this.tlsEnabled,
+					mode: this.tlsMode,
+					directTermination: directTls,
+					certPath: directTls ? this.tlsCertPath : null,
+				},
 				heartbeat: {
 					intervalMs: this.heartbeatIntervalMs,
 					timeoutMs: this.heartbeatTimeoutMs,
@@ -430,12 +509,20 @@ class ReactorExchangeDaemon {
 	}
 
 	getStatusSnapshot(nowMs = Date.now()) {
+		const directTls = this.tlsEnabled && this.tlsMode === 'direct';
 		return {
 			service: 'reactor-exchange',
 			startedAt: this.startedAt,
 			active: Boolean(this.httpServer),
+			scheme: directTls ? 'https' : 'http',
 			host: this.host,
 			port: this.port,
+			tls: {
+				enabled: this.tlsEnabled,
+				mode: this.tlsMode,
+				directTermination: directTls,
+				certPath: directTls ? this.tlsCertPath : null,
+			},
 			connectedClients: Array.from(this.clientsByName.keys()).sort((left, right) => left.localeCompare(right)),
 			connectedClientsDetails: this.getClientDetailsSnapshot(nowMs),
 			heartbeat: {
@@ -982,6 +1069,12 @@ async function createDaemonFromEnvironment() {
 		|| '',
 	).trim();
 	const dataDir = String(process.env.REACTOR_DATA_DIR || getDefaultDataDir()).trim() || getDefaultDataDir();
+	const tlsEnabled = parseBooleanFlag(process.env.REACTOR_EXCHANGE_TLS || process.env.TLS);
+	const tlsProxyEnabled = parseBooleanFlag(process.env.REACTOR_EXCHANGE_TLS_PROXY || process.env.TLS_PROXY);
+	const tlsMode = tlsProxyEnabled
+		? 'proxy'
+		: parseTlsMode(process.env.REACTOR_EXCHANGE_TLS_MODE || process.env.TLS_MODE || 'direct');
+	const tlsPaths = getTlsPaths(dataDir);
 	const heartbeatIntervalMs = parsePositiveInt(process.env.REACTOR_EXCHANGE_HEARTBEAT_INTERVAL_MS, 15000, 3000);
 	const heartbeatTimeoutMs = parsePositiveInt(process.env.REACTOR_EXCHANGE_HEARTBEAT_TIMEOUT_MS, 45000, heartbeatIntervalMs + 1000);
 
@@ -990,6 +1083,10 @@ async function createDaemonFromEnvironment() {
 		port,
 		token,
 		dataDir,
+		tlsEnabled,
+		tlsMode,
+		tlsCertPath: tlsPaths.certPath,
+		tlsKeyPath: tlsPaths.keyPath,
 		heartbeatIntervalMs,
 		heartbeatTimeoutMs,
 	});

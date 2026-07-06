@@ -27,6 +27,7 @@ cp .env.example .env
 Edit `.env` for your setup:
 - `PORT`
 - `TLS`
+- `TLS_MODE` (`direct` or `proxy`)
 - `TOKEN` (optional; can be generated later)
 
 ## Start services
@@ -62,8 +63,20 @@ If you need TURN/STUN for WebRTC relay, run coturn independently from its own fo
 
 ## Configure and verify
 
-Set node name:
+Check daemon status:
 
 ```bash
-docker compose exec reactor-exchange node daemonctl.js set-name reactor-exchange-1
+docker compose exec reactor-exchange node daemonctl.js status
+```
+
+Direct TLS mode (`TLS=true`, `TLS_MODE=direct`):
+
+```bash
+curl -sk https://127.0.0.1:${PORT:-7070}/health
+```
+
+Proxy mode or plain HTTP (`TLS_MODE=proxy` or `TLS=false`):
+
+```bash
+curl -s http://127.0.0.1:${PORT:-7070}/health
 ```

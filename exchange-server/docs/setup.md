@@ -15,31 +15,40 @@ Set at least:
 - `PORT` (default `7070`)
 - `TOKEN` (shared secret used by Reactor nodes)
 - `TLS` (`false` for plain HTTP/WS, `true` when clients must connect through HTTPS/WSS)
+- `TLS_MODE` (`direct` for native TLS in Exchange, `proxy` for TLS offload on reverse proxy)
 
 Example:
 
 ```env
 PORT=7070
 TLS=false
+TLS_MODE=direct
 TOKEN=your_shared_token_here
 ```
 
 ## TLS configuration
 
-`TLS` in `.env` is a client-facing mode flag for Reactor nodes.
+`TLS` enables secure client transport. `TLS_MODE` controls where TLS is terminated.
 
-- `TLS=false`: nodes connect to Exchange with `http://` and `ws://`
-- `TLS=true`: nodes connect to Exchange with `https://` and `wss://`
+- `TLS=false`: Exchange serves `http://` and `ws://`
+- `TLS=true` + `TLS_MODE=direct`: Exchange serves `https://` and `wss://` directly on `PORT`
+- `TLS=true` + `TLS_MODE=proxy`: Exchange serves internal `http://` and `ws://`; reverse proxy exposes HTTPS/WSS
 
-Recommended production setup:
+### Direct TLS mode (no proxy)
+
+1. Set `TLS=true`
+2. Set `TLS_MODE=direct`
+3. Ensure certificate files exist (`cert.pem`, `key.pem`)
+4. Start Exchange and connect clients with `https://` / `wss://`
+
+### Proxy TLS mode (optional)
 
 1. Keep Exchange container on internal plain HTTP (`reactor-exchange:7070`)
 2. Put a reverse proxy in front (Nginx/Caddy/Traefik) for TLS termination
 3. Configure certificates on the proxy
 4. Expose only proxy `443`
-5. Set `TLS=true` in `exchange-server/.env` and use the public host in Reactor node config
-
-Note: the current Exchange daemon process itself does not directly terminate TLS. HTTPS/WSS should be terminated by the reverse proxy.
+5. Set `TLS=true` and `TLS_MODE=proxy` in `exchange-server/.env`
+6. Use the public host in Reactor node config
 
 ## Generate TLS certificate
 
@@ -81,6 +90,7 @@ So you can also provide your own certificate files directly from host by placing
 Use cases:
 
 - local testing with self-signed certs
+- direct TLS bootstrap without external proxy
 - bootstrap certs for a reverse proxy in internal environments
 
 For public production endpoints, use CA-issued certificates (for example Let's Encrypt) on the reverse proxy.
@@ -102,6 +112,15 @@ docker compose exec reactor-exchange node daemonctl.js status
 ```
 
 ## 4) Quick API check
+
+If `TLS=true` and `TLS_MODE=direct`:
+
+```bash
+curl -sk https://127.0.0.1:7070/health
+curl -sk -H "Authorization: Bearer your_shared_token_here" https://127.0.0.1:7070/nodes
+```
+
+If `TLS=false` or `TLS_MODE=proxy`:
 
 ```bash
 curl -s http://127.0.0.1:7070/health
