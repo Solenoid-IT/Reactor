@@ -540,14 +540,6 @@ class ReactorExchangeDaemon {
 				tls: {
 					enabled: this.tlsEnabled,
 					mode: this.tlsMode,
-					requestedDirectTermination: this.isDirectTlsRequested(),
-					directTermination: directTls,
-					certPath: directTls ? this.tlsCertPath : null,
-					hotReloadIntervalMs: this.isDirectTlsRequested() ? this.tlsReloadIntervalMs : null,
-				},
-				heartbeat: {
-					intervalMs: this.heartbeatIntervalMs,
-					timeoutMs: this.heartbeatTimeoutMs,
 				},
 			};
 

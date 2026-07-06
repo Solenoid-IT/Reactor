@@ -347,7 +347,9 @@ function formatInfo(exchange) {
 	console.log(`Active: ${exchange.active ? 'yes' : 'no'}`);
 	if (exchange.tls) {
 		console.log(`TLS:    ${exchange.tls.enabled ? 'on' : 'off'} (${exchange.tls.mode || 'direct'})`);
-		console.log(`TLS End:${exchange.tls.directTermination ? 'daemon' : 'proxy/offload'}`);
+		if (typeof exchange.tls.directTermination === 'boolean') {
+			console.log(`TLS End:${exchange.tls.directTermination ? 'daemon' : 'proxy/offload'}`);
+		}
 		if (exchange.tls.certPath) {
 			console.log(`TLS Crt:${exchange.tls.certPath}`);
 		}
