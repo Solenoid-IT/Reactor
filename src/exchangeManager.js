@@ -497,16 +497,21 @@ class ExchangeManager {
 	}
 
 	async _getExpectedExchangeToken() {
+		const runtimeToken = String(this.runtime?.exchangeAuthToken || '').trim();
+		if (runtimeToken) {
+			return runtimeToken;
+		}
+
 		if (this.runtime && this.runtime.getExchangeToken) {
 			try {
 				const info = await this.runtime.getExchangeToken();
 				return String(info?.token || '').trim();
 			} catch {
-				return String(this.runtime.exchangeAuthToken || '').trim();
+				return runtimeToken;
 			}
 		}
 
-		return String(this.runtime.exchangeAuthToken || '').trim();
+		return runtimeToken;
 	}
 
 	_readBearerToken(request) {
@@ -1103,6 +1108,13 @@ class ExchangeManager {
 			if (packet && packet.type === 'message') this._handleIncomingMessage(packet);
 			if (packet && packet.type === 'signal') this._handleIncomingSignal(packet);
 			if (packet && packet.type === 'peer-list') this._handleIncomingPeerList(packet);
+			if (packet && packet.type === 'registered') {
+				this._clientRegistered = true;
+				this._clientLastError = '';
+				this._clientLastCloseReason = '';
+				this._clientLastCloseCode = 0;
+				this._emitConnectionStatus('exchange-registered');
+			}
 			if (packet && packet.type === 'stream-chunk-bin') {
 				this._clientPendingBinaryChunkMeta.push(packet);
 			}
@@ -1162,7 +1174,7 @@ class ExchangeManager {
 		const startedAt = Date.now();
 
 		while (Date.now() - startedAt <= safeTimeoutMs) {
-			if (this.wsClient && this.wsClient.readyState === WebSocket.OPEN) {
+			if (this.wsClient && this.wsClient.readyState === WebSocket.OPEN && this._clientRegistered) {
 				return {
 					connected: true,
 					skipped: false,
@@ -1180,7 +1192,7 @@ class ExchangeManager {
 		}
 
 		return {
-			connected: Boolean(this.wsClient && this.wsClient.readyState === WebSocket.OPEN),
+			connected: Boolean(this.wsClient && this.wsClient.readyState === WebSocket.OPEN && this._clientRegistered),
 			skipped: false,
 			reason,
 			elapsedMs: Date.now() - startedAt,
