@@ -78,15 +78,6 @@ docker compose exec reactor-exchange node daemonctl.js generate-tls-cert
 
 For Docker deployments in this repository, `generate-tls-cert` schedules an automatic container restart after certificate creation.
 This gives a predictable setup flow: build, generate certificate, automatic restart with TLS files available.
-If you prefer no restart, set `RESTART_AFTER_TLS_CERT=false` in `exchange-server/.env`.
-
-If restart is disabled, Exchange still supports TLS hot-reload in direct mode.
-
-Optional interval (milliseconds) for TLS file check in `.env`:
-
-```env
-TLS_RELOAD_INTERVAL_MS=5000
-```
 
 Optional parameters:
 

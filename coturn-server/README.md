@@ -10,7 +10,9 @@ Edit `turnserver.conf`:
 - `min-port` / `max-port`
 - optional `external-ip`
 
-Generate a self-signed certificate into `cert/` from inside the running container (recommended to avoid host/container permission mismatches):
+Create a local `.env` from `.env.example` and set `USER_UID` and `USER_GID` to match the owner of `cert/` on the host. The container runs with those IDs so TLS files can be created without permission issues.
+
+Generate a self-signed certificate into `cert/` from inside the running container:
 
 ```bash
 cd coturn-server
@@ -18,13 +20,15 @@ docker compose up -d
 docker compose exec coturn sh -lc "openssl req -x509 -newkey rsa:2048 -keyout /var/lib/coturn/certs/key.pem -out /var/lib/coturn/certs/cert.pem -days 3650 -nodes -subj '/CN=turn.local' && chmod 700 /var/lib/coturn/certs && chmod 644 /var/lib/coturn/certs/cert.pem && chmod 600 /var/lib/coturn/certs/key.pem"
 ```
 
-Apply/reload TLS files in coturn:
+When you run `node coturnctl.js generate-tls-cert` inside the container, the container restarts automatically so the new certificate is picked up.
+
+If you replace `cert.pem` or `key.pem` from the host, restart the container manually:
 
 ```bash
-docker compose up -d --force-recreate coturn
+docker compose restart coturn
 ```
 
-If you already generated certs from host and still get TLS permission errors, regenerate them using `docker compose exec` as shown above.
+If you still get TLS permission errors, regenerate the files from inside the container as shown above.
 
 ## Start
 
@@ -35,10 +39,10 @@ docker compose up -d
 
 ## Apply config changes
 
-After editing `turnserver.conf`:
+After editing `turnserver.conf`, restart the container:
 
 ```bash
-docker compose up -d --force-recreate coturn
+docker compose restart coturn
 ```
 
 ## Logs

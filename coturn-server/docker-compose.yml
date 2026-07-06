@@ -3,6 +3,7 @@ services:
     image: coturn/coturn:latest
     container_name: reactor-coturn
     restart: always
+    user: "${USER_UID:-1000}:${USER_GID:-1000}"
     command:
       - -n
       - -c

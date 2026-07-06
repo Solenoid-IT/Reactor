@@ -189,15 +189,12 @@ class ReactorExchangeDaemon {
 		this.dataDir = String(options.dataDir || getDefaultDataDir()).trim() || getDefaultDataDir();
 		this.connectionLogPath = path.join(this.dataDir, 'exchange-connections.log');
 		this.activeConnectionsPath = path.join(this.dataDir, 'exchange-active-connections.json');
-		this.tlsReloadIntervalMs = parsePositiveInt(options.tlsReloadIntervalMs, 5000, 1000);
 		this.httpServer = null;
 		this.wss = null;
 		this.startedAt = null;
 		this.stopping = false;
 		this.directTlsActive = false;
 		this.tlsContextHash = null;
-		this.tlsReloadTimer = null;
-		this.tlsReloadHadError = false;
 		this.tlsBootstrapWarned = false;
 		this.transportSwitchInProgress = false;
 		this.clientsByName = new Map();
@@ -278,113 +275,6 @@ class ReactorExchangeDaemon {
 		return new Promise((resolve) => server.close(() => resolve()));
 	}
 
-	async switchToDirectTlsRuntime(tlsMaterial) {
-		if (!this.httpServer || this.transportSwitchInProgress) {
-			return false;
-		}
-
-		this.transportSwitchInProgress = true;
-		const previousServer = this.httpServer;
-		try {
-			await this.closeServer(previousServer);
-
-			const tlsServer = this.createServerForMode(true, tlsMaterial);
-			this.attachServerHandlers(tlsServer);
-
-			try {
-				await this.listenOnServer(tlsServer);
-			} catch (error) {
-				await this.closeServer(tlsServer);
-				const fallbackServer = this.createServerForMode(false);
-				this.attachServerHandlers(fallbackServer);
-				await this.listenOnServer(fallbackServer);
-				this.httpServer = fallbackServer;
-				this.directTlsActive = false;
-				this.tlsContextHash = null;
-				throw error;
-			}
-
-			this.httpServer = tlsServer;
-			this.directTlsActive = true;
-			this.tlsContextHash = tlsMaterial.hash;
-			this.tlsReloadHadError = false;
-			this.tlsBootstrapWarned = false;
-			this.log(`TLS direct mode activated at runtime (cert: ${this.tlsCertPath})`);
-			return true;
-		} finally {
-			this.transportSwitchInProgress = false;
-		}
-	}
-
-	startTlsHotReloadLoop() {
-		if (!this.isDirectTlsRequested() || !this.httpServer) {
-			return;
-		}
-
-		if (this.tlsReloadTimer) {
-			clearInterval(this.tlsReloadTimer);
-		}
-
-		this.tlsReloadTimer = setInterval(() => {
-			void this.reloadTlsContextIfChanged();
-		}, this.tlsReloadIntervalMs);
-
-		if (this.tlsReloadTimer.unref) {
-			this.tlsReloadTimer.unref();
-		}
-	}
-
-	async reloadTlsContextIfChanged() {
-		if (!this.isDirectTlsRequested() || !this.httpServer) {
-			return false;
-		}
-
-		if (!this.isDirectTlsActive()) {
-			try {
-				const material = await this.loadTlsMaterial();
-				return this.switchToDirectTlsRuntime(material);
-			} catch (error) {
-				if (!this.tlsBootstrapWarned) {
-					this.tlsBootstrapWarned = true;
-					this.logError(`TLS direct mode pending certificate files (${this.tlsCertPath}, ${this.tlsKeyPath}): ${error.message}`);
-				}
-				return false;
-			}
-		}
-
-		if (typeof this.httpServer.setSecureContext !== 'function') {
-			return false;
-		}
-
-		try {
-			const { cert, key, hash } = await this.loadTlsMaterial();
-			this.tlsBootstrapWarned = false;
-			if (hash === this.tlsContextHash) {
-				if (this.tlsReloadHadError) {
-					this.tlsReloadHadError = false;
-					this.log('TLS certificate files are stable again; keeping current secure context');
-				}
-				return false;
-			}
-
-			this.httpServer.setSecureContext({ cert, key });
-			this.tlsContextHash = hash;
-			if (this.tlsReloadHadError) {
-				this.tlsReloadHadError = false;
-				this.log('TLS certificate hot reload recovered successfully');
-			} else {
-				this.log('TLS certificate hot reload applied');
-			}
-			return true;
-		} catch (error) {
-			if (!this.tlsReloadHadError) {
-				this.tlsReloadHadError = true;
-				this.logError(`TLS certificate hot reload failed, keeping previous certificate: ${error.message}`);
-			}
-			return false;
-		}
-	}
-
 	async start() {
 		if (this.httpServer) {
 			return;
@@ -422,7 +312,6 @@ class ReactorExchangeDaemon {
 		await this.listenOnServer(this.httpServer);
 
 		this.startHeartbeatSweep();
-		this.startTlsHotReloadLoop();
 		this.writeActiveConnectionsSnapshot().catch(() => {});
 		const protocol = this.isDirectTlsActive() ? 'https' : 'http';
 		this.log(`Exchange daemon listening on ${protocol}://${this.host}:${this.port}`);
@@ -430,7 +319,7 @@ class ReactorExchangeDaemon {
 			if (this.tlsMode === 'proxy') {
 				this.log('TLS mode: proxy (terminated by reverse proxy)');
 			} else if (this.isDirectTlsActive()) {
-				this.log(`TLS mode: direct (cert: ${this.tlsCertPath}, hot-reload every ${this.tlsReloadIntervalMs}ms)`);
+				this.log(`TLS mode: direct (cert: ${this.tlsCertPath})`);
 			} else {
 				this.log('TLS mode: direct requested but not active (running HTTP/WS fallback due to missing/invalid cert files)');
 			}
@@ -443,11 +332,6 @@ class ReactorExchangeDaemon {
 		if (this.serverHeartbeatTimer) {
 			clearInterval(this.serverHeartbeatTimer);
 			this.serverHeartbeatTimer = null;
-		}
-
-		if (this.tlsReloadTimer) {
-			clearInterval(this.tlsReloadTimer);
-			this.tlsReloadTimer = null;
 		}
 
 		for (const ws of this.clientsByName.values()) {
@@ -699,7 +583,6 @@ class ReactorExchangeDaemon {
 				requestedDirectTermination: this.isDirectTlsRequested(),
 				directTermination: directTls,
 				certPath: directTls ? this.tlsCertPath : null,
-				hotReloadIntervalMs: this.isDirectTlsRequested() ? this.tlsReloadIntervalMs : null,
 			},
 			connectedClients: Array.from(this.clientsByName.keys()).sort((left, right) => left.localeCompare(right)),
 			connectedClientsDetails: this.getClientDetailsSnapshot(nowMs),
@@ -1255,7 +1138,6 @@ async function createDaemonFromEnvironment() {
 	const tlsPaths = getTlsPaths(dataDir);
 	const heartbeatIntervalMs = parsePositiveInt(process.env.REACTOR_EXCHANGE_HEARTBEAT_INTERVAL_MS, 15000, 3000);
 	const heartbeatTimeoutMs = parsePositiveInt(process.env.REACTOR_EXCHANGE_HEARTBEAT_TIMEOUT_MS, 45000, heartbeatIntervalMs + 1000);
-	const tlsReloadIntervalMs = parsePositiveInt(process.env.TLS_RELOAD_INTERVAL_MS, 5000, 1000);
 
 	return new ReactorExchangeDaemon({
 		host,
@@ -1266,7 +1148,6 @@ async function createDaemonFromEnvironment() {
 		tlsMode,
 		tlsCertPath: tlsPaths.certPath,
 		tlsKeyPath: tlsPaths.keyPath,
-		tlsReloadIntervalMs,
 		heartbeatIntervalMs,
 		heartbeatTimeoutMs,
 	});

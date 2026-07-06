@@ -41,13 +41,9 @@ function isRunningInsideDocker() {
 	return fsSync.existsSync('/.dockerenv');
 }
 
-function shouldRestartContainerAfterTlsCert() {
-	const raw = String(process.env.RESTART_AFTER_TLS_CERT || 'true').trim().toLowerCase();
-	return ['1', 'true', 'yes', 'on'].includes(raw);
-}
 
 function scheduleContainerRestart() {
-	if (!isRunningInsideDocker() || !shouldRestartContainerAfterTlsCert()) {
+	if (!isRunningInsideDocker()) {
 		return false;
 	}
 
@@ -416,7 +412,7 @@ async function handleGenerateTlsCert(rest) {
 	const { bits, days } = extractTlsCertFlags(rest);
 	const reactorName = String(process.env.REACTOR_NAME || 'reactor').trim() || 'reactor';
 	const tls = await generateSelfSignedCert(reactorName, bits, days);
-	const restartScheduled = scheduleContainerRestart();
+	scheduleContainerRestart();
 	console.log('Self-signed TLS certificate generated');
 	console.log(`cert.pem: ${tls.certPath || '-'}`);
 	console.log(`key.pem:  ${tls.keyPath || '-'}`);
@@ -425,9 +421,6 @@ async function handleGenerateTlsCert(rest) {
 	if (tls.subject) console.log(`Subject: ${tls.subject}`);
 	if (tls.notAfter) console.log(`NotAfter:${tls.notAfter}`);
 	if (tls.fingerprint) console.log(`SHA256:  ${tls.fingerprint}`);
-	if (restartScheduled) {
-		console.log('Container restart scheduled to apply TLS certificate');
-	}
 }
 
 async function handleFixTlsPerms(rest) {

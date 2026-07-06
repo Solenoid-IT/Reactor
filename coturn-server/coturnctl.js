@@ -1,4 +1,6 @@
 const path = require('path');
+const { execFileSync } = require('child_process');
+const fsSync = require('fs');
 const { TlsManager } = require('./src/tlsManager');
 
 function usage() {
@@ -6,6 +8,24 @@ function usage() {
 	console.log('  node coturnctl.js generate-tls-cert [--cn <name>] [--bits <1024-8192>] [--days <1-36500>]');
 	console.log('  node coturnctl.js fix-tls-perms');
 	process.exit(1);
+}
+
+function isRunningInsideDocker() {
+	return fsSync.existsSync('/.dockerenv');
+}
+
+function scheduleContainerRestart() {
+	if (!isRunningInsideDocker()) {
+		return false;
+	}
+
+	execFileSync(
+		'sh',
+		['-lc', '(sleep 1; kill -TERM 1) >/dev/null 2>&1 &'],
+		{ stdio: 'ignore' },
+	);
+
+	return true;
 }
 
 function extractGenerateCertArgs(args) {
@@ -68,6 +88,7 @@ async function main() {
 		console.log(`key.pem:  ${path.join(certDir, 'key.pem')}`);
 		console.log(`subject:  ${result.subject || '-'}`);
 		console.log(`notAfter: ${result.notAfter || '-'}`);
+		scheduleContainerRestart();
 		return;
 	}
 
