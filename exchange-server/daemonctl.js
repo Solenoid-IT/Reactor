@@ -24,6 +24,10 @@ function getDataDir() {
 	return process.env.REACTOR_DATA_DIR || getDefaultDataDir();
 }
 
+function getLocalCertDir() {
+	return path.join(__dirname, 'cert');
+}
+
 function usage() {
 	console.log('Usage:');
 	console.log('  node daemonctl.js status');
@@ -150,7 +154,17 @@ function buildHealthUrl(env) {
 }
 
 function getTlsDir() {
-	return path.join(getDataDir(), 'tls');
+	const explicitTlsDir = String(process.env.REACTOR_TLS_DIR || '').trim();
+	if (explicitTlsDir) {
+		return explicitTlsDir;
+	}
+
+	if (String(process.env.REACTOR_DATA_DIR || '').trim()) {
+		return path.join(getDataDir(), 'tls');
+	}
+
+	// Local CLI usage (outside Docker) keeps certs in exchange-server/cert.
+	return getLocalCertDir();
 }
 
 function getCertPaths() {

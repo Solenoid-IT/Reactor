@@ -48,26 +48,35 @@ You can generate a self-signed TLS certificate with `daemonctl.js`.
 From `exchange-server/`:
 
 ```bash
-docker compose exec reactor-exchange node daemonctl.js generate-tls-cert
+node daemonctl.js generate-tls-cert
 ```
+
+This command is intended to be run before starting Docker.
 
 Optional parameters:
 
 ```bash
-docker compose exec reactor-exchange node daemonctl.js generate-tls-cert --bits 4096 --days 3650
+node daemonctl.js generate-tls-cert --bits 4096 --days 3650
 ```
 
-Generated files are written inside the container at:
+Alternative (if the container is already running):
 
-- `/data/tls/cert.pem`
-- `/data/tls/key.pem`
+```bash
+docker compose exec reactor-exchange node daemonctl.js generate-tls-cert
+```
 
-With Docker Compose in this repository, `/data/tls` is bind-mounted to:
+Generated files are written on host at:
 
 - `exchange-server/cert/cert.pem`
 - `exchange-server/cert/key.pem`
 
-So you can also provide your own certificate files directly from host by placing them in `exchange-server/cert/` before starting the container.
+Inside container, the same files are available at:
+
+- `/data/tls/cert.pem`
+- `/data/tls/key.pem`
+
+With Docker Compose in this repository, `/data/tls` is bind-mounted from `exchange-server/cert/`.
+So you can also provide your own certificate files directly from host by placing them there before starting the container.
 
 Use cases:
 
