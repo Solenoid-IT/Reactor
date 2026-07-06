@@ -1,6 +1,7 @@
 /activity.log
 /node_modules
 /dist
+/temp_files
 
 /ui/node_modules
 /ui/build
