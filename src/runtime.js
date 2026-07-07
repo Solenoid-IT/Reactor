@@ -10,6 +10,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const tls = require('tls');
+const AdmZip = require('adm-zip');
 const { readConnectionsConfig, writeConnectionsConfig } = require('./connectionsConfig');
 const { parseScheduleExpression } = require('./scheduleParser');
 const { parseEndpointMetadata } = require('./metadata');
@@ -1516,6 +1517,7 @@ class ReactorRuntime {
 		this.streamListenerMap = new Map();
 		this.streamEndListenerMap = new Map();
 		this.activeIncomingStreams = new Map();
+		this.pendingIncomingStreamEnds = new Map();
 		this.uiStatusSink = null;
 		this.reactorRootDir = options.reactorRootDir || path.dirname(this.endpointsDir);
 		this.streamStorageDir = path.join(this.reactorRootDir, 'temp_files', 'streams');
@@ -1562,6 +1564,12 @@ class ReactorRuntime {
 		this.p2pAutodialAttempts = new Map();
 		this.p2pAutodialCooldownMs = this.readQueueDuration('REACTOR_P2P_AUTODIAL_COOLDOWN_MS', 30 * 1000, 5 * 1000);
 		this.p2pRemoteEndpointRequests = new Map();
+		this.pendingEndpointTransfers = new Map();
+		this.pendingIncomingTransfers = new Map();
+		this.pendingOverwriteApprovals = new Set();
+		this.onTransferRequest = null;
+		this.onTransferComplete = null;
+		this.onTransferOutcome = null;
 		this.connectionsConfigPath = path.join(this.reactorRootDir, 'connections.json');
 		this.tlsManager = new TlsManager(path.join(this.reactorRootDir, 'tls'));
 		this.tlsEnabled = false; // impostato da startHttpServer
@@ -2736,6 +2744,554 @@ class ReactorRuntime {
 		};
 	}
 
+	async sendSystemMessage(targetNode, data) {
+		const safeTarget = String(targetNode || '').trim().toLowerCase();
+		if (!safeTarget) {
+			throw new Error('invalid target node');
+		}
+		const payload = JSON.stringify({ ...data, __reactorSystem: true });
+		if (this.hasConnectedP2PRoute(safeTarget)) {
+			try {
+				await this.sendP2PMessage(safeTarget, JSON.parse(payload), { 'content-type': 'application/json; charset=utf-8' });
+				return;
+			} catch {
+				// fall through to exchange
+			}
+		}
+		if (this.exchangeMode === 'node' && this.exchangeManager) {
+			await this.exchangeManager.sendViaExchange(safeTarget, payload, { enqueueOnFail: false });
+			return;
+		}
+		throw new Error('no available transport to send system message');
+	}
+
+	async initiateEndpointTransfer(targetNode, endpointPath, keepCopy = true, timeoutMs = 30000) {
+		const safeTarget = String(targetNode || '').trim().toLowerCase();
+		if (!safeTarget) {
+			throw new Error('invalid target node');
+		}
+		this.log(`[TRANSFER] init requested target=${safeTarget} endpointPath=${String(endpointPath || '')} keepCopy=${Boolean(keepCopy)} timeoutMs=${Number(timeoutMs)}`);
+		const transferPackage = await this.prepareEndpointTransferPackage(endpointPath);
+		const endpointName = transferPackage.endpointName;
+		this.log(`[TRANSFER] package ready endpoint=${endpointName} archive=${transferPackage.archivePath} size=${Number(transferPackage.archiveSize || 0)}B sourceProject=${transferPackage.sourceProjectRoot}`);
+
+		const requestId = crypto.randomUUID();
+		this.log(`[TRANSFER] request sending requestId=${requestId} endpoint=${endpointName} to=${safeTarget}`);
+
+		return new Promise((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				this.log(`[TRANSFER] request timeout requestId=${requestId} endpoint=${endpointName} to=${safeTarget}`);
+				this.cleanupEndpointTransferPackage(transferPackage).catch(() => {});
+				this.pendingEndpointTransfers.delete(requestId);
+				reject(new Error('transfer request timed out'));
+			}, timeoutMs);
+
+			this.pendingEndpointTransfers.set(requestId, {
+				resolve, reject, timeout, targetNode: safeTarget,
+				endpointName,
+				archivePath: transferPackage.archivePath,
+				archiveSize: transferPackage.archiveSize,
+				keepCopy,
+				endpointPath: transferPackage.sourcePath,
+				sourceProjectRoot: transferPackage.sourceProjectRoot,
+				sourceIsProject: transferPackage.sourceIsProject,
+				cleanupPaths: transferPackage.cleanupPaths,
+			});
+
+			this.sendSystemMessage(safeTarget, {
+				action: 'endpoint-transfer-request',
+				requestId,
+				endpointName,
+				contentSize: transferPackage.archiveSize,
+			}).catch((error) => {
+				this.log(`[TRANSFER] request send failed requestId=${requestId} endpoint=${endpointName} to=${safeTarget} error=${String(error?.message || error)}`);
+				clearTimeout(timeout);
+				this.cleanupEndpointTransferPackage(transferPackage).catch(() => {});
+				this.pendingEndpointTransfers.delete(requestId);
+				reject(error);
+			});
+		});
+	}
+
+	async respondToEndpointTransfer(requestId, approved) {
+		const pending = this.pendingIncomingTransfers.get(requestId);
+		if (!pending) {
+			this.log(`[TRANSFER] response ignored requestId=${String(requestId || '')} reason=request-not-found`);
+			return { ok: false, error: 'transfer request not found or expired' };
+		}
+		this.pendingIncomingTransfers.delete(requestId);
+		this.log(`[TRANSFER] response outbound requestId=${String(requestId || '')} from=${pending.fromNode} endpoint=${pending.endpointName} approved=${Boolean(approved)} nameConflict=${Boolean(pending.nameConflict)}`);
+		if (approved && pending.nameConflict) {
+			this.pendingOverwriteApprovals.add(requestId);
+			setTimeout(() => this.pendingOverwriteApprovals.delete(requestId), 5 * 60 * 1000);
+		}
+		await this.sendSystemMessage(pending.fromNode, {
+			action: 'endpoint-transfer-response',
+			requestId,
+			approved: Boolean(approved),
+			reason: approved ? '' : 'rejected by user',
+		});
+		return { ok: true };
+	}
+
+	async readStoredEndpointPosition(projectRoot) {
+		try {
+			const raw = await fs.readFile(path.join(projectRoot, 'position'), 'utf8');
+			const parsed = Number.parseInt(String(raw || '').trim(), 10);
+			if (Number.isInteger(parsed) && parsed >= 0) {
+				return parsed;
+			}
+		} catch {
+			// Fall back to appending the transferred endpoint at the end.
+		}
+
+		return null;
+	}
+
+	resolveTransferredEndpointPosition(projectRoot, preferredPosition = null) {
+		if (Number.isInteger(preferredPosition) && preferredPosition >= 0) {
+			return preferredPosition;
+		}
+
+		const normalizedProjectRoot = path.resolve(projectRoot);
+		let maxPosition = -1;
+		for (const endpoint of this.endpoints) {
+			if (!endpoint || !endpoint.projectDir) {
+				continue;
+			}
+
+			if (path.resolve(endpoint.projectDir) === normalizedProjectRoot) {
+				continue;
+			}
+
+			if (Number.isInteger(endpoint.position) && endpoint.position >= 0) {
+				maxPosition = Math.max(maxPosition, endpoint.position);
+			}
+		}
+
+		return maxPosition + 1;
+	}
+
+	async finalizeTransferredEndpointProject(safeStem, tempProjectRoot, overwrite = false, preferredPosition = null) {
+		const projectRoot = path.join(this.endpointsDir, safeStem);
+		const nextPosition = this.resolveTransferredEndpointPosition(projectRoot, preferredPosition);
+		const projectUuid = crypto.randomUUID().toLowerCase();
+		const backupProjectRoot = overwrite
+			? path.join(this.endpointsDir, `.transfer-backup-${safeStem}-${crypto.randomUUID()}`)
+			: null;
+		let backupCreated = false;
+
+		await fs.writeFile(path.join(tempProjectRoot, 'uuid'), `${projectUuid}\n`, 'utf8');
+		await fs.writeFile(path.join(tempProjectRoot, 'position'), `${nextPosition}\n`, 'utf8');
+		await fs.writeFile(path.join(tempProjectRoot, 'activity.log'), '', 'utf8');
+
+		if (overwrite) {
+			try {
+				await fs.access(projectRoot);
+				await fs.rename(projectRoot, backupProjectRoot);
+				backupCreated = true;
+			} catch (accessError) {
+				if (accessError.code !== 'ENOENT') {
+					throw accessError;
+				}
+			}
+		}
+
+		try {
+			await fs.rename(tempProjectRoot, projectRoot);
+			if (backupCreated) {
+				await fs.rm(backupProjectRoot, { recursive: true, force: true });
+			}
+			return projectRoot;
+		} catch (error) {
+			if (backupCreated) {
+				try {
+					await fs.rename(backupProjectRoot, projectRoot);
+				} catch {
+					// Keep the backup in place if rollback fails.
+				}
+			}
+			throw error;
+		}
+	}
+
+	async addPathToEndpointTransferArchive(zip, sourcePath, archiveName = '') {
+		const entries = await fs.readdir(sourcePath, { withFileTypes: true });
+		for (const entry of entries) {
+			if (entry.name === 'activity.log') {
+				continue;
+			}
+
+			const absolutePath = path.join(sourcePath, entry.name);
+			const nextArchiveName = archiveName
+				? `${archiveName.replace(/\\/g, '/')}/${entry.name}`
+				: entry.name;
+
+			if (entry.isDirectory()) {
+				await this.addPathToEndpointTransferArchive(zip, absolutePath, nextArchiveName);
+				continue;
+			}
+
+			if (!entry.isFile()) {
+				continue;
+			}
+
+			zip.addFile(nextArchiveName.replace(/\\/g, '/'), await fs.readFile(absolutePath));
+		}
+	}
+
+	async buildEndpointTransferArchive(projectRoot) {
+		const zip = new AdmZip();
+		await this.addPathToEndpointTransferArchive(zip, projectRoot);
+		return zip.toBuffer();
+	}
+
+	async createTemporaryEndpointProjectFromFile(endpointPath, endpointName) {
+		const safeStem = String(endpointName || '').trim().replace(/[^a-zA-Z0-9._-]/g, '-');
+		const tempProjectRoot = path.join(this.reactorRootDir, 'temp_files', 'endpoint-transfers', `source-${safeStem}-${crypto.randomUUID()}`);
+		const npmSafeName = safeStem.toLowerCase().replace(/[^a-z0-9._-]/g, '-').replace(/^[._-]+/, '') || 'reactor-endpoint';
+		const packageJson = { name: npmSafeName, version: '1.0.0', private: true, type: 'commonjs', main: 'boot.ts' };
+		const contextContent = "export type { Event, ReactorEvent, WatchEvent, MessageEvent, StreamEvent, StreamEndEvent, ScheduleEvent, RuntimeEvent, ManualEvent } from 'core';\n";
+		await fs.mkdir(tempProjectRoot, { recursive: true });
+		await fs.writeFile(path.join(tempProjectRoot, 'boot.ts'), await fs.readFile(endpointPath, 'utf8'), 'utf8');
+		await fs.writeFile(path.join(tempProjectRoot, 'package.json'), `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8');
+		await fs.writeFile(path.join(tempProjectRoot, 'event.ts'), contextContent, 'utf8');
+		return tempProjectRoot;
+	}
+
+	async prepareEndpointTransferPackage(endpointPath) {
+		const sourcePath = path.resolve(endpointPath);
+		const isProjectBoot = path.basename(sourcePath) === 'boot.ts' &&
+			path.resolve(path.dirname(sourcePath)) !== path.resolve(this.endpointsDir);
+		const endpointName = isProjectBoot
+			? path.basename(path.dirname(sourcePath))
+			: path.basename(sourcePath).replace(/\.(ts|js)$/i, '');
+		const cleanupPaths = [];
+		const sourceProjectRoot = isProjectBoot
+			? path.dirname(sourcePath)
+			: await this.createTemporaryEndpointProjectFromFile(sourcePath, endpointName);
+
+		if (!isProjectBoot) {
+			cleanupPaths.push(sourceProjectRoot);
+		}
+
+		const archiveDir = path.join(this.reactorRootDir, 'temp_files', 'endpoint-transfers');
+		await fs.mkdir(archiveDir, { recursive: true });
+		const archivePath = path.join(archiveDir, `${String(endpointName || 'endpoint').replace(/[^a-zA-Z0-9._-]/g, '-')}-${crypto.randomUUID()}.zip`);
+		await fs.writeFile(archivePath, await this.buildEndpointTransferArchive(sourceProjectRoot));
+		const archiveStats = await fs.stat(archivePath);
+		this.log(`[TRANSFER] archive built endpoint=${endpointName} sourcePath=${sourcePath} projectMode=${Boolean(isProjectBoot)} archive=${archivePath} size=${Number(archiveStats.size || 0)}B`);
+
+		return {
+			endpointName,
+			archivePath,
+			archiveSize: Number(archiveStats.size || 0),
+			sourcePath,
+			sourceProjectRoot,
+			sourceIsProject: isProjectBoot,
+			cleanupPaths,
+		};
+	}
+
+	async cleanupEndpointTransferPackage(transferPackage) {
+		const archivePath = String(transferPackage?.archivePath || '').trim();
+		if (archivePath) {
+			await fs.rm(archivePath, { force: true }).catch(() => {});
+		}
+		for (const cleanupPath of Array.isArray(transferPackage?.cleanupPaths) ? transferPackage.cleanupPaths : []) {
+			const safePath = String(cleanupPath || '').trim();
+			if (!safePath) {
+				continue;
+			}
+			await fs.rm(safePath, { recursive: true, force: true }).catch(() => {});
+		}
+	}
+
+	resolveSystemEndpointTransferMetadata(streamPacket, senderMeta, streamEndData = null) {
+		const isEndpointTransferMetadata = (metadata) => metadata
+			&& typeof metadata === 'object'
+			&& metadata.__reactorSystem === true
+			&& String(metadata.action || '').trim() === 'endpoint-transfer-stream';
+
+		const endMetadata = streamEndData && streamEndData.metadata && typeof streamEndData.metadata === 'object'
+			? streamEndData.metadata
+			: null;
+		if (isEndpointTransferMetadata(endMetadata)) {
+			return endMetadata;
+		}
+
+		const packetMetadata = streamPacket && typeof streamPacket.getMetadata === 'function' ? streamPacket.getMetadata() : null;
+		if (isEndpointTransferMetadata(packetMetadata)) {
+			return packetMetadata;
+		}
+
+		const streamId = streamPacket && typeof streamPacket.getId === 'function' ? streamPacket.getId() : '';
+		if (!streamId) {
+			return null;
+		}
+
+		const key = this.makeActiveStreamKey(senderMeta, streamId);
+		const state = this.activeIncomingStreams.get(key);
+		const stateMetadata = state && state.metadata && typeof state.metadata === 'object' ? state.metadata : null;
+		return isEndpointTransferMetadata(stateMetadata) ? stateMetadata : null;
+	}
+
+	async saveTransferredEndpointArchive(endpointName, archivePath, overwrite = false) {
+		const safeStem = String(endpointName || '').trim().replace(/[^a-zA-Z0-9._-]/g, '-');
+		if (!safeStem) {
+			throw new Error('invalid endpoint name');
+		}
+		this.log(`[TRANSFER] save archive start endpoint=${safeStem} archive=${String(archivePath || '')} overwrite=${Boolean(overwrite)}`);
+
+		const projectRoot = path.join(this.endpointsDir, safeStem);
+		const preservedPosition = overwrite ? await this.readStoredEndpointPosition(projectRoot) : null;
+		if (!overwrite) {
+			try {
+				await fs.access(projectRoot);
+				throw new Error(`endpoint '${safeStem}' already exists`);
+			} catch (accessError) {
+				if (accessError.message && accessError.message.includes('already exists')) {
+					throw accessError;
+				}
+				if (accessError.code !== 'ENOENT') {
+					throw accessError;
+				}
+			}
+		}
+
+		const tempProjectRoot = path.join(this.endpointsDir, `.transfer-${safeStem}-${crypto.randomUUID()}`);
+		await fs.mkdir(tempProjectRoot, { recursive: true });
+
+		try {
+			const zip = new AdmZip(archivePath);
+			const entries = zip.getEntries();
+			let hasBootFile = false;
+			let restoredEntries = 0;
+
+			for (const entry of entries) {
+				const normalizedRelativePath = String(entry.entryName || '').replace(/\\/g, '/').replace(/^\/+/, '');
+				if (!normalizedRelativePath) {
+					continue;
+				}
+
+				const pathParts = normalizedRelativePath.split('/').filter(Boolean);
+				if (pathParts.length === 0 || pathParts[pathParts.length - 1] === 'activity.log') {
+					continue;
+				}
+
+				const targetPath = path.resolve(tempProjectRoot, normalizedRelativePath);
+				if (targetPath !== tempProjectRoot && !targetPath.startsWith(tempProjectRoot + path.sep)) {
+					throw new Error(`invalid transferred file path: ${normalizedRelativePath}`);
+				}
+
+				if (entry.isDirectory) {
+					await fs.mkdir(targetPath, { recursive: true });
+					continue;
+				}
+
+				if (normalizedRelativePath === 'boot.ts') {
+					hasBootFile = true;
+				}
+
+				await fs.mkdir(path.dirname(targetPath), { recursive: true });
+				await fs.writeFile(targetPath, entry.getData());
+				restoredEntries += 1;
+			}
+
+			if (!hasBootFile) {
+				throw new Error('invalid transferred endpoint project');
+			}
+			this.log(`[TRANSFER] archive extracted endpoint=${safeStem} files=${restoredEntries} hasBoot=${Boolean(hasBootFile)} preservedPosition=${preservedPosition === null ? 'auto' : preservedPosition}`);
+
+			return await this.finalizeTransferredEndpointProject(safeStem, tempProjectRoot, overwrite, preservedPosition);
+		} catch (error) {
+			this.log(`[TRANSFER] archive save failed endpoint=${safeStem} archive=${String(archivePath || '')} error=${String(error?.message || error)}`);
+			await fs.rm(tempProjectRoot, { recursive: true, force: true }).catch(() => {});
+			throw error;
+		}
+	}
+
+	async handleIncomingEndpointTransferStream(streamEndData) {
+		const metadata = streamEndData && streamEndData.metadata && typeof streamEndData.metadata === 'object'
+			? streamEndData.metadata
+			: {};
+		const requestId = String(metadata.requestId || '').trim();
+		const endpointName = String(metadata.endpointName || '').trim();
+		if (requestId && this.pendingEndpointTransfers.has(requestId)) {
+			this.log(`[TRANSFER] stream ignored local-echo requestId=${requestId} endpoint=${endpointName || '-'} path=${String(streamEndData?.path || '')}`);
+			if (streamEndData?.path) {
+				await fs.rm(streamEndData.path, { force: true }).catch(() => {});
+			}
+			return;
+		}
+		const overwrite = requestId ? this.pendingOverwriteApprovals.has(requestId) : false;
+		this.log(`[TRANSFER] stream received requestId=${requestId || '-'} endpoint=${endpointName || '-'} path=${String(streamEndData?.path || '')} valid=${Boolean(streamEndData?.valid)} overwrite=${Boolean(overwrite)}`);
+		if (requestId) {
+			this.pendingOverwriteApprovals.delete(requestId);
+		}
+
+		try {
+			if (!streamEndData || !streamEndData.valid) {
+				throw new Error(String(streamEndData?.error || 'stream validation failed'));
+			}
+			if (!endpointName) {
+				throw new Error('invalid endpoint name');
+			}
+
+			await this.saveTransferredEndpointArchive(endpointName, streamEndData.path, overwrite);
+			await this.reloadEndpoints('transfer-receive-stream');
+			this.log(`[TRANSFER] stream applied requestId=${requestId || '-'} endpoint=${endpointName} status=ok`);
+			if (typeof this.onTransferComplete === 'function' && requestId) {
+				this.onTransferComplete(requestId, { ok: true, endpointName });
+			}
+		} catch (error) {
+			this.log(`[TRANSFER] stream apply failed requestId=${requestId || '-'} endpoint=${endpointName || '-'} error=${String(error?.message || error)}`);
+			if (typeof this.onTransferComplete === 'function' && requestId) {
+				this.onTransferComplete(requestId, { ok: false, endpointName, error: String(error?.message || 'save failed') });
+			}
+		} finally {
+			if (streamEndData?.path) {
+				this.log(`[TRANSFER] cleanup temp stream file path=${String(streamEndData.path)}`);
+				await fs.rm(streamEndData.path, { force: true }).catch(() => {});
+			}
+		}
+	}
+
+	async saveTransferredEndpoint(endpointName, content, overwrite = false) {
+		const safeStem = String(endpointName || '').trim().replace(/[^a-zA-Z0-9._-]/g, '-');
+		if (!safeStem) {
+			throw new Error('invalid endpoint name');
+		}
+		const projectRoot = path.join(this.endpointsDir, safeStem);
+		const preservedPosition = overwrite ? await this.readStoredEndpointPosition(projectRoot) : null;
+		if (overwrite) {
+		} else {
+			try {
+				await fs.access(projectRoot);
+				throw new Error(`endpoint '${safeStem}' already exists`);
+			} catch (accessError) {
+				if (accessError.message && accessError.message.includes('already exists')) {
+					throw accessError;
+				}
+				if (accessError.code !== 'ENOENT') {
+					throw accessError;
+				}
+			}
+		}
+		const npmSafeName = safeStem.toLowerCase().replace(/[^a-z0-9._-]/g, '-').replace(/^[._-]+/, '') || 'reactor-endpoint';
+		const packageJson = { name: npmSafeName, version: '1.0.0', private: true, type: 'commonjs', main: 'boot.ts' };
+		const contextContent = "export type { Event, ReactorEvent, WatchEvent, MessageEvent, StreamEvent, StreamEndEvent, ScheduleEvent, RuntimeEvent, ManualEvent } from 'core';\n";
+		const tempProjectRoot = path.join(this.endpointsDir, `.transfer-${safeStem}-${crypto.randomUUID()}`);
+		await fs.mkdir(tempProjectRoot, { recursive: true });
+
+		try {
+			await fs.writeFile(path.join(tempProjectRoot, 'boot.ts'), content, 'utf8');
+			await fs.writeFile(path.join(tempProjectRoot, 'package.json'), `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8');
+			await fs.writeFile(path.join(tempProjectRoot, 'event.ts'), contextContent, 'utf8');
+			return await this.finalizeTransferredEndpointProject(safeStem, tempProjectRoot, overwrite, preservedPosition);
+		} catch (error) {
+			await fs.rm(tempProjectRoot, { recursive: true, force: true }).catch(() => {});
+			throw error;
+		}
+	}
+
+	async handleIncomingSystemMessage(data, fromNode) {
+		const action = String(data && data.action || '').trim();
+		const requestId = String(data && data.requestId || '').trim();
+		if (!action || !requestId) {
+			return;
+		}
+		const safeFromNode = String(fromNode || '').trim().toLowerCase();
+		this.log(`[TRANSFER] system message action=${action} requestId=${requestId} from=${safeFromNode || '-'}`);
+
+		if (action === 'endpoint-transfer-request') {
+			const endpointName = String(data.endpointName || '').trim();
+			if (!endpointName) {
+				this.log(`[TRANSFER] request ignored requestId=${requestId} reason=missing-endpoint-name`);
+				return;
+			}
+			const nameConflict = this.endpoints.some((ep) => {
+				const stem = path.basename(ep.path).replace(/\.(ts|js)$/i, '');
+				const dirStem = path.basename(path.dirname(ep.path));
+				return stem === endpointName || dirStem === endpointName;
+			});
+			this.pendingIncomingTransfers.set(requestId, {
+				fromNode: safeFromNode,
+				endpointName,
+				nameConflict,
+				requestedAt: Date.now(),
+			});
+			this.log(`[TRANSFER] request received requestId=${requestId} from=${safeFromNode} endpoint=${endpointName} conflict=${Boolean(nameConflict)} contentSize=${Number(data.contentSize || 0)}B`);
+			setTimeout(() => this.pendingIncomingTransfers.delete(requestId), 5 * 60 * 1000);
+			if (typeof this.onTransferRequest === 'function') {
+				this.onTransferRequest(requestId, safeFromNode, endpointName, Number(data.contentSize || 0), nameConflict);
+			}
+			return;
+		}
+
+		if (action === 'endpoint-transfer-response') {
+			const pending = this.pendingEndpointTransfers.get(requestId);
+			if (!pending) {
+				this.log(`[TRANSFER] response ignored requestId=${requestId} reason=pending-not-found`);
+				return;
+			}
+			const approved = Boolean(data.approved);
+			const reason = String(data.reason || '');
+			this.log(`[TRANSFER] response received requestId=${requestId} endpoint=${pending.endpointName} from=${safeFromNode || '-'} approved=${approved} reason=${reason || '-'} `);
+			if (typeof this.onTransferOutcome === 'function') {
+				this.onTransferOutcome(requestId, { approved, reason });
+			}
+			if (!approved) {
+				clearTimeout(pending.timeout);
+				this.pendingEndpointTransfers.delete(requestId);
+				const err = new Error(reason || 'transfer rejected by remote node');
+				err.rejected = true;
+				pending.reject(err);
+				return;
+			}
+			try {
+				this.log(`[TRANSFER] stream send start requestId=${requestId} streamTo=${pending.targetNode} endpoint=${pending.endpointName} archive=${pending.archivePath} size=${Number(pending.archiveSize || 0)}B`);
+				// Endpoint transfer is a system stream addressed to a node, not to an endpoint selector.
+				await this.streamToExchange(pending.targetNode, fsNative.createReadStream(pending.archivePath), {
+					contentType: 'application/zip',
+					totalBytes: pending.archiveSize,
+					metadata: {
+						__reactorSystem: true,
+						action: 'endpoint-transfer-stream',
+						requestId,
+						endpointName: pending.endpointName,
+					},
+				});
+				clearTimeout(pending.timeout);
+				this.pendingEndpointTransfers.delete(requestId);
+				await this.cleanupEndpointTransferPackage(pending);
+				this.log(`[TRANSFER] stream send done requestId=${requestId} endpoint=${pending.endpointName} to=${pending.targetNode} keepCopy=${Boolean(pending.keepCopy)}`);
+				if (!pending.keepCopy) {
+					try {
+						if (pending.sourceIsProject) {
+							await fs.rm(pending.sourceProjectRoot, { recursive: true, force: true });
+						} else {
+							await fs.unlink(pending.endpointPath);
+						}
+						await this.reloadEndpoints('transfer-remove-source');
+						this.log(`[TRANSFER] source removed requestId=${requestId} endpoint=${pending.endpointName} sourcePath=${pending.sourceIsProject ? pending.sourceProjectRoot : pending.endpointPath}`);
+					} catch {
+						this.log(`[TRANSFER] source removal warning requestId=${requestId} endpoint=${pending.endpointName}`);
+						// ignore local cleanup errors
+					}
+				}
+				pending.resolve({ ok: true, targetNode: pending.targetNode, endpointName: pending.endpointName });
+			} catch (error) {
+				this.log(`[TRANSFER] stream send failed requestId=${requestId} endpoint=${pending.endpointName} to=${pending.targetNode} error=${String(error?.message || error)}`);
+				clearTimeout(pending.timeout);
+				this.pendingEndpointTransfers.delete(requestId);
+				await this.cleanupEndpointTransferPackage(pending).catch(() => {});
+				pending.reject(error);
+			}
+			return;
+		}
+	}
+
 	resetAllP2PSessions() {
 		if (this.p2pTransportManager && typeof this.p2pTransportManager.closeAllSessions === 'function') {
 			this.p2pTransportManager.closeAllSessions();
@@ -3537,8 +4093,18 @@ class ReactorRuntime {
 				}
 
 				this.activeIncomingStreams.delete(key);
+				this.pendingIncomingStreamEnds.delete(key);
 				fs.unlink(state.partPath).catch(() => {});
 				this.log(`[STREAM] dropped stale stream key=${key}`);
+			}
+
+			for (const [key, pendingEnd] of this.pendingIncomingStreamEnds.entries()) {
+				if (!pendingEnd || Number(pendingEnd.receivedAt || 0) + this.streamIdleTimeoutMs > now) {
+					continue;
+				}
+
+				this.pendingIncomingStreamEnds.delete(key);
+				this.log(`[STREAM] dropped stale pending end key=${key}`);
 			}
 		}, this.streamCleanupIntervalMs);
 	}
@@ -3574,9 +4140,71 @@ class ReactorRuntime {
 
 		const key = this.makeActiveStreamKey(senderMeta, streamId);
 		const now = Date.now();
+		const finalizeIncomingState = async (state, endPayload = {}) => {
+			this.activeIncomingStreams.delete(key);
+			this.pendingIncomingStreamEnds.delete(key);
 
-		if (packet.isStart()) {
-			if (!this.activeIncomingStreams.has(key) && this.activeIncomingStreams.size >= this.streamMaxActive) {
+			const digestSha256 = state.digest.digest('hex');
+			const expectedDigest = String(endPayload?.digestSha256 || '').trim().toLowerCase();
+			const expectedBytes = Number(endPayload?.totalBytes);
+			const expectedChunks = Number(endPayload?.chunks);
+			const hasExpectedBytes = Number.isFinite(expectedBytes) && expectedBytes >= 0;
+			const hasExpectedChunks = Number.isFinite(expectedChunks) && expectedChunks >= 0;
+			const validDigest = !expectedDigest || expectedDigest === digestSha256;
+			const validBytes = !hasExpectedBytes || expectedBytes === state.totalBytes;
+			const validChunks = !hasExpectedChunks || expectedChunks === state.chunks;
+			const isValid = validDigest && validBytes && validChunks;
+
+			const finalPath = state.partPath.replace(/\.part$/i, isValid ? '.bin' : '.failed');
+			await fs.rename(state.partPath, finalPath).catch(async () => {
+				await fs.copyFile(state.partPath, finalPath).catch(() => {});
+				await fs.unlink(state.partPath).catch(() => {});
+			});
+
+			return {
+				streamId,
+				sender: state.sender,
+				path: finalPath,
+				totalBytes: state.totalBytes,
+				chunks: state.chunks,
+				digestSha256,
+				expectedDigestSha256: expectedDigest,
+				expectedTotalBytes: hasExpectedBytes ? expectedBytes : null,
+				expectedChunks: hasExpectedChunks ? expectedChunks : null,
+				valid: isValid,
+				error: isValid ? '' : 'stream validation failed',
+				metadata: state.metadata,
+				contentType: state.contentType,
+				senderCandidates: state.senderCandidates,
+			};
+		};
+
+		const maybeFinalizeFromPendingEnd = async (state) => {
+			const pendingEnd = this.pendingIncomingStreamEnds.get(key);
+			if (!pendingEnd || !pendingEnd.payload || typeof pendingEnd.payload !== 'object') {
+				return null;
+			}
+
+			const expectedChunks = Number(pendingEnd.payload.chunks);
+			if (!Number.isFinite(expectedChunks) || expectedChunks < 0) {
+				return null;
+			}
+
+			if (state.chunks < expectedChunks) {
+				return null;
+			}
+
+			return finalizeIncomingState(state, pendingEnd.payload);
+		};
+
+		const ensureIncomingState = async () => {
+			let existing = this.activeIncomingStreams.get(key);
+			if (existing) {
+				existing.lastActivityAt = now;
+				return existing;
+			}
+
+			if (this.activeIncomingStreams.size >= this.streamMaxActive) {
 				this.log(`[STREAM] max active streams reached (${this.streamMaxActive}), dropping streamId=${streamId}`);
 				return null;
 			}
@@ -3587,7 +4215,7 @@ class ReactorRuntime {
 			const partPath = path.join(this.streamStorageDir, `${Date.now()}-${senderSegment}-${streamSegment}.part`);
 			await fs.writeFile(partPath, Buffer.alloc(0));
 
-			this.activeIncomingStreams.set(key, {
+			existing = {
 				key,
 				streamId,
 				sender: this.makeStreamSenderKey(senderMeta),
@@ -3600,11 +4228,38 @@ class ReactorRuntime {
 				metadata: packet.getMetadata(),
 				contentType: packet.getContentType(),
 				senderCandidates: senderMeta.candidates || [],
-			});
+			};
+
+			this.activeIncomingStreams.set(key, existing);
+			return existing;
+		};
+
+		if (packet.isStart()) {
+			const state = await ensureIncomingState();
+			if (!state) {
+				return null;
+			}
+			state.metadata = packet.getMetadata();
+			state.contentType = packet.getContentType();
+			state.senderCandidates = senderMeta.candidates || state.senderCandidates || [];
+			const finalized = await maybeFinalizeFromPendingEnd(state);
+			if (finalized) {
+				return finalized;
+			}
 			return null;
 		}
 
-		const state = this.activeIncomingStreams.get(key);
+		const state = packet.isChunk()
+			? await ensureIncomingState()
+			: this.activeIncomingStreams.get(key);
+		if (!state && packet.isEnd()) {
+			this.pendingIncomingStreamEnds.set(key, {
+				receivedAt: now,
+				payload: packet.payload && typeof packet.payload === 'object' ? packet.payload : {},
+			});
+			this.log(`[STREAM] queued end before stream state streamId=${streamId} key=${key}`);
+			return null;
+		}
 		if (!state) {
 			return null;
 		}
@@ -3619,6 +4274,10 @@ class ReactorRuntime {
 				state.totalBytes += chunk.length;
 			}
 			state.chunks += 1;
+			const finalized = await maybeFinalizeFromPendingEnd(state);
+			if (finalized) {
+				return finalized;
+			}
 			return null;
 		}
 
@@ -3626,36 +4285,7 @@ class ReactorRuntime {
 			return null;
 		}
 
-		this.activeIncomingStreams.delete(key);
-		const digestSha256 = state.digest.digest('hex');
-		const expectedDigest = String(packet.payload?.digestSha256 || '').trim().toLowerCase();
-		const expectedBytes = Number(packet.payload?.totalBytes);
-		const hasExpectedBytes = Number.isFinite(expectedBytes) && expectedBytes >= 0;
-		const validDigest = !expectedDigest || expectedDigest === digestSha256;
-		const validBytes = !hasExpectedBytes || expectedBytes === state.totalBytes;
-		const isValid = validDigest && validBytes;
-
-		const finalPath = state.partPath.replace(/\.part$/i, isValid ? '.bin' : '.failed');
-		await fs.rename(state.partPath, finalPath).catch(async () => {
-			await fs.copyFile(state.partPath, finalPath).catch(() => {});
-			await fs.unlink(state.partPath).catch(() => {});
-		});
-
-		return {
-			streamId,
-			sender: state.sender,
-			path: finalPath,
-			totalBytes: state.totalBytes,
-			chunks: state.chunks,
-			digestSha256,
-			expectedDigestSha256: expectedDigest,
-			expectedTotalBytes: hasExpectedBytes ? expectedBytes : null,
-			valid: isValid,
-			error: isValid ? '' : 'stream validation failed',
-			metadata: state.metadata,
-			contentType: state.contentType,
-			senderCandidates: state.senderCandidates,
-		};
+		return finalizeIncomingState(state, packet.payload && typeof packet.payload === 'object' ? packet.payload : {});
 	}
 
 	async emitStreamEnd(streamEndData, senderMeta, messageHeaders = {}) {
@@ -3946,7 +4576,24 @@ class ReactorRuntime {
 
 		const streamPacket = isStreamEnvelope ? this.createIncomingStreamPacket(body.json) : null;
 		const streamEndData = isStreamEnvelope ? await this.processIncomingStreamPacket(streamPacket, senderMeta) : null;
+		const systemStreamMetadata = isStreamEnvelope
+			? this.resolveSystemEndpointTransferMetadata(streamPacket, senderMeta, streamEndData)
+			: null;
 		let streamEndEndpoints = [];
+
+		if (systemStreamMetadata) {
+			if (streamEndData) {
+				await this.handleIncomingEndpointTransferStream(streamEndData);
+			}
+			return {
+				ok: true,
+				trigger: 'STREAM',
+				delivered: false,
+				reason: streamEndData ? 'system transfer handled' : 'system transfer in progress',
+				streamEndEndpoints: [],
+				senderCandidates: senderMeta.candidates,
+			};
+		}
 
 		if (listeners.length === 0) {
 			streamEndEndpoints = streamEndData
@@ -4059,6 +4706,11 @@ class ReactorRuntime {
 
 				return { ok: true, control: true, action, requestId, from: safeFromNode };
 			}
+		}
+
+		if (control && control.__reactorSystem === true) {
+			await this.handleIncomingSystemMessage(control, safeFromNode).catch(() => {});
+			return { ok: true, system: true, from: safeFromNode };
 		}
 
 		return this.dispatchIncomingMessageEnvelope(parsedBody, senderMeta, headers);
@@ -4636,6 +5288,7 @@ class ReactorRuntime {
 				chunks,
 				totalBytes,
 				digestSha256,
+				metadata,
 			}, headers, streamDispatchOptions);
 			trackDeliveredVia(endResult);
 
@@ -4747,6 +5400,7 @@ class ReactorRuntime {
 				chunks,
 				totalBytes,
 				digestSha256,
+				metadata,
 			}, exchangeDispatchOptions), `stream-end:${streamId}`, retryConfig);
 
 			return {
@@ -6041,7 +6695,12 @@ class ReactorRuntime {
 	}
 
 	log(message) {
-		console.log(`[Reactor] ${message}`);
+		const safeMessage = String(message || '');
+		console.log(`[Reactor] ${safeMessage}`);
+		if (safeMessage.startsWith('[TRANSFER]')) {
+			const transferMessage = safeMessage.replace(/^\[TRANSFER\]\s*/i, '').trim();
+			this.logGlobalEvent('TRANSFER', transferMessage || '-').catch(() => {});
+		}
 	}
 
 	buildReadableGlobalLogLine(category, message) {
@@ -6808,6 +7467,7 @@ class ReactorRuntime {
 			}
 		}
 		this.activeIncomingStreams.clear();
+		this.pendingIncomingStreamEnds.clear();
 
 		if (this.reloadDebounceTimer) {
 			clearTimeout(this.reloadDebounceTimer);

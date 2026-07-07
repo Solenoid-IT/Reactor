@@ -59,6 +59,10 @@
 		requestRemoteEndpointsP2P,
 		subscribeP2PStatus,
 		subscribeExchangeStatus,
+		initiateEndpointTransfer,
+		respondToEndpointTransfer,
+		subscribeTransferRequest,
+		subscribeTransferComplete,
 	} from '$lib/reactorApi';
 import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 
@@ -119,6 +123,15 @@ import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 	let networkCopiedTimer = null;
 	let tlsEnabled = false;
 	let tlsSubject = '';
+	// Endpoint transfer state
+	let transferModalOpen = false;
+	let transferEndpointIndex = -1;
+	let transferTargetNode = '';
+	let transferKeepCopy = true;
+	let transferring = false;
+	let transferStatus = '';
+	let incomingTransferModalOpen = false;
+	let incomingTransfer = null; // { requestId, fromNode, endpointName, contentSize }
 	let tlsNotAfter = '';
 	let tlsFingerprint = '';
 	let messageQueuePending = 0;
@@ -1067,6 +1080,80 @@ import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 		refreshCurrentNodeGeo().catch(() => {});
 		refreshExchangeLinkedNodes(true).catch(() => {});
 		refreshP2PStatusOnly().catch(() => {});
+	}
+
+	function openTransferModal(index) {
+		if (index < 0 || index >= endpoints.length) {
+			return;
+		}
+		transferEndpointIndex = index;
+		transferTargetNode = '';
+		transferKeepCopy = true;
+		transferStatus = '';
+		transferring = false;
+		transferModalOpen = true;
+	}
+
+	function closeTransferModal() {
+		if (transferring) {
+			return;
+		}
+		transferModalOpen = false;
+		transferEndpointIndex = -1;
+		transferStatus = '';
+	}
+
+	async function confirmTransfer() {
+		if (transferring || transferEndpointIndex < 0 || !transferTargetNode.trim()) {
+			return;
+		}
+		const endpoint = endpoints[transferEndpointIndex];
+		if (!endpoint) {
+			return;
+		}
+		transferring = true;
+		transferStatus = `Sending transfer request to ${transferTargetNode}...`;
+		try {
+			const result = await initiateEndpointTransfer(transferTargetNode.trim().toLowerCase(), endpoint.path, transferKeepCopy);
+			if (result?.ok) {
+				transferStatus = transferKeepCopy
+					? `Endpoint transferred successfully to ${transferTargetNode}`
+					: `Endpoint transferred and removed from this node`;
+				await refreshAll();
+			} else {
+				transferStatus = `Transfer failed: ${result?.error || 'unknown error'}`;
+			}
+		} catch (error) {
+			transferStatus = `Transfer error: ${error?.message || 'unknown'}`;
+		} finally {
+			transferring = false;
+		}
+	}
+
+	async function approveIncomingTransfer() {
+		if (!incomingTransfer) {
+			return;
+		}
+		const { requestId } = incomingTransfer;
+		incomingTransferModalOpen = false;
+		incomingTransfer = null;
+		const result = await respondToEndpointTransfer(requestId, true);
+		if (result?.ok) {
+			status = 'Transfer approved — waiting for endpoint data...';
+		} else {
+			status = `Transfer approve error: ${result?.error || 'unknown'}`;
+		}
+	}
+
+	async function rejectIncomingTransfer() {
+		if (!incomingTransfer) {
+			return;
+		}
+		const { requestId } = incomingTransfer;
+		incomingTransferModalOpen = false;
+		incomingTransfer = null;
+		await respondToEndpointTransfer(requestId, false);
+		status = 'Transfer request rejected';
 	}
 
 	function closeNetworkView() {
@@ -2181,6 +2268,43 @@ import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 			}
 		});
 
+		const unsubscribeTransferRequest = subscribeTransferRequest((payload) => {
+			if (payload && payload.requestId) {
+				incomingTransfer = payload;
+				incomingTransferModalOpen = true;
+			}
+		});
+
+		const unsubscribeTransferComplete = subscribeTransferComplete((payload) => {
+			if (payload?.ok) {
+				status = `Endpoint '${payload.endpointName}' received successfully`;
+				void refreshAll();
+			} else {
+				status = `Incoming transfer failed: ${payload?.error || 'unknown'}`;
+			}
+		});
+
+		// Also handle Electron push events for transfer
+		const unsubscribeTransferRequestElectron = typeof window !== 'undefined' && window.reactor && typeof window.reactor.onTransferRequest === 'function'
+			? window.reactor.onTransferRequest((payload) => {
+				if (payload && payload.requestId) {
+					incomingTransfer = payload;
+					incomingTransferModalOpen = true;
+				}
+			})
+			: null;
+
+		const unsubscribeTransferCompleteElectron = typeof window !== 'undefined' && window.reactor && typeof window.reactor.onTransferComplete === 'function'
+			? window.reactor.onTransferComplete((payload) => {
+				if (payload?.ok) {
+					status = `Endpoint '${payload.endpointName}' received successfully`;
+					void refreshAll();
+				} else {
+					status = `Incoming transfer failed: ${payload?.error || 'unknown'}`;
+				}
+			})
+			: null;
+
 		return () => {
 			if (typeof unsubscribe === 'function') {
 				unsubscribe();
@@ -2190,6 +2314,18 @@ import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 			}
 			if (typeof unsubscribeExchangeStatus === 'function') {
 				unsubscribeExchangeStatus();
+			}
+			if (typeof unsubscribeTransferRequest === 'function') {
+				unsubscribeTransferRequest();
+			}
+			if (typeof unsubscribeTransferComplete === 'function') {
+				unsubscribeTransferComplete();
+			}
+			if (typeof unsubscribeTransferRequestElectron === 'function') {
+				unsubscribeTransferRequestElectron();
+			}
+			if (typeof unsubscribeTransferCompleteElectron === 'function') {
+				unsubscribeTransferCompleteElectron();
 			}
 		};
 	});
@@ -2274,6 +2410,7 @@ import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 				onClearLog={clearLog}
 				onCopyId={copyEndpointId}
 				onReorder={reorderEndpointItems}
+				onTransfer={openTransferModal}
 			/>
 		</section>
 		<DetailPane
@@ -2704,6 +2841,79 @@ import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 			</button>
 		</svelte:fragment>
 	</Modal>
+
+	<!-- Transfer Initiation Modal -->
+	<Modal
+		open={transferModalOpen}
+		title="Transfer Endpoint"
+		subtitle={transferEndpointIndex >= 0 && endpoints[transferEndpointIndex] ? `'${String(endpoints[transferEndpointIndex]?.name || '').replace(/\.(ts|js)$/i, '')}'` : ''}
+		ariaLabel="Transfer endpoint to remote node"
+		onClose={closeTransferModal}
+	>
+		{#if transferStatus}
+			<p class="transfer-status-msg">{transferStatus}</p>
+		{:else}
+			<div class="transfer-form">
+				<label class="d-block mb-3">
+					<span class="detail-label">Target node</span>
+					<select class="input" bind:value={transferTargetNode} disabled={transferring}>
+						<option value="">— Select a node —</option>
+						{#each exchangeLinkedNodes.filter(n => !n.isCurrent) as node}
+							<option value={node.name}>{node.name}</option>
+						{/each}
+					</select>
+				</label>
+				<label class="d-flex align-items-center gap-2 mb-3">
+					<input type="checkbox" class="input" bind:checked={transferKeepCopy} disabled={transferring} />
+					<span>Keep a local copy after transfer</span>
+				</label>
+			</div>
+		{/if}
+		<svelte:fragment slot="actions">
+			{#if transferStatus}
+				<button type="button" class="btn-primary" on:click={closeTransferModal}>Close</button>
+			{:else}
+				<button type="button" class="btn-secondary" on:click={closeTransferModal} disabled={transferring}>Cancel</button>
+				<button
+					type="button"
+					class="btn-primary"
+					disabled={transferring || !transferTargetNode}
+					on:click={confirmTransfer}
+				>
+					{transferring ? 'Transferring...' : 'Transfer'}
+				</button>
+			{/if}
+		</svelte:fragment>
+	</Modal>
+
+	<!-- Incoming Transfer Request Modal -->
+	<Modal
+		open={incomingTransferModalOpen}
+		title="Incoming Transfer Request"
+		ariaLabel="Incoming endpoint transfer request"
+		onClose={rejectIncomingTransfer}
+	>
+		{#if incomingTransfer}
+			<p>Node <strong>{incomingTransfer.fromNode}</strong> wants to transfer endpoint:</p>
+			<p class="transfer-endpoint-name"><strong>{incomingTransfer.endpointName}</strong></p>
+			{#if incomingTransfer.contentSize}
+				<p class="transfer-size-hint">Size: ~{Math.ceil(incomingTransfer.contentSize / 1024)} KB</p>
+			{/if}
+			{#if incomingTransfer.nameConflict}
+				<p class="transfer-conflict-warning">
+					<i class="fa-solid fa-triangle-exclamation me-1"></i>
+					An endpoint named <strong>{incomingTransfer.endpointName}</strong> already exists on this node. Accepting will overwrite it.
+				</p>
+			{/if}
+			<p class="transfer-warning">Accept only transfers from nodes you trust.</p>
+		{/if}
+		<svelte:fragment slot="actions">
+			<button type="button" class="btn-secondary" on:click={rejectIncomingTransfer}>Reject</button>
+			<button type="button" class="btn-primary" on:click={approveIncomingTransfer}>
+				{incomingTransfer?.nameConflict ? 'Accept & Overwrite' : 'Accept'}
+			</button>
+		</svelte:fragment>
+	</Modal>
 </div>
 
 <style>
@@ -2759,6 +2969,49 @@ import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 		border-radius: 12px;
 		border: 1px dashed rgba(255, 255, 255, 0.14);
 		opacity: 0.72;
+	}
+
+	.transfer-form {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.transfer-status-msg {
+		padding: 10px 14px;
+		border-radius: 10px;
+		background: rgba(255, 255, 255, 0.06);
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		margin: 0;
+	}
+
+	.transfer-endpoint-name {
+		font-size: 1.05rem;
+		padding: 8px 12px;
+		background: rgba(255, 255, 255, 0.07);
+		border-radius: 8px;
+		margin: 8px 0;
+	}
+
+	.transfer-size-hint {
+		opacity: 0.65;
+		font-size: 0.82rem;
+		margin: 4px 0 8px;
+	}
+
+	.transfer-warning {
+		color: #f0b429;
+		font-size: 0.82rem;
+		margin: 8px 0 0;
+	}
+
+	.transfer-conflict-warning {
+		color: #e55c5c;
+		font-size: 0.82rem;
+		padding: 8px 12px;
+		border-radius: 8px;
+		background: rgba(229, 92, 92, 0.1);
+		border: 1px solid rgba(229, 92, 92, 0.25);
+		margin: 8px 0 4px;
 	}
 
 	.env-row {

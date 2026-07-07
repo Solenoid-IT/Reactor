@@ -64,4 +64,9 @@ contextBridge.exposeInMainWorld('reactor', {
 	exportBackup: (options) => ipcRenderer.invoke('export-backup', options),
 	importBackup: () => ipcRenderer.invoke('import-backup'),
 	onRuntimeStatus: (callback) => createStatusListener('reactor-runtime-status', callback),
+	initiateEndpointTransfer: (targetNode, endpointPath, keepCopy) => ipcRenderer.invoke('initiate-endpoint-transfer', { targetNode, endpointPath, keepCopy }),
+	respondToEndpointTransfer: (requestId, approved) => ipcRenderer.invoke('respond-to-endpoint-transfer', { requestId, approved }),
+	onTransferRequest: (callback) => createStatusListener('reactor-transfer-request', callback),
+	onTransferComplete: (callback) => createStatusListener('reactor-transfer-complete', callback),
+	onTransferOutcome: (callback) => createStatusListener('reactor-transfer-outcome', callback),
 });

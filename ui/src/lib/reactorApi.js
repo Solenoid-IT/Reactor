@@ -997,3 +997,95 @@ export async function clearMessageQueue() {
 
 	return { ok: false, error: 'bridge unavailable' };
 }
+
+export async function initiateEndpointTransfer(targetNode, endpointPath, keepCopy = true) {
+	const bridge = getBridge();
+	if (bridge && bridge.initiateEndpointTransfer) {
+		return bridge.initiateEndpointTransfer(targetNode, endpointPath, keepCopy);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.initiateEndpointTransfer) {
+		return mobile.initiateEndpointTransfer({ targetNode, endpointPath, keepCopy });
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export async function respondToEndpointTransfer(requestId, approved) {
+	const bridge = getBridge();
+	if (bridge && bridge.respondToEndpointTransfer) {
+		return bridge.respondToEndpointTransfer(requestId, approved);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && mobile.respondToEndpointTransfer) {
+		return mobile.respondToEndpointTransfer({ requestId, approved });
+	}
+
+	return { ok: false, error: 'bridge unavailable' };
+}
+
+export function subscribeTransferRequest(handler) {
+	if (typeof handler !== 'function') {
+		return () => {};
+	}
+
+	const bridge = getBridge();
+	if (bridge && typeof bridge.onTransferRequest === 'function') {
+		return bridge.onTransferRequest(handler);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && typeof mobile.addListener === 'function') {
+		let subscription = null;
+		try {
+			subscription = mobile.addListener('transferRequest', (payload) => handler(payload || null));
+		} catch {
+			return () => {};
+		}
+		return () => {
+			try {
+				if (subscription && typeof subscription.then === 'function') {
+					subscription.then((r) => r && typeof r.remove === 'function' && r.remove()).catch(() => {});
+				} else if (subscription && typeof subscription.remove === 'function') {
+					subscription.remove();
+				}
+			} catch { /* ignore */ }
+		};
+	}
+
+	return () => {};
+}
+
+export function subscribeTransferComplete(handler) {
+	if (typeof handler !== 'function') {
+		return () => {};
+	}
+
+	const bridge = getBridge();
+	if (bridge && typeof bridge.onTransferComplete === 'function') {
+		return bridge.onTransferComplete(handler);
+	}
+
+	const mobile = getMobilePlugin();
+	if (mobile && typeof mobile.addListener === 'function') {
+		let subscription = null;
+		try {
+			subscription = mobile.addListener('transferComplete', (payload) => handler(payload || null));
+		} catch {
+			return () => {};
+		}
+		return () => {
+			try {
+				if (subscription && typeof subscription.then === 'function') {
+					subscription.then((r) => r && typeof r.remove === 'function' && r.remove()).catch(() => {});
+				} else if (subscription && typeof subscription.remove === 'function') {
+					subscription.remove();
+				}
+			} catch { /* ignore */ }
+		};
+	}
+
+	return () => {};
+}

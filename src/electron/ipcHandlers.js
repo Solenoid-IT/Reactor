@@ -1276,6 +1276,51 @@ function setupIpcHandlers(runtime, options = {}) {
 		}
 	});
 
+	ipcMain.handle('initiate-endpoint-transfer', async (_, { targetNode, endpointPath, keepCopy }) => {
+		if (!runtime || !runtime.initiateEndpointTransfer) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+		try {
+			const result = await runtime.initiateEndpointTransfer(targetNode, endpointPath, Boolean(keepCopy));
+			return { ok: true, ...result };
+		} catch (error) {
+			return { ok: false, error: error.message, rejected: Boolean(error.rejected) };
+		}
+	});
+
+	ipcMain.handle('respond-to-endpoint-transfer', async (_, { requestId, approved }) => {
+		if (!runtime || !runtime.respondToEndpointTransfer) {
+			return { ok: false, error: 'runtime not ready' };
+		}
+		try {
+			return await runtime.respondToEndpointTransfer(requestId, Boolean(approved));
+		} catch (error) {
+			return { ok: false, error: error.message };
+		}
+	});
+
+	// Set up callbacks for pushing transfer events to the renderer
+	if (runtime) {
+		function sendToRenderer(channel, payload) {
+			const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows().find((w) => !w.isDestroyed());
+			if (win && !win.isDestroyed()) {
+				win.webContents.send(channel, payload);
+			}
+		}
+
+		runtime.onTransferRequest = (requestId, fromNode, endpointName, contentSize, nameConflict) => {
+			sendToRenderer('reactor-transfer-request', { requestId, fromNode, endpointName, contentSize, nameConflict: Boolean(nameConflict) });
+		};
+
+		runtime.onTransferComplete = (requestId, result) => {
+			sendToRenderer('reactor-transfer-complete', { requestId, ...result });
+		};
+
+		runtime.onTransferOutcome = (requestId, result) => {
+			sendToRenderer('reactor-transfer-outcome', { requestId, ...result });
+		};
+	}
+
 	ipcMain.handle('get-endpoints-info', async () => {
 		if (runtime) {
 			const endpoints = runtime.endpoints.map((endpoint) => ({

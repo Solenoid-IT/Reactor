@@ -35,6 +35,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -80,6 +81,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.HttpsURLConnection;
@@ -157,6 +161,9 @@ public class ReactorHttpService extends Service {
     private static final ConcurrentHashMap<String, Long> p2pAutodialAttempts = new ConcurrentHashMap<>();
     private static final ConcurrentLinkedQueue<JSONObject> pendingP2PSignals = new ConcurrentLinkedQueue<>();
     private static volatile P2PSignalListener p2pSignalListener = null;
+    private static final ConcurrentHashMap<String, JSONObject> pendingIncomingTransfers = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, JSObject> pendingOutgoingTransfers = new ConcurrentHashMap<>();
+    private static final Set<String> pendingOverwriteApprovals = ConcurrentHashMap.newKeySet();
     private static ReactorHttpService instance = null;
     private static volatile boolean stopRequestedByUser = false;
     private static final Object envCacheLock = new Object();
@@ -813,6 +820,928 @@ public class ReactorHttpService extends Service {
         }
         p2pSessions.clear();
         emitP2PStatusUpdate();
+    }
+
+    public interface SystemMessageListener {
+        void onTransferRequest(String requestId, String fromNode, String endpointName, long contentSize, boolean nameConflict);
+        void onTransferComplete(String requestId, boolean ok, String endpointName, String error);
+    }
+
+    private static volatile SystemMessageListener systemMessageListener = null;
+
+    public static void setSystemMessageListener(SystemMessageListener listener) {
+        systemMessageListener = listener;
+    }
+
+    private void handleIncomingSystemMessage(JSONObject data, String fromNode) {
+        String action = data.optString("action", "").trim();
+        String requestId = data.optString("requestId", "").trim();
+        if (action.isEmpty() || requestId.isEmpty()) {
+            return;
+        }
+        String safeFrom = normalizeP2PTarget(fromNode);
+        logTransfer("system message action=" + action + " requestId=" + requestId + " from=" + safeFrom);
+
+        if ("endpoint-transfer-request".equals(action)) {
+            String endpointName = data.optString("endpointName", "").trim();
+            if (endpointName.isEmpty()) {
+                logTransfer("request ignored requestId=" + requestId + " reason=missing-endpoint-name");
+                return;
+            }
+            long contentSize = data.optLong("contentSize", 0L);
+            // Check if endpoint already exists as project directory (name conflict)
+            File endpointsDir = getEndpointsDir();
+            boolean nameConflict = false;
+            if (endpointsDir != null && endpointsDir.isDirectory()) {
+                File[] files = endpointsDir.listFiles();
+                if (files != null) {
+                    String safeStem = endpointName.replaceAll("[^a-zA-Z0-9._-]", "-");
+                    for (File f : files) {
+                        if (f.isDirectory() && (f.getName().equals(endpointName) || f.getName().equals(safeStem))) {
+                            nameConflict = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            // Store pending and notify UI (with conflict flag)
+            try {
+                JSONObject pending = new JSONObject();
+                pending.put("fromNode", safeFrom);
+                pending.put("endpointName", endpointName);
+                pending.put("nameConflict", nameConflict);
+                pending.put("requestedAt", System.currentTimeMillis());
+                pendingIncomingTransfers.put(requestId, pending);
+            } catch (Exception ignored) {}
+            logTransfer("request received requestId=" + requestId + " from=" + safeFrom + " endpoint=" + endpointName + " conflict=" + nameConflict + " contentSize=" + contentSize + "B");
+            SystemMessageListener listener = systemMessageListener;
+            if (listener != null) {
+                listener.onTransferRequest(requestId, safeFrom, endpointName, contentSize, nameConflict);
+            }
+            return;
+        }
+
+        // endpoint-transfer-response is handled by the initiating side (plugin)
+        JSObject pendingTransferResponse = pendingOutgoingTransfers.remove(requestId);
+        if (pendingTransferResponse != null) {
+            // Notify plugin via stored callback
+            SystemMessageListener listener = systemMessageListener;
+            if (listener != null && "endpoint-transfer-response".equals(action)) {
+                boolean approved = data.optBoolean("approved", false);
+                String reason = data.optString("reason", "");
+                logTransfer("response received requestId=" + requestId + " from=" + safeFrom + " approved=" + approved + " reason=" + (reason.isEmpty() ? "-" : reason));
+                if (!approved) {
+                    cleanupPendingEndpointTransferArtifacts(pendingTransferResponse);
+                    listener.onTransferComplete(requestId, false, pendingTransferResponse.getString("endpointName", ""), reason.isEmpty() ? "rejected by remote node" : reason);
+                } else {
+                    // Send the prepared ZIP archive as a node stream.
+                    try {
+                        String archivePath = pendingTransferResponse.getString("archivePath", "");
+                        String endpointNameToSend = pendingTransferResponse.getString("endpointName", "");
+                        logTransfer("stream send start requestId=" + requestId + " endpoint=" + endpointNameToSend + " to=" + safeFrom + " archive=" + archivePath + " size=" + pendingTransferResponse.optLong("archiveSize", 0L) + "B");
+                        JSONObject metadata = new JSONObject();
+                        metadata.put("__reactorSystem", true);
+                        metadata.put("action", "endpoint-transfer-stream");
+                        metadata.put("requestId", requestId);
+                        metadata.put("endpointName", endpointNameToSend);
+                        streamEndpointTransferToNode(safeFrom, archivePath, metadata);
+                        boolean keepCopy = pendingTransferResponse.getBool("keepCopy");
+                        if (!keepCopy) {
+                            try {
+                                File f = new File(pendingTransferResponse.getString("endpointPath", ""));
+                                if (f.exists()) {
+	                                    boolean isProjectEndpoint = "boot.ts".equals(f.getName())
+	                                            && f.getParentFile() != null
+	                                            && f.getParentFile().getParentFile() != null
+	                                            && f.getParentFile().getParentFile().equals(getEndpointsDir());
+	                                    if (isProjectEndpoint) {
+	                                        deleteDirectoryRecursive(f.getParentFile());
+	                                    } else {
+	                                        f.delete();
+	                                    }
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                        cleanupPendingEndpointTransferArtifacts(pendingTransferResponse);
+                        logTransfer("stream send done requestId=" + requestId + " endpoint=" + endpointNameToSend + " keepCopy=" + keepCopy);
+                        listener.onTransferComplete(requestId, true, endpointNameToSend, null);
+                    } catch (Exception error) {
+                        cleanupPendingEndpointTransferArtifacts(pendingTransferResponse);
+                        logTransfer("stream send failed requestId=" + requestId + " error=" + (error.getMessage() != null ? error.getMessage() : "stream failed"));
+                        listener.onTransferComplete(requestId, false, pendingTransferResponse.getString("endpointName", ""), error.getMessage());
+                    }
+                }
+            }
+        }
+    }
+
+    private void streamEndpointTransferToNode(String target, String filePath, JSONObject metadataOverride) {
+        File file = resolveStreamFilePath(filePath);
+        if (file == null || !file.exists() || !file.isFile()) {
+            throw new RuntimeException("stream source file not found: " + filePath);
+        }
+
+        boolean nodeOnlyTarget = String.valueOf(target == null ? "" : target).indexOf('@') < 0;
+        ParsedTarget parsedTarget = nodeOnlyTarget ? null : parseTarget(target);
+        if (!nodeOnlyTarget && parsedTarget == null) {
+            throw new RuntimeException("invalid target");
+        }
+
+        Map<String, String> effectiveHeaders = new HashMap<>();
+        String streamTarget;
+        if (nodeOnlyTarget) {
+            streamTarget = normalizeP2PTarget(target);
+            if (streamTarget.isEmpty()) {
+                throw new RuntimeException("invalid target");
+            }
+        } else {
+            if (parsedTarget.endpointSelector != null && !parsedTarget.endpointSelector.isEmpty()) {
+                effectiveHeaders.put("Reactor-Target-Endpoint", parsedTarget.endpointSelector);
+            }
+            if (parsedTarget.endpointId != null && !parsedTarget.endpointId.isEmpty()) {
+                effectiveHeaders.put("Reactor-Target-Endpoint-Id", parsedTarget.endpointId);
+            }
+            if (parsedTarget.nodeName != null && !parsedTarget.nodeName.isEmpty()) {
+                effectiveHeaders.put("Reactor-Target-Node", parsedTarget.nodeName);
+            } else if (parsedTarget.directAddress) {
+                effectiveHeaders.put("Reactor-Target-Node", "net:" + String.valueOf(parsedTarget.baseTarget).trim().toLowerCase(Locale.ROOT));
+            }
+            streamTarget = parsedTarget.directAddress ? parsedTarget.baseTarget : parsedTarget.originalTarget;
+        }
+        String streamId = UUID.randomUUID().toString();
+        String contentType = "application/octet-stream";
+        long totalBytes = file.length();
+        logTransfer("stream packet start target=" + streamTarget + " streamId=" + streamId + " bytes=" + totalBytes);
+
+        JSONObject start;
+        try {
+            start = new JSONObject();
+            start.put("__reactorStream", true);
+            start.put("phase", "start");
+            start.put("streamId", streamId);
+            start.put("contentType", contentType);
+            start.put("chunkSize", DEFAULT_STREAM_CHUNK_SIZE);
+            start.put("totalBytes", totalBytes);
+            start.put("metadata", mergeStreamMetadata(file, metadataOverride));
+        } catch (Exception error) {
+            throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "unable to build stream start packet");
+        }
+
+        SendDeliveryResult startDelivery;
+        boolean useExchangeBinaryChunks;
+        if (nodeOnlyTarget) {
+            if (!"node".equals(currentExchangeMode) || wsExchangeClientSocket == null) {
+            throw new RuntimeException("exchange client not connected");
+            }
+            sendExchangeMessageNow(streamTarget, start.toString(), "application/json", false);
+            startDelivery = SendDeliveryResult.success(streamTarget, "EXCHANGE");
+            useExchangeBinaryChunks = true;
+        } else {
+            startDelivery = sendNodeMessageWithContentType(
+                streamTarget,
+                start.toString(),
+                "application/json; charset=utf-8",
+                effectiveHeaders,
+                false,
+                false,
+                false
+            );
+
+            useExchangeBinaryChunks = "EXCHANGE".equalsIgnoreCase(startDelivery.deliveredVia)
+                && "node".equals(currentExchangeMode)
+                && wsExchangeClientSocket != null
+                && parsedTarget.endpointSelector == null;
+        }
+
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException error) {
+            throw new RuntimeException("sha256 unavailable");
+        }
+
+        int index = 0;
+        long sentBytes = 0L;
+        byte[] chunk = new byte[DEFAULT_STREAM_CHUNK_SIZE];
+        try (FileInputStream input = new FileInputStream(file)) {
+            int read;
+            while ((read = input.read(chunk)) > 0) {
+                byte[] bytes = read == chunk.length ? chunk : java.util.Arrays.copyOf(chunk, read);
+                digest.update(bytes, 0, bytes.length);
+                sentBytes += bytes.length;
+
+                if (useExchangeBinaryChunks) {
+                    sendExchangeStreamChunkNow(streamTarget, streamId, index, bytes);
+                } else {
+                    JSONObject packet;
+                    try {
+                        packet = new JSONObject();
+                        packet.put("__reactorStream", true);
+                        packet.put("phase", "chunk");
+                        packet.put("streamId", streamId);
+                        packet.put("index", index);
+                        packet.put("encoding", "base64");
+                        packet.put("size", bytes.length);
+                        packet.put("data", Base64.encodeToString(bytes, Base64.NO_WRAP));
+                    } catch (Exception jsonError) {
+                        throw new RuntimeException(jsonError.getMessage() != null ? jsonError.getMessage() : "unable to build stream chunk packet");
+                    }
+
+                    sendNodeMessageWithContentType(
+                            streamTarget,
+                            packet.toString(),
+                            "application/json; charset=utf-8",
+                            effectiveHeaders,
+                            false,
+                            false,
+                            false
+                    );
+                }
+
+                index += 1;
+            }
+        } catch (IOException error) {
+            throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "stream read failed");
+        }
+
+        JSONObject end;
+        try {
+            end = new JSONObject();
+            end.put("__reactorStream", true);
+            end.put("phase", "end");
+            end.put("streamId", streamId);
+            end.put("chunks", index);
+            end.put("totalBytes", sentBytes);
+            end.put("digestSha256", bytesToHex(digest.digest()));
+            end.put("metadata", mergeStreamMetadata(file, metadataOverride));
+        } catch (Exception error) {
+            throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "unable to build stream end packet");
+        }
+
+        if (useExchangeBinaryChunks) {
+            sendExchangeMessageNow(streamTarget, end.toString(), "application/json", false);
+        } else {
+            sendNodeMessageWithContentType(
+                    streamTarget,
+                    end.toString(),
+                    "application/json; charset=utf-8",
+                    effectiveHeaders,
+                    false,
+                    false,
+                    false
+            );
+        }
+                logTransfer("stream packet end target=" + streamTarget + " streamId=" + streamId + " chunks=" + index + " bytes=" + sentBytes + " exchangeBinary=" + useExchangeBinaryChunks);
+
+        String streamDeliveredVia = String.valueOf(startDelivery.deliveredVia == null ? "" : startDelivery.deliveredVia).trim().toUpperCase(Locale.ROOT);
+        if (!streamDeliveredVia.isEmpty()) {
+            appendGlobalLog(buildExchangeLog("STREAM_DELIVERED", "target=" + streamTarget + " deliveredVia=" + streamDeliveredVia));
+        }
+    }
+
+    private void sendExchangeStreamChunkNow(String target, String streamId, int index, byte[] bytes) {
+        if (!"node".equals(currentExchangeMode) || wsExchangeClientSocket == null) {
+            throw new RuntimeException("exchange client not connected");
+        }
+
+        ParsedTarget parsedTarget = parseExchangeTransportTarget(target);
+        if (parsedTarget == null || parsedTarget.baseTarget == null || parsedTarget.baseTarget.trim().isEmpty()) {
+            throw new RuntimeException("invalid exchange target");
+        }
+
+        JSONObject packet = new JSONObject();
+        try {
+            packet.put("type", "stream-chunk-bin");
+            packet.put("to", String.valueOf(parsedTarget.baseTarget).toLowerCase(Locale.ROOT));
+            packet.put("streamId", streamId);
+            packet.put("index", index);
+            packet.put("size", bytes.length);
+        } catch (JSONException exception) {
+            throw new RuntimeException(exception.getMessage() != null ? exception.getMessage() : "exchange stream chunk packet serialization failed");
+        }
+
+        if (!wsExchangeClientSocket.send(packet.toString())) {
+            throw new RuntimeException("exchange websocket send failed");
+        }
+
+        if (!wsExchangeClientSocket.send(ByteString.of(bytes))) {
+            throw new RuntimeException("exchange websocket binary send failed");
+        }
+    }
+
+    private void sendSystemMessage(String targetNode, JSONObject data) {
+        try {
+            String content = data.toString();
+            if ("node".equals(currentExchangeMode) && !currentExchangeHost.isEmpty()) {
+                sendExchangeMessageNow(targetNode, content, "application/json", false);
+            }
+        } catch (Exception error) {
+            appendGlobalLog(buildExchangeLog("SYSTEM_MSG_FAIL", "failed to send system message to " + targetNode + ": " + error.getMessage()));
+        }
+    }
+
+    private JSONObject buildTransferResponse(String requestId, boolean approved, String reason) {
+        try {
+            JSONObject obj = new JSONObject();
+            obj.put("__reactorSystem", true);
+            obj.put("action", "endpoint-transfer-response");
+            obj.put("requestId", requestId);
+            obj.put("approved", approved);
+            obj.put("reason", reason != null ? reason : "");
+            return obj;
+        } catch (Exception ignored) {
+            return new JSONObject();
+        }
+    }
+
+    private File createTemporaryEndpointTransferProject(File endpointFile, String endpointName) throws Exception {
+        String safeStem = String.valueOf(endpointName == null ? "" : endpointName).trim().replaceAll("[^a-zA-Z0-9._-]", "-");
+        File tempProjectDir = new File(getCacheDir(), "reactor-endpoint-transfer-source-" + safeStem + "-" + UUID.randomUUID());
+        if (!tempProjectDir.mkdirs()) {
+            throw new IOException("unable to create transfer staging directory");
+        }
+
+        writeTextFile(new File(tempProjectDir, "boot.ts"), readTextFileStatic(endpointFile));
+        writeTextFile(new File(tempProjectDir, "event.ts"), "export type { Event, ReactorEvent, WatchEvent, MessageEvent, StreamEvent, StreamEndEvent, ScheduleEvent, RuntimeEvent, ManualEvent } from 'core';\n");
+        writeTextFile(new File(tempProjectDir, "package.json"), buildTransferredPackageJson(safeStem));
+        return tempProjectDir;
+    }
+
+    private JSObject prepareEndpointTransferPackage(File endpointFile) throws Exception {
+        boolean isProjectBoot = endpointFile != null
+                && endpointFile.isFile()
+                && "boot.ts".equals(endpointFile.getName())
+                && endpointFile.getParentFile() != null
+                && endpointFile.getParentFile().getParentFile() != null
+                && endpointFile.getParentFile().getParentFile().equals(getEndpointsDir());
+
+        String endpointName = endpointFile.getName().replaceAll("\\.(ts|js)$", "");
+        if (isProjectBoot) {
+            endpointName = endpointFile.getParentFile() != null ? endpointFile.getParentFile().getName() : endpointName;
+        }
+
+        File sourceProjectDir = isProjectBoot
+                ? endpointFile.getParentFile()
+                : createTemporaryEndpointTransferProject(endpointFile, endpointName);
+        File archiveFile = File.createTempFile("reactor-endpoint-transfer-", ".zip", getCacheDir());
+        try (ZipOutputStream zipOutput = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(archiveFile, false)))) {
+            addPathToEndpointTransferArchive(zipOutput, sourceProjectDir, "");
+        }
+        logTransfer("archive built endpoint=" + endpointName + " sourcePath=" + endpointFile.getAbsolutePath() + " projectMode=" + isProjectBoot + " archive=" + archiveFile.getAbsolutePath() + " size=" + archiveFile.length() + "B");
+
+        JSObject transferPackage = new JSObject();
+        transferPackage.put("endpointName", endpointName);
+        transferPackage.put("archivePath", archiveFile.getAbsolutePath());
+        transferPackage.put("archiveSize", archiveFile.length());
+        transferPackage.put("endpointPath", endpointFile.getAbsolutePath());
+        transferPackage.put("sourceProjectPath", isProjectBoot && sourceProjectDir != null ? sourceProjectDir.getAbsolutePath() : endpointFile.getAbsolutePath());
+        transferPackage.put("stagedProjectPath", !isProjectBoot && sourceProjectDir != null ? sourceProjectDir.getAbsolutePath() : "");
+        return transferPackage;
+    }
+
+    private void cleanupPendingEndpointTransferArtifacts(JSObject pendingTransfer) {
+        if (pendingTransfer == null) {
+            return;
+        }
+
+        String archivePath = pendingTransfer.getString("archivePath", "");
+        if (!archivePath.trim().isEmpty()) {
+            File archiveFile = new File(archivePath);
+            if (archiveFile.exists()) {
+                archiveFile.delete();
+            }
+        }
+
+        String stagedProjectPath = pendingTransfer.getString("stagedProjectPath", "");
+        if (!stagedProjectPath.trim().isEmpty()) {
+            deleteDirectoryRecursive(new File(stagedProjectPath));
+        }
+    }
+
+    private Integer readStoredEndpointPosition(File projectDir) {
+        if (projectDir == null) {
+            return null;
+        }
+
+        int position = readEndpointProjectPosition(projectDir);
+        return position == Integer.MAX_VALUE ? null : position;
+    }
+
+    private int resolveTransferredEndpointPosition(File projectDir, Integer preferredPosition) {
+        if (preferredPosition != null && preferredPosition >= 0) {
+            return preferredPosition;
+        }
+
+        File endpointsDir = getEndpointsDir();
+        if (endpointsDir == null || !endpointsDir.isDirectory()) {
+            return 0;
+        }
+
+        String normalizedProjectPath = canonicalPathKey(projectDir);
+        int maxPosition = -1;
+        File[] children = endpointsDir.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                if (child == null || !child.isDirectory()) {
+                    continue;
+                }
+
+                if (canonicalPathKey(child).equals(normalizedProjectPath)) {
+                    continue;
+                }
+
+                int childPosition = readEndpointProjectPosition(child);
+                if (childPosition != Integer.MAX_VALUE && childPosition >= 0) {
+                    maxPosition = Math.max(maxPosition, childPosition);
+                }
+            }
+        }
+
+        return maxPosition + 1;
+    }
+
+    private int readEndpointProjectPosition(File projectDir) {
+        if (projectDir == null) {
+            return Integer.MAX_VALUE;
+        }
+
+        File positionFile = new File(projectDir, "position");
+        if (!positionFile.exists()) {
+            return Integer.MAX_VALUE;
+        }
+
+        try {
+            String raw = readTextFile(positionFile).trim();
+            int parsed = Integer.parseInt(raw);
+            return parsed >= 0 ? parsed : Integer.MAX_VALUE;
+        } catch (Exception ignored) {
+            return Integer.MAX_VALUE;
+        }
+    }
+
+    private String canonicalPathKey(File file) {
+        if (file == null) {
+            return "";
+        }
+
+        try {
+            return file.getCanonicalPath();
+        } catch (Exception ignored) {
+            return file.getAbsolutePath();
+        }
+    }
+
+    private void addPathToEndpointTransferArchive(ZipOutputStream output, File source, String archiveRoot) throws IOException {
+        if (source == null || !source.exists()) {
+            return;
+        }
+
+        File[] children = source.listFiles();
+        if (children == null) {
+            return;
+        }
+
+        for (File child : children) {
+            if (child == null || "activity.log".equals(child.getName())) {
+                continue;
+            }
+
+            String childName = archiveRoot.isEmpty()
+                    ? child.getName()
+                    : archiveRoot + "/" + child.getName();
+
+            if (child.isDirectory()) {
+                addPathToEndpointTransferArchive(output, child, childName);
+                continue;
+            }
+
+            if (!child.isFile()) {
+                continue;
+            }
+
+            ZipEntry entry = new ZipEntry(childName.replace('\\', '/'));
+            output.putNextEntry(entry);
+            try (FileInputStream input = new FileInputStream(child)) {
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, read);
+                }
+            }
+            output.closeEntry();
+        }
+    }
+
+    private String buildTransferredPackageJson(String safeStem) throws JSONException {
+        String npmSafeName = safeStem
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9._-]", "-")
+                .replaceAll("^[._-]+", "");
+        if (npmSafeName.isEmpty()) {
+            npmSafeName = "reactor-endpoint";
+        }
+
+        JSONObject packageJson = new JSONObject();
+        packageJson.put("name", npmSafeName);
+        packageJson.put("version", "1.0.0");
+        packageJson.put("private", true);
+        packageJson.put("type", "commonjs");
+        packageJson.put("main", "boot.ts");
+        return packageJson.toString(2) + "\n";
+    }
+
+    private File finalizeTransferredEndpointProject(String safeStem, File tempProjectDir, boolean overwrite, Integer preferredPosition) throws Exception {
+        File endpointsDir = getEndpointsDir();
+        if (endpointsDir == null) {
+            throw new IOException("endpoints dir unavailable");
+        }
+
+        File projectDir = new File(endpointsDir, safeStem);
+        int nextPosition = resolveTransferredEndpointPosition(projectDir, preferredPosition);
+        writeTextFile(new File(tempProjectDir, "uuid"), UUID.randomUUID().toString().toLowerCase(Locale.ROOT) + "\n");
+        writeTextFile(new File(tempProjectDir, "position"), Math.max(0, nextPosition) + "\n");
+        writeTextFile(new File(tempProjectDir, "activity.log"), "");
+
+        File backupProjectDir = overwrite ? new File(endpointsDir, ".transfer-backup-" + safeStem + "-" + UUID.randomUUID()) : null;
+        boolean backupCreated = false;
+        if (overwrite && projectDir.exists()) {
+            if (!projectDir.renameTo(backupProjectDir)) {
+                throw new IOException("unable to prepare endpoint overwrite");
+            }
+            backupCreated = true;
+        }
+
+        boolean renamed = tempProjectDir.renameTo(projectDir);
+        if (!renamed) {
+            if (!projectDir.exists() && !projectDir.mkdirs()) {
+                if (backupCreated && backupProjectDir != null && backupProjectDir.exists()) {
+                    backupProjectDir.renameTo(projectDir);
+                }
+                throw new IOException("unable to finalize transferred endpoint");
+            }
+
+            copyDirectoryRecursive(tempProjectDir, projectDir);
+            deleteDirectoryRecursive(tempProjectDir);
+        }
+
+        if (backupCreated && backupProjectDir != null && backupProjectDir.exists()) {
+            deleteDirectoryRecursive(backupProjectDir);
+        }
+        return projectDir;
+    }
+
+    private void copyDirectoryRecursive(File sourceDir, File targetDir) throws IOException {
+        if (sourceDir == null || !sourceDir.exists()) {
+            return;
+        }
+
+        if (!targetDir.exists() && !targetDir.mkdirs()) {
+            throw new IOException("unable to create target directory");
+        }
+
+        File[] children = sourceDir.listFiles();
+        if (children == null) {
+            return;
+        }
+
+        for (File child : children) {
+            File targetChild = new File(targetDir, child.getName());
+            if (child.isDirectory()) {
+                copyDirectoryRecursive(child, targetChild);
+                continue;
+            }
+
+            try (FileInputStream input = new FileInputStream(child);
+                 FileOutputStream output = new FileOutputStream(targetChild, false)) {
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, read);
+                }
+                output.flush();
+            }
+        }
+    }
+
+    private void saveTransferredEndpoint(String endpointName, String content, boolean overwrite) throws Exception {
+        File endpointsDir = getEndpointsDir();
+        if (endpointsDir == null) {
+            throw new IOException("endpoints dir unavailable");
+        }
+
+        String safeStem = String.valueOf(endpointName == null ? "" : endpointName).trim().replaceAll("[^a-zA-Z0-9._-]", "-");
+        if (safeStem.isEmpty()) {
+            throw new IOException("invalid endpoint name");
+        }
+
+        File projectDir = new File(endpointsDir, safeStem);
+        Integer preservedPosition = overwrite ? readStoredEndpointPosition(projectDir) : null;
+        if (!overwrite && projectDir.exists()) {
+            throw new IOException("endpoint '" + safeStem + "' already exists");
+        }
+
+        File tempProjectDir = new File(endpointsDir, ".transfer-" + safeStem + "-" + UUID.randomUUID());
+        if (!tempProjectDir.mkdirs()) {
+            throw new IOException("unable to create temp endpoint directory");
+        }
+
+        try {
+            writeTextFile(new File(tempProjectDir, "boot.ts"), content);
+            writeTextFile(new File(tempProjectDir, "event.ts"), "export type { Event, ReactorEvent, WatchEvent, MessageEvent, StreamEvent, StreamEndEvent, ScheduleEvent, RuntimeEvent, ManualEvent } from 'core';\n");
+            writeTextFile(new File(tempProjectDir, "package.json"), buildTransferredPackageJson(safeStem));
+            finalizeTransferredEndpointProject(safeStem, tempProjectDir, overwrite, preservedPosition);
+        } catch (Exception error) {
+            deleteDirectoryRecursive(tempProjectDir);
+            throw error;
+        }
+    }
+
+    private void saveTransferredEndpointArchive(String endpointName, File archiveFile, boolean overwrite) throws Exception {
+        File endpointsDir = getEndpointsDir();
+        if (endpointsDir == null) {
+            throw new IOException("endpoints dir unavailable");
+        }
+
+        String safeStem = String.valueOf(endpointName == null ? "" : endpointName).trim().replaceAll("[^a-zA-Z0-9._-]", "-");
+        if (safeStem.isEmpty()) {
+            throw new IOException("invalid endpoint name");
+        }
+
+        if (archiveFile == null || !archiveFile.exists() || !archiveFile.isFile()) {
+            throw new IOException("invalid transferred endpoint project");
+        }
+
+        File projectDir = new File(endpointsDir, safeStem);
+        Integer preservedPosition = overwrite ? readStoredEndpointPosition(projectDir) : null;
+        if (!overwrite && projectDir.exists()) {
+            throw new IOException("endpoint '" + safeStem + "' already exists");
+        }
+
+        File tempProjectDir = new File(endpointsDir, ".transfer-" + safeStem + "-" + UUID.randomUUID());
+        if (!tempProjectDir.mkdirs()) {
+            throw new IOException("unable to create temp endpoint directory");
+        }
+
+        boolean hasBootFile = false;
+        try {
+            try (ZipInputStream input = new ZipInputStream(new BufferedInputStream(new FileInputStream(archiveFile)))) {
+                ZipEntry entry;
+                byte[] buffer = new byte[8192];
+                while ((entry = input.getNextEntry()) != null) {
+                    String relativePath = String.valueOf(entry.getName() == null ? "" : entry.getName())
+                            .replace('\\', '/')
+                            .replaceAll("^/+", "");
+                    if (relativePath.isEmpty()) {
+                        input.closeEntry();
+                        continue;
+                    }
+
+                    String[] pathParts = relativePath.split("/");
+                    String lastPart = pathParts.length == 0 ? "" : pathParts[pathParts.length - 1];
+                    if ("activity.log".equals(lastPart)) {
+                        input.closeEntry();
+                        continue;
+                    }
+
+                    File target = new File(tempProjectDir, relativePath);
+                    String targetKey = canonicalPathKey(target);
+                    String rootKey = canonicalPathKey(tempProjectDir);
+                    if (!targetKey.equals(rootKey) && !targetKey.startsWith(rootKey + File.separator)) {
+                        throw new IOException("invalid transferred file path: " + relativePath);
+                    }
+
+                    if (entry.isDirectory()) {
+                        if (!target.exists() && !target.mkdirs()) {
+                            throw new IOException("unable to create directory for transferred endpoint");
+                        }
+                        input.closeEntry();
+                        continue;
+                    }
+
+                    File parent = target.getParentFile();
+                    if (parent != null && !parent.exists() && !parent.mkdirs()) {
+                        throw new IOException("unable to create file parent for transferred endpoint");
+                    }
+
+                    try (FileOutputStream output = new FileOutputStream(target, false)) {
+                        int read;
+                        while ((read = input.read(buffer)) != -1) {
+                            output.write(buffer, 0, read);
+                        }
+                        output.flush();
+                    }
+
+                    if ("boot.ts".equals(relativePath)) {
+                        hasBootFile = true;
+                    }
+                    input.closeEntry();
+                }
+            }
+
+            if (!hasBootFile) {
+                throw new IOException("invalid transferred endpoint project");
+            }
+
+            finalizeTransferredEndpointProject(safeStem, tempProjectDir, overwrite, preservedPosition);
+        } catch (Exception error) {
+            deleteDirectoryRecursive(tempProjectDir);
+            throw error;
+        }
+    }
+
+    private void writeTextFileRaw(File file, String content) throws Exception {
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(file);
+             java.io.OutputStreamWriter writer = new java.io.OutputStreamWriter(fos, StandardCharsets.UTF_8)) {
+            writer.write(content);
+        }
+    }
+
+    private void deleteDirectoryRecursive(File dir) {
+        if (dir == null || !dir.exists()) {
+            return;
+        }
+        File[] children = dir.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                if (child.isDirectory()) {
+                    deleteDirectoryRecursive(child);
+                } else {
+                    child.delete();
+                }
+            }
+        }
+        dir.delete();
+    }
+
+    private boolean handleIncomingEndpointTransferStream(String phase, Map<String, String> streamEventContext) {
+        String action = String.valueOf(streamEventContext.getOrDefault("event.metadata.action", "")).trim();
+        String systemFlag = String.valueOf(streamEventContext.getOrDefault("event.metadata.__reactorSystem", "")).trim().toLowerCase(Locale.ROOT);
+        if (!"endpoint-transfer-stream".equals(action) || !"true".equals(systemFlag)) {
+            return false;
+        }
+
+        if (!"end".equals(String.valueOf(phase).trim().toLowerCase(Locale.ROOT))) {
+            return true;
+        }
+
+        String requestId = String.valueOf(streamEventContext.getOrDefault("event.metadata.requestId", "")).trim();
+        String endpointName = String.valueOf(streamEventContext.getOrDefault("event.metadata.endpointName", "")).trim();
+        String tmpPath = String.valueOf(streamEventContext.getOrDefault("event.tmpPath", "")).trim();
+        if (!requestId.isEmpty() && pendingOutgoingTransfers.containsKey(requestId)) {
+            logTransfer("stream ignored local-echo requestId=" + requestId + " endpoint=" + (endpointName.isEmpty() ? "-" : endpointName) + " tmpPath=" + tmpPath);
+            File tmpEchoFile = tmpPath.isEmpty() ? null : new File(tmpPath);
+            if (tmpEchoFile != null && tmpEchoFile.exists()) {
+                tmpEchoFile.delete();
+            }
+            return true;
+        }
+        boolean overwrite = !requestId.isEmpty() && pendingOverwriteApprovals.remove(requestId);
+        File archiveFile = tmpPath.isEmpty() ? null : new File(tmpPath);
+        logTransfer("stream received requestId=" + (requestId.isEmpty() ? "-" : requestId) + " endpoint=" + (endpointName.isEmpty() ? "-" : endpointName) + " phase=" + phase + " tmpPath=" + tmpPath + " overwrite=" + overwrite);
+
+        try {
+            saveTransferredEndpointArchive(endpointName, archiveFile, overwrite);
+            logTransfer("stream applied requestId=" + (requestId.isEmpty() ? "-" : requestId) + " endpoint=" + endpointName + " status=ok");
+            SystemMessageListener listener = systemMessageListener;
+            if (listener != null && !requestId.isEmpty()) {
+                listener.onTransferComplete(requestId, true, endpointName, null);
+            }
+        } catch (Exception error) {
+            logTransfer("stream apply failed requestId=" + (requestId.isEmpty() ? "-" : requestId) + " endpoint=" + (endpointName.isEmpty() ? "-" : endpointName) + " error=" + (error.getMessage() != null ? error.getMessage() : "save failed"));
+            SystemMessageListener listener = systemMessageListener;
+            if (listener != null && !requestId.isEmpty()) {
+                listener.onTransferComplete(requestId, false, endpointName, error.getMessage());
+            }
+        } finally {
+            if (archiveFile != null && archiveFile.exists()) {
+                logTransfer("cleanup temp stream file path=" + archiveFile.getAbsolutePath());
+                archiveFile.delete();
+            }
+        }
+
+        return true;
+    }
+
+    public static JSObject respondToEndpointTransfer(String requestId, boolean approved) {
+        ReactorHttpService current = instance;
+        if (current == null) {
+            return new JSObject().put("ok", false).put("error", "service not running");
+        }
+        JSONObject pending = pendingIncomingTransfers.remove(requestId);
+        if (pending == null) {
+            current.logTransfer("response ignored requestId=" + requestId + " reason=request-not-found");
+            return new JSObject().put("ok", false).put("error", "transfer request not found or expired");
+        }
+        try {
+            String fromNode = pending.optString("fromNode", "");
+            boolean nameConflict = pending.optBoolean("nameConflict", false);
+            current.logTransfer("response outbound requestId=" + requestId + " from=" + fromNode + " endpoint=" + pending.optString("endpointName", "") + " approved=" + approved + " conflict=" + nameConflict);
+            if (approved && nameConflict) {
+                pendingOverwriteApprovals.add(requestId);
+            }
+            current.sendSystemMessage(fromNode, current.buildTransferResponse(requestId, approved, approved ? "" : "rejected by user"));
+            return new JSObject().put("ok", true);
+        } catch (Exception error) {
+            return new JSObject().put("ok", false).put("error", error.getMessage());
+        }
+    }
+
+    public static JSObject initiateEndpointTransfer(String targetNode, String endpointPath, boolean keepCopy, long timeoutMs) {
+        ReactorHttpService current = instance;
+        if (current == null) {
+            return new JSObject().put("ok", false).put("error", "service not running");
+        }
+        current.logTransfer("init requested target=" + String.valueOf(targetNode) + " endpointPath=" + String.valueOf(endpointPath) + " keepCopy=" + keepCopy + " timeoutMs=" + timeoutMs);
+        try {
+            File file = new File(endpointPath);
+            if (!file.exists() || !file.isFile()) {
+                return new JSObject().put("ok", false).put("error", "endpoint file not found");
+            }
+            JSObject transferPackage = current.prepareEndpointTransferPackage(file);
+            String endpointName = transferPackage.getString("endpointName", "");
+
+            String requestId = UUID.randomUUID().toString().toLowerCase(Locale.ROOT);
+
+            // Store pending outgoing transfer
+            JSObject pendingEntry = new JSObject();
+            pendingEntry.put("endpointName", endpointName);
+            pendingEntry.put("endpointPath", endpointPath);
+            pendingEntry.put("archivePath", transferPackage.getString("archivePath", ""));
+            pendingEntry.put("archiveSize", transferPackage.optLong("archiveSize", 0L));
+            pendingEntry.put("sourceProjectPath", transferPackage.getString("sourceProjectPath", ""));
+            pendingEntry.put("stagedProjectPath", transferPackage.getString("stagedProjectPath", ""));
+            pendingEntry.put("keepCopy", keepCopy);
+            pendingOutgoingTransfers.put(requestId, pendingEntry);
+            current.logTransfer("request sending requestId=" + requestId + " endpoint=" + endpointName + " to=" + String.valueOf(targetNode).trim().toLowerCase(Locale.ROOT));
+
+            // Send request
+            JSONObject requestMsg = new JSONObject();
+            requestMsg.put("__reactorSystem", true);
+            requestMsg.put("action", "endpoint-transfer-request");
+            requestMsg.put("requestId", requestId);
+            requestMsg.put("endpointName", endpointName);
+            requestMsg.put("contentSize", transferPackage.optLong("archiveSize", 0L));
+            current.sendSystemMessage(targetNode, requestMsg);
+
+            // Wait for outcome (via systemMessageListener callback)
+            // For the synchronous plugin call we use a CountDownLatch
+            final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+            final JSObject[] resultHolder = { null };
+
+            SystemMessageListener prevListener = systemMessageListener;
+            systemMessageListener = new SystemMessageListener() {
+                @Override
+                public void onTransferRequest(String reqId, String fromNode, String endpointNameIn, long contentSizeIn, boolean nameConflict) {
+                    if (prevListener != null) {
+                        prevListener.onTransferRequest(reqId, fromNode, endpointNameIn, contentSizeIn, nameConflict);
+                    }
+                }
+
+                @Override
+                public void onTransferComplete(String reqId, boolean ok, String endpointNameIn, String error) {
+                    if (reqId.equals(requestId)) {
+                        systemMessageListener = prevListener;
+                        JSObject res = new JSObject();
+                        res.put("ok", ok);
+                        res.put("endpointName", endpointNameIn);
+                        if (error != null) {
+                            res.put("error", error);
+                        }
+                        resultHolder[0] = res;
+                        latch.countDown();
+                    } else if (prevListener != null) {
+                        prevListener.onTransferComplete(reqId, ok, endpointNameIn, error);
+                    }
+                }
+            };
+
+            boolean completed = latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (!completed) {
+                systemMessageListener = prevListener;
+                current.cleanupPendingEndpointTransferArtifacts(pendingEntry);
+                pendingOutgoingTransfers.remove(requestId);
+                current.logTransfer("request timeout requestId=" + requestId + " endpoint=" + endpointName + " to=" + String.valueOf(targetNode).trim().toLowerCase(Locale.ROOT));
+                return new JSObject().put("ok", false).put("error", "transfer request timed out");
+            }
+            current.logTransfer("request completed requestId=" + requestId + " endpoint=" + endpointName + " ok=" + (resultHolder[0] != null && resultHolder[0].getBool("ok")));
+            return resultHolder[0] != null ? resultHolder[0] : new JSObject().put("ok", false).put("error", "unknown transfer error");
+        } catch (Exception error) {
+            current.logTransfer("init failed target=" + String.valueOf(targetNode) + " endpointPath=" + String.valueOf(endpointPath) + " error=" + (error.getMessage() != null ? error.getMessage() : "transfer failed"));
+            return new JSObject().put("ok", false).put("error", error.getMessage() != null ? error.getMessage() : "transfer failed");
+        }
+    }
+
+    private static String readTextFileStatic(File file) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        try (java.io.FileInputStream fis = new java.io.FileInputStream(file);
+             java.io.InputStreamReader reader = new java.io.InputStreamReader(fis, StandardCharsets.UTF_8);
+             java.io.BufferedReader br = new java.io.BufferedReader(reader)) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+        }
+        return sb.toString();
     }
 
     public static JSObject getOutgoingQueueStatus() {
@@ -1962,6 +2891,21 @@ public class ReactorHttpService extends Service {
                 Map<String, String> streamEventContext = streamEnvelope
                     ? buildIncomingStreamEventContext(streamSenderKey, streamPayload)
                     : new HashMap<>();
+                boolean handledSystemTransfer = streamEnvelope && handleIncomingEndpointTransferStream(streamPhase, streamEventContext);
+                if (handledSystemTransfer) {
+                    JSONObject payload = new JSONObject();
+                    payload.put("ok", true);
+                    payload.put("trigger", primaryEvent);
+                    payload.put("delivered", false);
+                    payload.put("reason", "system transfer handled");
+                    payload.put("endpoints", new JSONArray());
+                    payload.put("deliveredCount", 0);
+                    payload.put("streamEndEndpoints", new JSONArray());
+                    payload.put("streamEndDeliveredCount", 0);
+                    payload.put("senderCandidates", new JSONArray(senderCandidates));
+                    writeJsonResponse(client, 200, payload.toString());
+                    return;
+                }
                 JSONArray deliveredEndpoints = new JSONArray();
                 JSONArray streamEndEndpoints = new JSONArray();
                 int deliveredCount = 0;
@@ -2199,13 +3143,16 @@ public class ReactorHttpService extends Service {
         return triggers;
     }
 
+    private File getEndpointsDir() {
+        return new File(getFilesDir(), "endpoints");
+    }
+
     private JSONArray buildDiscoveryEndpointsPayload() {
         JSONArray endpoints = new JSONArray();
         File projectsDir = new File(getFilesDir(), "endpoints");
         if (!projectsDir.exists() || !projectsDir.isDirectory()) {
             return endpoints;
         }
-
         File[] children = projectsDir.listFiles();
         if (children == null) {
             return endpoints;
@@ -2516,6 +3463,13 @@ public class ReactorHttpService extends Service {
         List<MessageEndpoint> listeners = collectMessageEndpoints();
         Set<String> senderCandidates = resolveSenderCandidates(safeFromNode, safeFromNode, "");
         JSONObject streamPayload = tryParseJsonObject(parsedEnvelope.bodyText);
+
+        // Intercept system messages before dispatching to endpoint listeners
+        if (streamPayload != null && streamPayload.optBoolean("__reactorSystem", false)) {
+            handleIncomingSystemMessage(streamPayload, safeFromNode);
+            return;
+        }
+
         boolean streamEnvelope = isStreamEnvelope(streamPayload);
         String streamPhase = streamEnvelope
                 ? streamPayload.optString("phase", "").trim().toLowerCase(Locale.ROOT)
@@ -2524,6 +3478,10 @@ public class ReactorHttpService extends Service {
         Map<String, String> streamEventContext = streamEnvelope
             ? buildIncomingStreamEventContext(safeFromNode, streamPayload)
             : new HashMap<>();
+        boolean handledSystemTransfer = streamEnvelope && handleIncomingEndpointTransferStream(streamPhase, streamEventContext);
+        if (handledSystemTransfer) {
+            return;
+        }
         Map<String, String> effectiveHeaders = streamEnvelope
                 ? withStreamHeaders(headers, streamPayload, primaryEvent)
                 : new HashMap<>(headers);
@@ -2706,6 +3664,11 @@ public class ReactorHttpService extends Service {
         String key = buildIncomingStreamKey(senderKey, streamId);
         context.put("event.streamId", streamId);
 
+        JSONObject immediateMetadata = streamPayload.optJSONObject("metadata");
+        if (immediateMetadata != null) {
+            appendMetadataContext(context, "event.metadata", immediateMetadata);
+        }
+
         if ("start".equals(phase)) {
             try {
                 File dir = getIncomingStreamsDirectory();
@@ -2740,6 +3703,10 @@ public class ReactorHttpService extends Service {
             } catch (Exception ignored) {
                 // Best effort stream cache.
             }
+            IncomingStreamState startedState = incomingStreams.get(key);
+            if (startedState != null && startedState.metadata != null) {
+                appendMetadataContext(context, "event.metadata", startedState.metadata);
+            }
             return context;
         }
 
@@ -2765,6 +3732,9 @@ public class ReactorHttpService extends Service {
                 state.chunks += 1;
             } catch (Exception ignored) {
                 // Ignore malformed chunks.
+            }
+            if (state.metadata != null) {
+                appendMetadataContext(context, "event.metadata", state.metadata);
             }
             return context;
         }
@@ -7375,6 +8345,14 @@ public class ReactorHttpService extends Service {
 
             appendGlobalLog(buildExchangeLog("MESSAGE_RECEIVED", "message from " + from + " via exchange"));
 
+            // Intercept system messages before dispatching to endpoint listeners.
+            // Check regardless of content-type: sendViaExchange sends JSON as text/plain.
+            JSONObject maybeSystem = tryParseJsonObject(content);
+            if (maybeSystem != null && maybeSystem.optBoolean("__reactorSystem", false)) {
+                handleIncomingSystemMessage(maybeSystem, from);
+                return;
+            }
+
             List<MessageEndpoint> listeners = collectMessageEndpoints();
             Set<String> senderCandidates = resolveSenderCandidates(from, from, "");
             JSONObject streamPayload = tryParseJsonObject(content);
@@ -7386,6 +8364,13 @@ public class ReactorHttpService extends Service {
                 Map<String, String> streamEventContext = streamEnvelope
                     ? buildIncomingStreamEventContext(String.valueOf(from).trim().toLowerCase(Locale.ROOT), streamPayload)
                     : new HashMap<>();
+
+            // Handle system endpoint-transfer streams regardless of endpoint listeners.
+            boolean handledSystemTransfer = streamEnvelope && handleIncomingEndpointTransferStream(streamPhase, streamEventContext);
+            if (handledSystemTransfer) {
+                return;
+            }
+
                 int deliveredCount = 0;
 
             Map<String, String> headers = new HashMap<>();
@@ -7917,6 +8902,10 @@ public class ReactorHttpService extends Service {
         entry.put("message", message);
         entry.put("exchangeMode", currentExchangeMode);
         return entry.toString();
+    }
+
+    private void logTransfer(String message) {
+        appendGlobalLog(buildExchangeLog("TRANSFER", message));
     }
 
     private String readTextFile(File file) throws IOException {

@@ -158,6 +158,7 @@ public class ReactorMobilePlugin extends Plugin {
             notifyListeners("p2pStatus", payload);
         });
         ReactorHttpService.setExchangeConnectionStatusListener(() -> emitExchangeStatusToUi("exchange-status-changed"));
+        setupSystemMessageListener();
         ensureEndpointTemplatesPresent();
         ensureHttpServerRunning();
         emitExchangeStatusToUi("plugin-load");
@@ -167,6 +168,7 @@ public class ReactorMobilePlugin extends Plugin {
     protected void handleOnDestroy() {
         ReactorHttpService.setP2PStatusListener(null);
         ReactorHttpService.setExchangeConnectionStatusListener(null);
+        ReactorHttpService.setSystemMessageListener(null);
         super.handleOnDestroy();
     }
 
@@ -205,6 +207,70 @@ public class ReactorMobilePlugin extends Plugin {
         } catch (Exception ignored) {
             // Best-effort profile refresh.
         }
+    }
+
+    private void setupSystemMessageListener() {
+        ReactorHttpService.setSystemMessageListener(new ReactorHttpService.SystemMessageListener() {
+            @Override
+            public void onTransferRequest(String requestId, String fromNode, String endpointName, long contentSize, boolean nameConflict) {
+                JSObject payload = new JSObject();
+                payload.put("requestId", requestId);
+                payload.put("fromNode", fromNode);
+                payload.put("endpointName", endpointName);
+                payload.put("contentSize", contentSize);
+                payload.put("nameConflict", nameConflict);
+                notifyListeners("transferRequest", payload);
+            }
+
+            @Override
+            public void onTransferComplete(String requestId, boolean ok, String endpointName, String error) {
+                JSObject payload = new JSObject();
+                payload.put("requestId", requestId);
+                payload.put("ok", ok);
+                payload.put("endpointName", endpointName);
+                if (error != null) {
+                    payload.put("error", error);
+                }
+                notifyListeners("transferComplete", payload);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void respondToEndpointTransfer(PluginCall call) {
+        String requestId = call.getString("requestId", "").trim();
+        boolean approved = call.getBoolean("approved", false);
+        if (requestId.isEmpty()) {
+            call.resolve(new JSObject().put("ok", false).put("error", "invalid requestId"));
+            return;
+        }
+        // Implementation is handled by ReactorHttpService; here we just call service
+        try {
+            JSObject result = ReactorHttpService.respondToEndpointTransfer(requestId, approved);
+            call.resolve(result);
+        } catch (Exception error) {
+            call.resolve(new JSObject().put("ok", false).put("error", error.getMessage()));
+        }
+    }
+
+    @PluginMethod
+    public void initiateEndpointTransfer(PluginCall call) {
+        call.setKeepAlive(true);
+        String targetNode = call.getString("targetNode", "").trim().toLowerCase(Locale.ROOT);
+        String endpointPath = call.getString("endpointPath", "").trim();
+        boolean keepCopy = call.getBoolean("keepCopy", true);
+        if (targetNode.isEmpty() || endpointPath.isEmpty()) {
+            call.resolve(new JSObject().put("ok", false).put("error", "targetNode and endpointPath are required"));
+            return;
+        }
+        new Thread(() -> {
+            try {
+                JSObject result = ReactorHttpService.initiateEndpointTransfer(targetNode, endpointPath, keepCopy, 30000L);
+                call.resolve(result);
+            } catch (Exception error) {
+                call.resolve(new JSObject().put("ok", false).put("error", error.getMessage() != null ? error.getMessage() : "transfer failed"));
+            }
+        }, "reactor-endpoint-transfer").start();
     }
 
     private void setConfiguredHttpPort(int port) {

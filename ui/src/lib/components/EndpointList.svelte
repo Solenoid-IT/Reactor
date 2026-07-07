@@ -14,6 +14,7 @@
 	export let onClearLog = () => {};
 	export let onCopyId = () => {};
 	export let onReorder = () => {};
+	export let onTransfer = () => {};
 
 	let draggingIndex = -1;
 
@@ -134,6 +135,7 @@
 					<button class="item-action-btn test" on:click|stopPropagation={() => onRun(index)}><i class="fa-solid fa-play"></i><span class="item-action-label">Test</span></button>
 					<button class="item-action-btn" on:click|stopPropagation={() => onOpenLog(index)}><i class="fa-solid fa-magnifying-glass"></i><span class="item-action-label">View Log</span></button>
 					<button class="item-action-btn" on:click|stopPropagation={() => onClearLog(index)}><i class="fa-solid fa-list"></i><span class="item-action-label">Clear Log</span></button>
+					<button class="item-action-btn" title="Transfer to remote node" on:click|stopPropagation={() => onTransfer(index)}><i class="fa-solid fa-arrow-right-arrow-left"></i><span class="item-action-label">Transfer</span></button>
 				</div>
 			</div>
 		{/each}

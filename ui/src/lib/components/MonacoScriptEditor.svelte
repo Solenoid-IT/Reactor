@@ -1,6 +1,7 @@
 <script>
 	import { onMount, onDestroy } from 'svelte';
 	import Modal from '$lib/components/Modal.svelte';
+	import { copyTextToClipboard } from '$lib/reactorApi';
 	import reactorApiTypes from '$lib/monaco/reactor-api.d.ts?raw';
 	import './editor-modal.css';
 
@@ -212,6 +213,32 @@
 		}
 		onClose();
 	}
+
+	async function copyNow() {
+		const source = String((editor ? editor.getValue() : currentContent) || '');
+
+		try {
+			if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+				await navigator.clipboard.writeText(source);
+				return;
+			}
+		} catch {
+			// Fallback below.
+		}
+
+		try {
+			const result = await copyTextToClipboard(source);
+			if (result?.ok) {
+				return;
+			}
+		} catch {
+			// Fallback below.
+		}
+
+		if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
+			window.prompt('Copy code', source);
+		}
+	}
 </script>
 
 <Modal
@@ -234,7 +261,7 @@
 			{#if dirty}
 				<span class="monaco-dirty">Unsaved</span>
 			{/if}
-			<button class="btn-secondary" on:click={closeNow}>Close</button>
+			<button class="btn-secondary" on:click={copyNow}>Copy</button>
 			<button class="btn-primary" on:click={saveNow} disabled={!dirty || savePending}>Save</button>
 		</div>
 	</div>

@@ -135,6 +135,8 @@ class ExchangeManager {
 		this._socketClientMeta = new WeakMap();
 		this._serverPendingBinaryChunkMeta = new WeakMap();
 		this._clientPendingBinaryChunkMeta = [];
+		this._clientPendingBinaryFrames = [];
+		this._clientDeliveredBinaryMeta = new Map();
 		this._clientLastError = '';
 		this._clientLastCloseReason = '';
 		this._clientLastCloseCode = 0;
@@ -1241,6 +1243,63 @@ class ExchangeManager {
 		}
 	}
 
+	_handleClientIncomingBinaryChunk(meta, data) {
+		const binaryChunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+		const payload = {
+			__reactorStream: true,
+			phase: 'chunk',
+			streamId: String(meta.streamId || ''),
+			index: Number.isFinite(Number(meta.index)) ? Number(meta.index) : -1,
+			size: binaryChunk.length,
+			encoding: 'binary',
+			binary: binaryChunk,
+		};
+
+		const sender = String(meta.from || 'unknown');
+		this._rememberDeliveredClientBinaryMeta(meta);
+		this.runtime.log(`[TRANSFER] exchange binary chunk received from=${sender} streamId=${payload.streamId || '-'} index=${payload.index} bytes=${binaryChunk.length}`);
+		this._handleIncomingStreamEnvelope(sender, payload, '', 'application/octet-stream');
+	}
+
+	_makeClientBinaryMetaKey(meta) {
+		if (!meta || typeof meta !== 'object') {
+			return '';
+		}
+		const streamId = String(meta.streamId || '').trim();
+		const index = Number.isFinite(Number(meta.index)) ? Number(meta.index) : -1;
+		if (!streamId || index < 0) {
+			return '';
+		}
+		return `${streamId}:${index}`;
+	}
+
+	_cleanupDeliveredClientBinaryMeta(nowMs = Date.now()) {
+		const ttlMs = 30 * 1000;
+		for (const [key, timestamp] of this._clientDeliveredBinaryMeta.entries()) {
+			if (!Number.isFinite(Number(timestamp)) || (nowMs - Number(timestamp)) > ttlMs) {
+				this._clientDeliveredBinaryMeta.delete(key);
+			}
+		}
+	}
+
+	_rememberDeliveredClientBinaryMeta(meta) {
+		this._cleanupDeliveredClientBinaryMeta();
+		const key = this._makeClientBinaryMetaKey(meta);
+		if (!key) {
+			return;
+		}
+		this._clientDeliveredBinaryMeta.set(key, Date.now());
+	}
+
+	_wasClientBinaryMetaRecentlyDelivered(meta) {
+		this._cleanupDeliveredClientBinaryMeta();
+		const key = this._makeClientBinaryMetaKey(meta);
+		if (!key) {
+			return false;
+		}
+		return this._clientDeliveredBinaryMeta.has(key);
+	}
+
 	// ---------------------------------------------------------------------------
 	// EXCHANGE CLIENT — bootstrap su POST /register, poi connessione WS /ws?sessionId=...
 	// ---------------------------------------------------------------------------
@@ -1283,6 +1342,9 @@ class ExchangeManager {
 					this._clientLastCloseCode = 0;
 					this._clientConnectedAt = Date.now();
 					this._clientLastPongAt = Date.now();
+					this._clientPendingBinaryChunkMeta = [];
+					this._clientPendingBinaryFrames = [];
+					this._clientDeliveredBinaryMeta.clear();
 					this._emitConnectionStatus('exchange-open');
 					this._startClientHeartbeat(ws);
 					try {
@@ -1302,23 +1364,13 @@ class ExchangeManager {
 					if (isBinary) {
 						const meta = this._clientPendingBinaryChunkMeta.shift();
 						if (!meta) {
-							this.runtime.log('[Exchange] Received binary frame without metadata, dropping');
+							const buffered = Buffer.isBuffer(data) ? data : Buffer.from(data);
+							this._clientPendingBinaryFrames.push(buffered);
+							this.runtime.log(`[TRANSFER] exchange binary frame queued awaiting metadata bytes=${buffered.length} pending=${this._clientPendingBinaryFrames.length}`);
 							return;
 						}
 
-						const binaryChunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
-						const payload = {
-							__reactorStream: true,
-							phase: 'chunk',
-							streamId: String(meta.streamId || ''),
-							index: Number.isFinite(Number(meta.index)) ? Number(meta.index) : -1,
-							size: binaryChunk.length,
-							encoding: 'binary',
-							binary: binaryChunk,
-						};
-
-						const sender = String(meta.from || 'unknown');
-						this._handleIncomingStreamEnvelope(sender, payload, '', 'application/octet-stream');
+						this._handleClientIncomingBinaryChunk(meta, data);
 						return;
 					}
 
@@ -1335,7 +1387,19 @@ class ExchangeManager {
 						this._emitConnectionStatus('exchange-registered');
 					}
 					if (packet && packet.type === 'stream-chunk-bin') {
-						this._clientPendingBinaryChunkMeta.push(packet);
+						if (this._wasClientBinaryMetaRecentlyDelivered(packet)) {
+							this.runtime.log(`[TRANSFER] exchange duplicate binary metadata ignored from=${String(packet.from || 'unknown')} streamId=${String(packet.streamId || '')} index=${Number.isFinite(Number(packet.index)) ? Number(packet.index) : -1}`);
+							return;
+						}
+
+						const pendingFrame = this._clientPendingBinaryFrames.shift();
+						if (pendingFrame) {
+							this.runtime.log(`[TRANSFER] exchange metadata matched delayed binary from=${String(packet.from || 'unknown')} streamId=${String(packet.streamId || '')} index=${Number.isFinite(Number(packet.index)) ? Number(packet.index) : -1}`);
+							this._handleClientIncomingBinaryChunk(packet, pendingFrame);
+						} else {
+							this._clientPendingBinaryChunkMeta.push(packet);
+							this.runtime.log(`[TRANSFER] exchange binary metadata queued from=${String(packet.from || 'unknown')} streamId=${String(packet.streamId || '')} index=${Number.isFinite(Number(packet.index)) ? Number(packet.index) : -1} pending=${this._clientPendingBinaryChunkMeta.length}`);
+						}
 					}
 					if (packet && packet.type === 'auth-error') {
 						this.runtime.log(`[Exchange] Authentication failed: ${packet.error || 'invalid exchange token'}`);
@@ -1363,6 +1427,9 @@ class ExchangeManager {
 					this._stopClientHeartbeat();
 					this.wsClient = null;
 					this._knownRemotePeers.clear();
+					this._clientPendingBinaryChunkMeta = [];
+					this._clientPendingBinaryFrames = [];
+					this._clientDeliveredBinaryMeta.clear();
 					this._clientConnectedAt = 0;
 					this._clientRegistered = false;
 					this._clientLastCloseCode = Number(code) || 0;
@@ -1539,6 +1606,14 @@ class ExchangeManager {
 			return;
 		}
 
+		const isSystemMessage = Boolean(messageJson && typeof messageJson === 'object' && messageJson.__reactorSystem === true);
+		if (isSystemMessage) {
+			if (this.runtime && typeof this.runtime.handleIncomingSystemMessage === 'function') {
+				this.runtime.handleIncomingSystemMessage(messageJson, from).catch(() => {});
+			}
+			return;
+		}
+
 		this.runtime.log(`[Exchange] Message from: ${from}`);
 		const targetEndpointSelector = String(packet.targetEndpoint || '').trim().toLowerCase() || null;
 		const targetEndpointId = String(packet.targetEndpointId || '').trim().toLowerCase() || null;
@@ -1634,6 +1709,17 @@ class ExchangeManager {
 				const streamEndData = this.runtime && typeof this.runtime.processIncomingStreamPacket === 'function'
 					? await this.runtime.processIncomingStreamPacket(streamPacket, senderMeta)
 					: null;
+
+				const systemStreamMetadata = this.runtime && typeof this.runtime.resolveSystemEndpointTransferMetadata === 'function'
+					? this.runtime.resolveSystemEndpointTransferMetadata(streamPacket, senderMeta, streamEndData)
+					: null;
+
+				if (systemStreamMetadata) {
+					if (streamEndData && this.runtime && typeof this.runtime.handleIncomingEndpointTransferStream === 'function') {
+						await this.runtime.handleIncomingEndpointTransferStream(streamEndData);
+					}
+					return;
+				}
 
 				await Promise.allSettled(
 					listeners.map((endpoint) =>
