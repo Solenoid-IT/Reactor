@@ -16,14 +16,14 @@ Generate a self-signed certificate into `cert/` from the host repo checkout:
 
 ```bash
 cd coturn-server
-node coturnctl.js generate-tls-cert --bits 4096 --days 3650
+node daemonctl.js generate-tls-cert --bits 4096 --days 3650
 ```
 
 Generate a Let's Encrypt signed certificate (webroot challenge) from the host repo checkout:
 
 ```bash
 cd coturn-server
-node coturnctl.js generate-tls-cert --signed --cn example.com --domain www.example.com --webroot /var/www/html --bits 4096
+node daemonctl.js generate-tls-cert --signed --cn example.com --domain www.example.com --webroot /var/www/html --bits 4096
 ```
 
 Requirements for signed mode:

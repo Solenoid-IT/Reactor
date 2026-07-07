@@ -51,7 +51,7 @@ Notes:
 The preferred path is to run the CLI from the host repo checkout so the certificate lands in `coturn-server/cert/` and the container can be restarted automatically when Docker Compose is available:
 
 ```bash
-cd coturn-server && node coturnctl.js generate-tls-cert --bits 2048 --days 3650
+cd coturn-server && node daemonctl.js generate-tls-cert --bits 2048 --days 3650
 ```
 
 If you prefer to generate the certificate directly inside the running coturn container, use the OpenSSL one-liner below and then recreate the service:

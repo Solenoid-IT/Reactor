@@ -6,9 +6,9 @@ const { TlsManager } = require('./src/tlsManager');
 
 function usage() {
 	console.log('Usage:');
-	console.log('  node coturnctl.js generate-tls-cert [--cn <name>] [--bits <1024-8192>] [--days <1-36500>]');
-	console.log('  node coturnctl.js generate-tls-cert --signed [--cn <primary-domain>] [--domain <domain>] [--webroot <path>] [--bits <1024-8192>]');
-	console.log('  node coturnctl.js fix-tls-perms');
+	console.log('  node daemonctl.js generate-tls-cert [--cn <name>] [--bits <1024-8192>] [--days <1-36500>]');
+	console.log('  node daemonctl.js generate-tls-cert --signed [--cn <primary-domain>] [--domain <domain>] [--webroot <path>] [--bits <1024-8192>]');
+	console.log('  node daemonctl.js fix-tls-perms');
 	process.exit(1);
 }
 
@@ -96,22 +96,22 @@ function extractGenerateCertArgs(args) {
 	}
 
 	if (bits !== undefined && (!Number.isInteger(bits) || bits < 1024 || bits > 8192)) {
-		console.error('[coturnctl] generate-tls-cert: --bits must be an integer between 1024 and 8192');
+		console.error('[daemonctl] generate-tls-cert: --bits must be an integer between 1024 and 8192');
 		process.exit(1);
 	}
 
 	if (days !== undefined && (!Number.isInteger(days) || days < 1 || days > 36500)) {
-		console.error('[coturnctl] generate-tls-cert: --days must be an integer between 1 and 36500');
+		console.error('[daemonctl] generate-tls-cert: --days must be an integer between 1 and 36500');
 		process.exit(1);
 	}
 
 	if (signed && days !== undefined) {
-		console.error('[coturnctl] generate-tls-cert: --days is only supported for self-signed certificates');
+		console.error('[daemonctl] generate-tls-cert: --days is only supported for self-signed certificates');
 		process.exit(1);
 	}
 
 	if (signed && !webroot) {
-		console.error('[coturnctl] generate-tls-cert: --webroot is required when --signed is used');
+		console.error('[daemonctl] generate-tls-cert: --webroot is required when --signed is used');
 		process.exit(1);
 	}
 
@@ -265,6 +265,6 @@ async function main() {
 }
 
 main().catch((error) => {
-	console.error(`[coturnctl] ${error.message}`);
+	console.error(`[daemonctl] ${error.message}`);
 	process.exit(1);
 });
