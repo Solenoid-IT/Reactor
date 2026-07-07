@@ -498,6 +498,14 @@ class P2PDataChannelManager {
 
 		this.sessions.delete(safeTarget);
 	}
+
+	closeAllSessions() {
+		const targets = Array.from(this.sessions.keys());
+		for (const target of targets) {
+			this.closeSession(target, false);
+		}
+		this.connecting.clear();
+	}
 }
 
 module.exports = {

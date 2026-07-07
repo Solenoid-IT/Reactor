@@ -3324,6 +3324,8 @@ public class ReactorMobilePlugin extends Plugin {
         int port = workingMode.getInteger("port", ReactorHttpService.DEFAULT_PORT);
         boolean tls = workingMode.has("tls") && workingMode.getBool("tls");
         String token = workingMode.getString("token", "").trim();
+        String user = workingMode.getString("user", "").trim();
+        String password = workingMode.getString("password", "");
 
         if (!"node".equals(mode)) {
             return new JSObject().put("ok", false).put("error", "available only in node mode").put("nodes", new JSArray()).put("total", 0);
@@ -3333,12 +3335,20 @@ public class ReactorMobilePlugin extends Plugin {
             return new JSObject().put("ok", false).put("error", "exchange host is not configured").put("nodes", new JSArray()).put("total", 0);
         }
 
-        if (token.isEmpty()) {
-            return new JSObject().put("ok", false).put("error", "exchange token is not configured").put("nodes", new JSArray()).put("total", 0);
+        if (token.isEmpty() && user.isEmpty()) {
+            return new JSObject().put("ok", false).put("error", "exchange credentials are not configured").put("nodes", new JSArray()).put("total", 0);
         }
 
         if (port < 1 || port > 65535) {
             port = ReactorHttpService.DEFAULT_PORT;
+        }
+
+        String authHeader;
+        if (!token.isEmpty()) {
+            authHeader = "Bearer " + token;
+        } else {
+            String credentials = user + ":" + password;
+            authHeader = "Basic " + android.util.Base64.encodeToString(credentials.getBytes(StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
         }
 
         String endpointUrl = (tls ? "https" : "http") + "://" + host + ":" + port + "/nodes";
@@ -3351,7 +3361,7 @@ public class ReactorMobilePlugin extends Plugin {
             connection.setConnectTimeout(5000);
             connection.setReadTimeout(5000);
             connection.setRequestProperty("Accept", "application/json");
-            connection.setRequestProperty("Authorization", "Bearer " + token);
+            connection.setRequestProperty("Authorization", authHeader);
 
             int status = connection.getResponseCode();
             String body = readHttpResponseBody(connection, status);
@@ -3452,6 +3462,8 @@ public class ReactorMobilePlugin extends Plugin {
         editor.putString(ReactorHttpService.PREF_EXCHANGE_PASSWORD, password != null ? password : "");
         editor.apply();
 
+        ReactorHttpService.resetAllP2PSessions();
+
         try {
             writeWorkingModeConfig(mode, host, port, tls, token, user, password, discovery, stun, turn);
         } catch (Exception ignored) {
@@ -3522,6 +3534,7 @@ public class ReactorMobilePlugin extends Plugin {
             result.put("kind", kind);
             result.put("config", nextRelay);
             result.put("test", test);
+            ReactorHttpService.resetAllP2PSessions();
             call.resolve(result);
         } catch (Exception error) {
             call.resolve(new JSObject().put("ok", false).put("error", error.getMessage() != null ? error.getMessage() : "unable to save relay config"));

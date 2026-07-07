@@ -806,6 +806,15 @@ public class ReactorHttpService extends Service {
         return new JSObject().put("ok", true).put("target", safeTarget).put("signal", signalResult != null ? signalResult : JSONObject.NULL);
     }
 
+    public static void resetAllP2PSessions() {
+        AndroidP2PWebRtcManager p2pManager = AndroidP2PWebRtcManager.getInstance(null);
+        if (p2pManager != null) {
+            p2pManager.closeAllSessions();
+        }
+        p2pSessions.clear();
+        emitP2PStatusUpdate();
+    }
+
     public static JSObject getOutgoingQueueStatus() {
         JSObject queue = new JSObject();
         if (instance == null) {

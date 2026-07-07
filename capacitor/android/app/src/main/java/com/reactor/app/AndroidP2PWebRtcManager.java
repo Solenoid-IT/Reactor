@@ -111,6 +111,16 @@ public final class AndroidP2PWebRtcManager {
         });
     }
 
+    public void closeAllSessions() {
+        executor.execute(() -> {
+            List<SessionState> toClose = new ArrayList<>(sessions.values());
+            sessions.clear();
+            for (SessionState session : toClose) {
+                closeSessionInternal(session, true);
+            }
+        });
+    }
+
     public JSObject startSession(String target, boolean initiator, RelayConfig relayConfig) {
         String safeTarget = normalizeTarget(target);
         if (safeTarget.isEmpty()) {

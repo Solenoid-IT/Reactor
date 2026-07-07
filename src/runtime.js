@@ -2736,6 +2736,16 @@ class ReactorRuntime {
 		};
 	}
 
+	resetAllP2PSessions() {
+		if (this.p2pTransportManager && typeof this.p2pTransportManager.closeAllSessions === 'function') {
+			this.p2pTransportManager.closeAllSessions();
+		}
+		this.p2pSessions.clear();
+		if (this.exchangeManager && this.exchangeManager._knownRemotePeers) {
+			this.exchangeManager._knownRemotePeers.clear();
+		}
+	}
+
 	async closeP2PSession(target, options = {}) {
 		const safeTarget = String(target || '').trim().toLowerCase();
 		if (!safeTarget) {
@@ -2818,6 +2828,7 @@ class ReactorRuntime {
 	}
 
 	async setExchangeConfig(mode, host, port, tls = false, token = '', user = '', password = '', discovery = this.exchangeDiscoveryEndpointEnabled, stun = this.stun, turn = this.turn) {
+		this.resetAllP2PSessions();
 		const requestedMode = String(mode || 'node').trim().toLowerCase();
 		const safeHost = String(host || '').trim();
 		const safePort = Number(port) > 0 ? Number(port) : 7070;
@@ -2899,6 +2910,7 @@ class ReactorRuntime {
 	}
 
 	async setRelayConfig(kind, relayConfig = {}, runTest = true) {
+		this.resetAllP2PSessions();
 		const safeKind = String(kind || '').trim().toLowerCase();
 		if (!['stun', 'turn'].includes(safeKind)) {
 			throw new Error('relay type non valido: usa stun o turn');
