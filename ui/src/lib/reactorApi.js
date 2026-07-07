@@ -581,18 +581,18 @@ export async function getExchangeConfig() {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
-export async function setExchangeConfig(mode, host, port, tls = false, token = '', discovery = false, stun = {}, turn = {}) {
+export async function setExchangeConfig(mode, host, port, tls = false, token = '', user = '', password = '', discovery = false, stun = {}, turn = {}) {
 	const bridge = getBridge();
 	if (bridge && bridge.setExchangeConfig) {
-		return bridge.setExchangeConfig(mode, host, port, tls, token, discovery, stun, turn);
+		return bridge.setExchangeConfig(mode, host, port, tls, token, user, password, discovery, stun, turn);
 	}
 
 	const mobile = getMobilePlugin();
 	if (mobile && mobile.setExchangeConfig) {
-		return mobile.setExchangeConfig({ mode, host, port, tls, token, discovery, stun, turn });
+		return mobile.setExchangeConfig({ mode, host, port, tls, token, user, password, discovery, stun, turn });
 	}
 
-	const nativeResult = await callNative('setExchangeConfig', { mode, host, port, tls, token, discovery, stun, turn });
+	const nativeResult = await callNative('setExchangeConfig', { mode, host, port, tls, token, user, password, discovery, stun, turn });
 	if (nativeResult) {
 		return nativeResult;
 	}

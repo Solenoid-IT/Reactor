@@ -690,9 +690,17 @@ class ExchangeManager {
 
 	async _bootstrapClientWebSocketSession(registerPacket) {
 		const token = String(this.runtime.exchangeAuthToken || '').trim();
-		const headers = token ? { Authorization: `Bearer ${token}` } : {};
+		const user = String(this.runtime.exchangeAuthUser || '').trim();
+		const password = String(this.runtime.exchangeAuthPassword || '');
+		const headers = token
+			? { Authorization: `Bearer ${token}` }
+			: user
+			? { Authorization: `Basic ${Buffer.from(`${user}:${password}`, 'utf8').toString('base64')}` }
+			: {};
 		const payload = {
 			clientName: String(registerPacket?.name || '').trim() || 'unnamed',
+			user,
+			password,
 		};
 
 		const response = await this._requestJson({

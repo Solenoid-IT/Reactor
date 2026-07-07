@@ -101,7 +101,7 @@ function collectKnownEntries(rootPath, map) {
 
 	for (const entry of entries) {
 		const fullPath = path.join(rootPath, entry.name);
-			httpPort: Number(this.httpServerPort) || DEFAULT_LOCAL_SERVER_PORT,
+		if (entry.isDirectory()) {
 			map.set(fullPath, 'dir');
 			collectKnownEntries(fullPath, map);
 		} else if (entry.isFile()) {
@@ -1536,6 +1536,8 @@ class ReactorRuntime {
 		this.exchangePort = Number(options.exchangePort || process.env.PORT || 7070);
 		this.exchangeTls = Boolean(options.exchangeTls || process.env.TLS === '1' || process.env.TLS === 'true');
 		this.exchangeAuthToken = String(options.exchangeToken || process.env.TOKEN || '');
+		this.exchangeAuthUser = String(options.exchangeUser || process.env.REACTOR_EXCHANGE_USER || '');
+		this.exchangeAuthPassword = String(options.exchangePassword || process.env.REACTOR_EXCHANGE_PASSWORD || '');
 		this.stun = normalizeRelayEndpointConfig(options.stun, {
 			host: String(options.stunHost || process.env.REACTOR_STUN_HOST || ''),
 			port: Number(options.stunPort || process.env.REACTOR_STUN_PORT || 3478) > 0 ? Number(options.stunPort || process.env.REACTOR_STUN_PORT || 3478) : 3478,
@@ -2254,6 +2256,8 @@ class ReactorRuntime {
 			host: this.exchangeHost,
 			port: this.exchangePort,
 			token: this.exchangeAuthToken,
+			user: this.exchangeAuthUser,
+			password: this.exchangeAuthPassword,
 			discovery: this.exchangeDiscoveryEndpointEnabled,
 			stun: normalizeRelayEndpointConfig(this.stun),
 			turn: normalizeRelayEndpointConfig(this.turn),
@@ -2780,6 +2784,8 @@ class ReactorRuntime {
 				port: this.exchangePort,
 				tls: this.exchangeTls,
 				token,
+				user: this.exchangeAuthUser,
+				password: this.exchangeAuthPassword,
 				discovery: this.exchangeDiscoveryEndpointEnabled,
 			},
 			stun: this.stun,
@@ -2811,12 +2817,14 @@ class ReactorRuntime {
 		await this.restartHttpServer();
 	}
 
-	async setExchangeConfig(mode, host, port, tls = false, token = '', discovery = this.exchangeDiscoveryEndpointEnabled, stun = this.stun, turn = this.turn) {
+	async setExchangeConfig(mode, host, port, tls = false, token = '', user = '', password = '', discovery = this.exchangeDiscoveryEndpointEnabled, stun = this.stun, turn = this.turn) {
 		const requestedMode = String(mode || 'node').trim().toLowerCase();
 		const safeHost = String(host || '').trim();
 		const safePort = Number(port) > 0 ? Number(port) : 7070;
 		const safeTls = Boolean(tls);
 		const safeToken = String(token || '').trim();
+		const safeUser = String(user || '').trim();
+		const safePassword = String(password || '');
 		const safeDiscovery = parseBooleanOption(discovery, this.exchangeDiscoveryEndpointEnabled);
 		const safeMode = requestedMode === 'client' ? 'node' : requestedMode === 'disabled' ? 'node' : requestedMode;
 		const internalMode = safeMode === 'exchange' ? 'exchange' : 'client';
@@ -2830,6 +2838,8 @@ class ReactorRuntime {
 		this.exchangePort = safePort;
 		this.exchangeTls = safeTls;
 		this.exchangeAuthToken = safeToken;
+		this.exchangeAuthUser = safeUser;
+		this.exchangeAuthPassword = safePassword;
 		this.exchangeDiscoveryEndpointEnabled = safeDiscovery;
 		this.stun = normalizeRelayEndpointConfig(stun, this.stun);
 		this.turn = normalizeRelayEndpointConfig(turn, this.turn);
@@ -2841,6 +2851,8 @@ class ReactorRuntime {
 				port: this.exchangePort,
 				tls: this.exchangeTls,
 				token: this.exchangeAuthToken,
+				user: this.exchangeAuthUser,
+				password: this.exchangeAuthPassword,
 				discovery: this.exchangeDiscoveryEndpointEnabled,
 			},
 			stun: this.stun,
@@ -3012,10 +3024,12 @@ class ReactorRuntime {
 			}
 
 			const token = String(this.exchangeAuthToken || '').trim();
-			if (!token) {
+			const user = String(this.exchangeAuthUser || '').trim();
+			const password = String(this.exchangeAuthPassword || '');
+			if (!token && !user) {
 				return {
 					ok: false,
-					error: 'exchange token is not configured',
+					error: 'exchange credentials are not configured',
 					nodes: [],
 					total: 0,
 				};
@@ -3025,12 +3039,16 @@ class ReactorRuntime {
 			const endpointUrl = `${scheme}://${this.exchangeHost}:${this.exchangePort}${this.exchangeDiscoveryEndpointPath}`;
 
 			try {
+				const authHeader = token
+					? `Bearer ${token}`
+					: `Basic ${Buffer.from(`${user}:${password}`, 'utf8').toString('base64')}`;
+
 				const response = await this.platformServices.httpClient.request({
 					url: endpointUrl,
 					method: 'GET',
 					headers: {
 						Accept: 'application/json',
-						Authorization: `Bearer ${token}`,
+						Authorization: authHeader,
 					},
 					insecureTls: false,
 				});

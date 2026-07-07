@@ -27,6 +27,9 @@
 	export let stunTestStatus = '';
 	export let turnTestStatus = '';
 	export let exchangeToken = '';
+	export let exchangeUser = '';
+	export let exchangePassword = '';
+	export let exchangeAuthType = 'token';
 	export let discovery = false;
 	export let exchangeActive = false;
 	export let exchangeStatus = { state: 'disconnected', connected: false, authenticated: false, reason: '', errorType: '' };
@@ -70,18 +73,24 @@
 		onSaveHttpServerData(event.detail.values.httpPort ?? httpPort);
 	}
 
-	function onWorkingModeSubmit(event) {
+	function onConnectionsFormSubmit(event) {
 		if (!event.detail.valid) {
 			return;
 		}
 
 		const values = event.detail.values || {};
 		const exchangeValues = values.exchange || {};
+		const authType = exchangeAuthType;
+		const effectiveToken = authType === 'token' ? (exchangeValues.token ?? exchangeToken) : '';
+		const effectiveUser = authType === 'user' ? (exchangeValues.user ?? exchangeUser) : '';
+		const effectivePassword = authType === 'user' ? (exchangeValues.password ?? exchangePassword) : '';
 		onSaveExchangeConfig(
 			exchangeValues.host ?? exchangeHost,
 			exchangeValues.port ?? exchangePort,
 			exchangeValues.tls ?? exchangeTls,
-			exchangeValues.token ?? exchangeToken,
+			effectiveToken,
+			effectiveUser,
+			effectivePassword,
 			exchangeValues.enabled ?? exchangeEnabled,
 			exchangeValues.discovery ?? discovery,
 			exchangeValues.stun || {
@@ -222,7 +231,7 @@
 				<div>This panel configures EXCHANGE, STUN, and TURN for this node.</div>
 			</Helper>
 		</h3>
-		<Form on:submit={onWorkingModeSubmit}>
+		<Form on:submit={onConnectionsFormSubmit}>
 			<fieldset class="mt-3 settings-exchange-fieldset" style="border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 10px;">
 					<legend>EXCHANGE</legend>
 
@@ -253,39 +262,66 @@
 
 						<div class="row mt-2">
 							<div class="col">
+							<label class="d-flex align-items-center m-0">
+								<input type="checkbox" class="input me-2" name="exchange.tls" data-type="bool" bind:checked={exchangeTls} />
+								TLS
+							</label>
+						</div>
+					</div>
+
+					<div class="row mt-2">
+						<div class="col">
+							<label class="d-block m-0">
+								<span class="detail-label">Auth</span>
+								<select class="input" bind:value={exchangeAuthType}>
+									<option value="token">Token</option>
+									<option value="user">User / Password</option>
+								</select>
+							</label>
+						</div>
+					</div>
+
+					{#if exchangeAuthType === 'token'}
+						<div class="row mt-2">
+							<div class="col">
 								<label class="d-block m-0">
 									<span class="detail-label">Token</span>
 									<input type="text" class="input" name="exchange.token" data-required="true" data-type="string" bind:value={exchangeToken} />
 								</label>
 							</div>
 						</div>
-
-						<div class="row mt-3">
+					{:else}
+						<div class="row settings-credentials-row mt-2">
 							<div class="col">
-								<label class="d-flex align-items-center m-0">
-									<input type="checkbox" class="input me-2" name="exchange.tls" data-type="bool" bind:checked={exchangeTls} />
-									TLS
+								<label class="d-block m-0">
+									<span class="detail-label">User</span>
+									<input type="text" class="input" name="exchange.user" data-required="true" data-type="string" bind:value={exchangeUser} placeholder="username" />
+								</label>
+							</div>
+							<div class="col">
+								<label class="d-block m-0">
+									<span class="detail-label">Password</span>
+									<PasswordField name="exchange.password" dataType="string" bind:value={exchangePassword} placeholder="password" />
 								</label>
 							</div>
 						</div>
-
-						<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
-							<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px;">
-								<div class="detail-label" style="display:flex; align-items:center; gap:6px; margin:0;">
-									<span>STUN (optional)</span>
-									<Helper ariaLabel="STUN Help">
-										STUN is used to discover the public IP address of this node when behind a NAT. It is required for P2P connections to work across different networks.
-									</Helper>
-								</div>
-								<button type="button" class="btn-secondary" on:click={toggleStunAccordion} aria-expanded={stunAccordionOpen}>
-									<i class={`fa-solid ${stunAccordionOpen ? 'fa-chevron-up' : 'fa-chevron-down'} me-1`}></i>{stunAccordionOpen ? 'Hide' : 'Expand'}
-								</button>
+					{/if}
+					<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
+						<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px;">
+							<div class="detail-label" style="display:flex; align-items:center; gap:6px; margin:0;">
+								<span>STUN (optional)</span>
+								<Helper ariaLabel="STUN Help">
+									STUN is used to discover the public IP address of this node when behind a NAT. It is required for P2P connections to work across different networks.
+								</Helper>
 							</div>
-							{#if stunAccordionOpen}
-								{#if stunTestConnected === true}
-									<div class="detail-value" style="color: var(--color-success, #4caf50);"><i class="fa-solid fa-circle-check me-1"></i>Connected</div>
-								{:else if stunTestConnected === false}
-									<div class="detail-value" style="color: var(--color-danger, #ff6b6b);"><i class="fa-solid fa-circle-xmark me-1"></i>Not connected</div>
+							<button type="button" class="btn-secondary" on:click={toggleStunAccordion} aria-expanded={stunAccordionOpen}>
+								<i class={`fa-solid ${stunAccordionOpen ? 'fa-chevron-up' : 'fa-chevron-down'} me-1`}></i>{stunAccordionOpen ? 'Hide' : 'Expand'}
+							</button>
+						</div>
+						{#if stunAccordionOpen}
+							{#if stunTestConnected === true}
+								<div class="detail-value" style="color: var(--color-success, #4caf50);"><i class="fa-solid fa-circle-check me-1"></i>Connected</div>
+							{:else if stunTestConnected === false}									<div class="detail-value" style="color: var(--color-danger, #ff6b6b);"><i class="fa-solid fa-circle-xmark me-1"></i>Not connected</div>
 								{/if}
 								<div class="row settings-host-port-row">
 									<div class="col">

@@ -45,7 +45,7 @@ contextBridge.exposeInMainWorld('reactor', {
 	getWorkflow: () => ipcRenderer.invoke('get-workflow'),
 	saveWorkflow: (workflow) => ipcRenderer.invoke('save-workflow', workflow),
 	getExchangeConfig: () => ipcRenderer.invoke('get-exchange-config'),
-	setExchangeConfig: (mode, host, port, tls, token, discovery, stun, turn) => ipcRenderer.invoke('set-exchange-config', { mode, host, port, tls, token, discovery, stun, turn }),
+	setExchangeConfig: (mode, host, port, tls, token, user, password, discovery, stun, turn) => ipcRenderer.invoke('set-exchange-config', { mode, host, port, tls, token, user, password, discovery, stun, turn }),
 	saveRelayConfig: (kind, config) => ipcRenderer.invoke('save-relay-config', { kind, config }),
 	getP2PStatus: () => ipcRenderer.invoke('get-p2p-status'),
 	sendP2PSignal: (target, signalType, payload, sessionId) => ipcRenderer.invoke('send-p2p-signal', { target, signalType, payload, sessionId }),

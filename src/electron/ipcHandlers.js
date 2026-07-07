@@ -137,6 +137,8 @@ function setupIpcHandlers(runtime, options = {}) {
 						Number(settings.exchangePort) || 7070,
 						Boolean(settings.exchangeTls),
 						settings.exchangeToken || '',
+						settings.exchangeUser || '',
+						settings.exchangePassword || '',
 						Boolean(settings.exchangeDiscovery),
 						settings.stun,
 						settings.turn,
@@ -171,6 +173,8 @@ function setupIpcHandlers(runtime, options = {}) {
 						Number(settings.exchangePort) || 7070,
 						Boolean(settings.exchangeTls),
 						settings.exchangeToken || '',
+						settings.exchangeUser || '',
+						settings.exchangePassword || '',
 						Boolean(settings.exchangeDiscovery),
 						settings.stun,
 						settings.turn,
@@ -1046,7 +1050,7 @@ function setupIpcHandlers(runtime, options = {}) {
 		return { ok: true, config: runtime.getExchangeConfig() };
 	});
 
-	ipcMain.handle('set-exchange-config', async (_, { mode, host, port, tls, token, discovery, stun, turn }) => {
+	ipcMain.handle('set-exchange-config', async (_, { mode, host, port, tls, token, user, password, discovery, stun, turn }) => {
 		if (!runtime || !runtime.setExchangeConfig) {
 			return { ok: false, error: 'runtime not ready' };
 		}
@@ -1056,13 +1060,15 @@ function setupIpcHandlers(runtime, options = {}) {
 		const safePort = Number(port) > 0 ? Number(port) : 7070;
 		const safeTls = Boolean(tls);
 		const safeToken = String(token || '').trim();
+		const safeUser = String(user || '').trim();
+		const safePassword = String(password || '');
 		const safeDiscovery = Boolean(discovery);
 		const safeStun = stun && typeof stun === 'object' ? stun : {};
 		const safeTurn = turn && typeof turn === 'object' ? turn : {};
 
 		try {
-			await writeUiSettings({ exchangeHost: safeHost, exchangePort: safePort, exchangeTls: safeTls, exchangeToken: safeToken, exchangeDiscovery: safeDiscovery, stun: safeStun, turn: safeTurn });
-			await runtime.setExchangeConfig(safeMode, safeHost, safePort, safeTls, safeToken, safeDiscovery, safeStun, safeTurn);
+			await writeUiSettings({ exchangeHost: safeHost, exchangePort: safePort, exchangeTls: safeTls, exchangeToken: safeToken, exchangeUser: safeUser, exchangePassword: safePassword, exchangeDiscovery: safeDiscovery, stun: safeStun, turn: safeTurn });
+			await runtime.setExchangeConfig(safeMode, safeHost, safePort, safeTls, safeToken, safeUser, safePassword, safeDiscovery, safeStun, safeTurn);
 			const connectionTest = runtime.testExchangeClientConnection
 				? await runtime.testExchangeClientConnection(5000)
 				: { connected: false, skipped: true, reason: 'connection test unavailable', elapsedMs: 0 };

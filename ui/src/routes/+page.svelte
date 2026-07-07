@@ -84,6 +84,9 @@ import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 	let stunTestStatus = '';
 	let turnTestStatus = '';
 	let exchangeToken = '';
+	let exchangeUser = '';
+	let exchangePassword = '';
+	let exchangeAuthType = 'token';
 	let exchangeDiscovery = false;
 	let exchangeActive = false;
 	let exchangeStatus = { state: 'disconnected', connected: false, authenticated: false, reason: '', mode: 'node' };
@@ -679,6 +682,9 @@ import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 			exchangePort = Number(ec.port) || 7070;
 			exchangeTls = Boolean(ec.tls);
 			exchangeToken = ec.token || '';
+			exchangeUser = ec.user || '';
+			exchangePassword = ec.password || '';
+			exchangeAuthType = (ec.user || '').trim() ? 'user' : 'token';
 			exchangeDiscovery = Boolean(ec.discovery ?? ec.exposeDiscoveryEndpoint);
 			exchangeStatusDowngradeDebounceMs = normalizeExchangeStatusDebounceMs(
 				ec.statusDebounceMs,
@@ -1799,7 +1805,7 @@ import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 		status = result?.ok ? `Server status opened: ${result.url}` : `Error: ${result?.error || 'unknown'}`;
 	}
 
-	async function saveExchangeConfigValue(host, port, tls, token, enabled = true, discovery = false, stun = {}, turn = {}) {
+	async function saveExchangeConfigValue(host, port, tls, token, user, password, enabled = true, discovery = false, stun = {}, turn = {}) {
 		if (exchangeConfigSaving) {
 			return;
 		}
@@ -1831,7 +1837,7 @@ import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 		const effectiveHost = !safeEnabled ? '' : host || '';
 		const safeStun = sanitizeRelay(stun);
 		const safeTurn = sanitizeRelay(turn);
-		const result = await setExchangeConfig('node', effectiveHost, numericPort, Boolean(tls), token || '', safeDiscovery, safeStun, safeTurn);
+		const result = await setExchangeConfig('node', effectiveHost, numericPort, Boolean(tls), token || '', user || '', password || '', safeDiscovery, safeStun, safeTurn);
 		if (!result?.ok) {
 			status = `Error: ${result?.error || 'unknown'}`;
 			await refreshAll();
@@ -2314,6 +2320,9 @@ import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 			{stunTestStatus}
 			{turnTestStatus}
 			{exchangeToken}
+			{exchangeUser}
+			{exchangePassword}
+			{exchangeAuthType}
 			discovery={exchangeDiscovery}
 			{exchangeActive}
 			{exchangeStatus}

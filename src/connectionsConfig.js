@@ -6,6 +6,8 @@ const DEFAULT_CONNECTIONS_CONFIG = {
 		port: 7070,
 		tls: false,
 		token: '',
+		user: '',
+		password: '',
 		discovery: false,
 	},
 	stun: {
@@ -49,14 +51,20 @@ function normalizeExchangeConfig(rawValue = {}) {
 		port: Number(nested.port) > 0 ? Number(nested.port) : 7070,
 		tls: Boolean(nested.tls),
 		token: String(nested.token ?? ''),
+		user: String(nested.user ?? nested.username ?? ''),
+		password: String(nested.password ?? ''),
 		discovery: Boolean(nested.discovery),
 	};
 }
 
 function normalizeConnectionsConfig(rawConfig = {}) {
 	const source = rawConfig && typeof rawConfig === 'object' && !Array.isArray(rawConfig) ? rawConfig : {};
+	// Support both nested format (desktop: { exchange:{...}, stun:{...}, turn:{...} })
+	// and flat format (Android: { mode, host, port, tls, token, user, password, stun:{...}, turn:{...} })
+	const hasNestedExchange = source.exchange !== null && source.exchange !== undefined && typeof source.exchange === 'object' && !Array.isArray(source.exchange);
+	const exchangeSource = hasNestedExchange ? source.exchange : source;
 	return {
-		exchange: normalizeExchangeConfig(source.exchange),
+		exchange: normalizeExchangeConfig(exchangeSource),
 		stun: normalizeRelayEndpoint(source.stun, 3478),
 		turn: normalizeRelayEndpoint(source.turn, 3478),
 	};

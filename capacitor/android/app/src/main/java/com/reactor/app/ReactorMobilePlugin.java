@@ -316,6 +316,8 @@ public class ReactorMobilePlugin extends Plugin {
         config.put("port", ReactorHttpService.DEFAULT_PORT);
         config.put("tls", false);
         config.put("token", "");
+        config.put("user", "");
+        config.put("password", "");
         config.put("discovery", false);
         config.put("stun", new JSObject().put("host", "").put("port", 3478).put("tls", false).put("username", "").put("password", ""));
         config.put("turn", new JSObject().put("host", "").put("port", 3478).put("tls", false).put("username", "").put("password", ""));
@@ -562,13 +564,22 @@ public class ReactorMobilePlugin extends Plugin {
             }
 
             JSONObject parsed = new JSONObject(raw);
+            // Support both flat (Android) and nested (desktop) formats:
+            // Desktop: { "exchange": { host, port, tls, token, user, password, discovery }, "stun":{...}, "turn":{...} }
+            // Android: { mode, host, port, tls, token, user, password, discovery, "stun":{...}, "turn":{...} }
+            JSONObject exchangeSource = parsed.optJSONObject("exchange");
+            if (exchangeSource == null) {
+                exchangeSource = parsed; // flat Android format
+            }
             JSObject config = getDefaultWorkingModeConfig();
-            config.put("mode", sanitizeWorkingMode(parsed.optString("mode", "node")));
-            config.put("host", String.valueOf(parsed.optString("host", "")));
-            config.put("port", parsed.optInt("port", ReactorHttpService.DEFAULT_PORT));
-            config.put("tls", parsed.optBoolean("tls", false));
-            config.put("token", String.valueOf(parsed.optString("token", "")));
-            config.put("discovery", parsed.optBoolean("discovery", false));
+            config.put("mode", sanitizeWorkingMode(exchangeSource.optString("mode", parsed.optString("mode", "node"))));
+            config.put("host", String.valueOf(exchangeSource.optString("host", "")));
+            config.put("port", exchangeSource.optInt("port", ReactorHttpService.DEFAULT_PORT));
+            config.put("tls", exchangeSource.optBoolean("tls", false));
+            config.put("token", String.valueOf(exchangeSource.optString("token", "")));
+            config.put("user", String.valueOf(exchangeSource.optString("user", exchangeSource.optString("username", ""))));
+            config.put("password", String.valueOf(exchangeSource.optString("password", "")));
+            config.put("discovery", exchangeSource.optBoolean("discovery", false));
             config.put("stun", normalizeRelayConfigFromJson(parsed, "stun", 3478, false));
             config.put("turn", normalizeRelayConfigFromJson(parsed, "turn", 3478, true));
             return config;
@@ -577,13 +588,15 @@ public class ReactorMobilePlugin extends Plugin {
         }
     }
 
-    private JSObject writeWorkingModeConfig(String mode, String host, int port, boolean tls, String token, boolean discovery, JSObject stun, JSObject turn) throws IOException {
+    private JSObject writeWorkingModeConfig(String mode, String host, int port, boolean tls, String token, String user, String password, boolean discovery, JSObject stun, JSObject turn) throws IOException {
         JSObject config = new JSObject();
         config.put("mode", mode);
         config.put("host", host != null ? host : "");
         config.put("port", port);
         config.put("tls", tls);
         config.put("token", token != null ? token : "");
+        config.put("user", user != null ? user : "");
+        config.put("password", password != null ? password : "");
         config.put("discovery", discovery);
         config.put("stun", normalizeRelayConfig(stun, 3478, false));
         config.put("turn", normalizeRelayConfig(turn, 3478, true));
@@ -595,6 +608,8 @@ public class ReactorMobilePlugin extends Plugin {
         JSObject current = readWorkingModeConfig();
         JSONObject stunRaw = current.optJSONObject("stun");
         JSONObject turnRaw = current.optJSONObject("turn");
+        String currentUser = current.getString("user", "");
+        String currentPassword = current.getString("password", "");
         JSObject stunSource = new JSObject();
         if (stunRaw != null) {
             stunSource.put("host", stunRaw.optString("host", ""));
@@ -623,7 +638,7 @@ public class ReactorMobilePlugin extends Plugin {
             3478,
             true
         );
-        return writeWorkingModeConfig(mode, host, port, tls, token, discovery, stun, turn);
+        return writeWorkingModeConfig(mode, host, port, tls, token, currentUser, currentPassword, discovery, stun, turn);
     }
 
     private JSObject testUdpRelay(String host, int port, String label) {
@@ -1501,6 +1516,8 @@ public class ReactorMobilePlugin extends Plugin {
             editor.putInt(ReactorHttpService.PREF_EXCHANGE_PORT, port);
             editor.putBoolean(ReactorHttpService.PREF_EXCHANGE_TLS, tls);
             editor.putString(ReactorHttpService.PREF_EXCHANGE_TOKEN, token);
+            editor.putString(ReactorHttpService.PREF_EXCHANGE_USER, workingMode.getString("user", ""));
+            editor.putString(ReactorHttpService.PREF_EXCHANGE_PASSWORD, workingMode.getString("password", ""));
 
             String restoredName = readConfiguredReactorNameFile();
             if (!restoredName.isEmpty()) {
@@ -3266,6 +3283,8 @@ public class ReactorMobilePlugin extends Plugin {
         int port = workingMode.getInteger("port", ReactorHttpService.DEFAULT_PORT);
         boolean tls = workingMode.has("tls") && workingMode.getBool("tls");
         String token = workingMode.getString("token", "");
+        String user = workingMode.getString("user", "");
+        String password = workingMode.getString("password", "");
         boolean discovery = workingMode.has("discovery") && workingMode.getBool("discovery");
 
         JSObject connection = buildExchangeConnectionStatus(ReactorHttpService.getCurrentExchangeMode(), host);
@@ -3282,6 +3301,8 @@ public class ReactorMobilePlugin extends Plugin {
         config.put("port", port);
         config.put("tls", tls);
         config.put("token", token);
+        config.put("user", user);
+        config.put("password", password);
         config.put("discovery", discovery);
         config.put("stun", normalizeRelayConfigFromJson(workingMode, "stun", 3478, false));
         config.put("turn", normalizeRelayConfigFromJson(workingMode, "turn", 3478, true));
@@ -3399,6 +3420,8 @@ public class ReactorMobilePlugin extends Plugin {
         int port = call.getInt("port", ReactorHttpService.DEFAULT_PORT);
         boolean tls = call.getBoolean("tls", false);
         String token = call.getString("token", "");
+        String user = call.getString("user", "");
+        String password = call.getString("password", "");
         boolean discovery = call.getBoolean("discovery", false);
         JSObject stun = normalizeRelayConfig(call.getObject("stun"), 3478, false);
         JSObject turn = normalizeRelayConfig(call.getObject("turn"), 3478, true);
@@ -3425,10 +3448,12 @@ public class ReactorMobilePlugin extends Plugin {
         editor.putInt(ReactorHttpService.PREF_EXCHANGE_PORT, port);
         editor.putBoolean(ReactorHttpService.PREF_EXCHANGE_TLS, tls);
         editor.putString(ReactorHttpService.PREF_EXCHANGE_TOKEN, token != null ? token : "");
+        editor.putString(ReactorHttpService.PREF_EXCHANGE_USER, user != null ? user : "");
+        editor.putString(ReactorHttpService.PREF_EXCHANGE_PASSWORD, password != null ? password : "");
         editor.apply();
 
         try {
-            writeWorkingModeConfig(mode, host, port, tls, token, discovery, stun, turn);
+            writeWorkingModeConfig(mode, host, port, tls, token, user, password, discovery, stun, turn);
         } catch (Exception ignored) {
             // Keep prefs as fallback cache even if file write fails.
         }
@@ -3445,6 +3470,8 @@ public class ReactorMobilePlugin extends Plugin {
                 .put("port", port)
                 .put("tls", tls)
                 .put("token", token)
+                .put("user", user)
+                .put("password", password)
                 .put("discovery", discovery)
                 .put("stun", stun)
                 .put("turn", turn)
@@ -3482,6 +3509,8 @@ public class ReactorMobilePlugin extends Plugin {
                     current.getInteger("port", ReactorHttpService.DEFAULT_PORT),
                     current.optBoolean("tls", false),
                     current.getString("token", ""),
+                    current.getString("user", ""),
+                    current.getString("password", ""),
                     current.optBoolean("discovery", false),
                     stun,
                     turn

@@ -107,6 +107,8 @@ public class ReactorHttpService extends Service {
     public static final String PREF_EXCHANGE_PORT = "exchangePort";
     public static final String PREF_EXCHANGE_TLS = "exchangeTls";
     public static final String PREF_EXCHANGE_TOKEN = "exchangeToken";
+    public static final String PREF_EXCHANGE_USER = "exchangeUser";
+    public static final String PREF_EXCHANGE_PASSWORD = "exchangePassword";
     public static final String PREF_MESSAGE_QUEUE_TTL_MS = "messageQueueTtlMs";
     public static final String PREF_MESSAGE_QUEUE_RETRY_MS = "messageQueueRetryMs";
     public static final int DEFAULT_PORT = 7070;
@@ -143,6 +145,8 @@ public class ReactorHttpService extends Service {
     private static volatile int currentExchangePort = DEFAULT_PORT;
     private static volatile boolean currentExchangeTls = false;
     private static volatile String currentExchangeToken = "";
+    private static volatile String currentExchangeUser = "";
+    private static volatile String currentExchangePassword = "";
     private static volatile WebSocket wsExchangeClientSocket = null;
     private static volatile boolean exchangeClientAuthenticated = false;
     private static volatile String exchangeClientLastError = "";
@@ -1016,6 +1020,11 @@ public class ReactorHttpService extends Service {
                     }
                 }
                 JSONObject parsed = new JSONObject(output.toString(StandardCharsets.UTF_8.name()).trim());
+                // Support both flat (Android) and nested (desktop) formats
+                JSONObject exchangeObj = parsed.optJSONObject("exchange");
+                if (exchangeObj != null) {
+                    return String.valueOf(exchangeObj.optString("token", "")).trim();
+                }
                 return String.valueOf(parsed.optString("token", "")).trim();
             } catch (Exception ignored) {
                 return "";
@@ -1108,7 +1117,24 @@ public class ReactorHttpService extends Service {
                 return fallback;
             }
 
-            return new JSObject(raw);
+            JSONObject parsed = new JSONObject(raw);
+            // Support both flat (Android) and nested (desktop) formats
+            JSONObject exchangeObj = parsed.optJSONObject("exchange");
+            String token;
+            if (exchangeObj != null) {
+                token = String.valueOf(exchangeObj.optString("token", "")).trim();
+            } else {
+                token = String.valueOf(parsed.optString("token", "")).trim();
+            }
+
+            JSObject result = new JSObject();
+            result.put("token", token);
+            // stun/turn are always at root in both formats
+            JSONObject stunRaw = parsed.optJSONObject("stun");
+            JSONObject turnRaw = parsed.optJSONObject("turn");
+            result.put("stun", stunRaw != null ? new JSObject(stunRaw.toString()) : new JSObject());
+            result.put("turn", turnRaw != null ? new JSObject(turnRaw.toString()) : new JSObject());
+            return result;
         } catch (Exception ignored) {
             return fallback;
         }
@@ -6274,6 +6300,8 @@ public class ReactorHttpService extends Service {
             String host = prefs.getString(PREF_EXCHANGE_HOST, "");
             int port = prefs.getInt(PREF_EXCHANGE_PORT, DEFAULT_PORT);
             boolean tls = prefs.getBoolean(PREF_EXCHANGE_TLS, false);
+            String user = prefs.getString(PREF_EXCHANGE_USER, "");
+            String password = prefs.getString(PREF_EXCHANGE_PASSWORD, "");
             String token = readExchangeToken();
             if (token.isEmpty()) {
                 token = prefs.getString(PREF_EXCHANGE_TOKEN, "");
@@ -6281,12 +6309,16 @@ public class ReactorHttpService extends Service {
 
             String safeToken = token != null ? token : "";
             String safeHost = host != null ? host : "";
+            String safeUser = user != null ? user.trim() : "";
+            String safePassword = password != null ? password : "";
             boolean sameMode = String.valueOf(currentExchangeMode).equals(mode);
             boolean sameHost = String.valueOf(currentExchangeHost).equals(safeHost);
             boolean samePort = currentExchangePort == port;
             boolean sameTls = currentExchangeTls == tls;
             boolean sameToken = String.valueOf(currentExchangeToken).equals(safeToken);
-            boolean sameConfig = sameMode && sameHost && samePort && sameTls && sameToken;
+            boolean sameUser = String.valueOf(currentExchangeUser).equals(safeUser);
+            boolean samePassword = String.valueOf(currentExchangePassword).equals(safePassword);
+            boolean sameConfig = sameMode && sameHost && samePort && sameTls && sameToken && sameUser && samePassword;
             boolean nodeClientAlreadyRunning = wsClientRunning && wsClientThread != null && wsClientThread.isAlive();
 
             if (exchangeStarted && sameConfig) {
@@ -6304,6 +6336,8 @@ public class ReactorHttpService extends Service {
             currentExchangePort = port;
             currentExchangeTls = tls;
             currentExchangeToken = safeToken;
+            currentExchangeUser = safeUser;
+            currentExchangePassword = safePassword;
 
             stopExchange();
             startOutgoingQueueFlusher();
@@ -6671,10 +6705,12 @@ public class ReactorHttpService extends Service {
         if (token.isEmpty()) {
             token = currentExchangeToken != null ? currentExchangeToken.trim() : "";
         }
+        String user = currentExchangeUser != null ? currentExchangeUser.trim() : "";
+        String password = currentExchangePassword != null ? currentExchangePassword : "";
 
         ExchangeRegisterBootstrap bootstrap;
         try {
-            bootstrap = bootstrapExchangeRegisterSession(endpoint, token, reactorName);
+            bootstrap = bootstrapExchangeRegisterSession(endpoint, token, user, password, reactorName);
         } catch (Exception bootstrapError) {
             String detail = bootstrapError.getMessage() != null ? bootstrapError.getMessage() : "register bootstrap failed";
             if (currentExchangeTls) {
@@ -6878,7 +6914,7 @@ public class ReactorHttpService extends Service {
         }
     }
 
-    private ExchangeRegisterBootstrap bootstrapExchangeRegisterSession(ExchangeEndpoint endpoint, String bearerToken, String clientName) throws Exception {
+    private ExchangeRegisterBootstrap bootstrapExchangeRegisterSession(ExchangeEndpoint endpoint, String bearerToken, String user, String password, String clientName) throws Exception {
         String scheme = currentExchangeTls ? "https" : "http";
         String endpointUrl = scheme + "://" + endpoint.host + ":" + endpoint.port + "/register";
         HttpURLConnection connection = null;
@@ -6892,12 +6928,22 @@ public class ReactorHttpService extends Service {
             connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
             String safeBearer = String.valueOf(bearerToken == null ? "" : bearerToken).trim();
+            String safeUser = String.valueOf(user == null ? "" : user).trim();
+            String safePassword = String.valueOf(password == null ? "" : password);
             if (!safeBearer.isEmpty()) {
                 connection.setRequestProperty("Authorization", "Bearer " + safeBearer);
+            } else if (!safeUser.isEmpty()) {
+                String credentials = safeUser + ":" + safePassword;
+                String encoded = android.util.Base64.encodeToString(credentials.getBytes(StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
+                connection.setRequestProperty("Authorization", "Basic " + encoded);
             }
 
             JSONObject payload = new JSONObject();
             payload.put("clientName", String.valueOf(clientName == null ? "mobile-reactor" : clientName).trim());
+            if (!safeUser.isEmpty()) {
+                payload.put("user", safeUser);
+                payload.put("password", safePassword);
+            }
             byte[] payloadBytes = payload.toString().getBytes(StandardCharsets.UTF_8);
             connection.setRequestProperty("Content-Length", String.valueOf(payloadBytes.length));
             try (OutputStream output = connection.getOutputStream()) {
