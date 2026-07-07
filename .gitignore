@@ -8,7 +8,5 @@
 /ui/.svelte-kit
 
 .env
-exchange-server/.env
-!exchange-server/.env.example
 
 working-mode.json
