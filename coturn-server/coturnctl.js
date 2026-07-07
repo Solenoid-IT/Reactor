@@ -153,18 +153,50 @@ function runCertbotWebroot(domains, webroot, bits) {
 	}
 }
 
+function shellEscape(value) {
+	return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
 async function installLetsEncryptCert({ certDir, tlsManager, primaryDomain }) {
 	const liveDir = path.join('/etc/letsencrypt/live', primaryDomain);
 	const fullchain = path.join(liveDir, 'fullchain.pem');
 	const privkey = path.join(liveDir, 'privkey.pem');
+	const certPath = path.join(certDir, 'cert.pem');
+	const keyPath = path.join(certDir, 'key.pem');
 
-	await fs.mkdir(certDir, { recursive: true });
-	await Promise.all([
-		fs.copyFile(fullchain, path.join(certDir, 'cert.pem')),
-		fs.copyFile(privkey, path.join(certDir, 'key.pem')),
-	]);
+	try {
+		await fs.mkdir(certDir, { recursive: true });
+		await Promise.all([
+			fs.copyFile(fullchain, certPath),
+			fs.copyFile(privkey, keyPath),
+		]);
 
-	await tlsManager.fixPermissions();
+		await tlsManager.fixPermissions();
+		return;
+	} catch (error) {
+		if (!['EACCES', 'EPERM'].includes(error.code)) {
+			throw error;
+		}
+	}
+
+	const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+	const gid = typeof process.getgid === 'function' ? process.getgid() : undefined;
+	if (!Number.isInteger(uid) || !Number.isInteger(gid)) {
+		throw new Error('cannot resolve current uid/gid to install signed certificate');
+	}
+
+	const sudoInstallCmd = [
+		'sudo', 'install', '-d', '-m', '700', '-o', String(uid), '-g', String(gid), shellEscape(certDir),
+		'&&', 'sudo', 'install', '-m', '644', '-o', String(uid), '-g', String(gid), shellEscape(fullchain), shellEscape(certPath),
+		'&&', 'sudo', 'install', '-m', '600', '-o', String(uid), '-g', String(gid), shellEscape(privkey), shellEscape(keyPath),
+	].join(' ');
+
+	try {
+		execFileSync('sh', ['-lc', sudoInstallCmd], { stdio: 'inherit' });
+	} catch (error) {
+		const msg = error.stderr ? String(error.stderr).trim() : error.message;
+		throw new Error(`cannot install signed certificate files from /etc/letsencrypt: ${msg}`);
+	}
 }
 
 async function main() {
