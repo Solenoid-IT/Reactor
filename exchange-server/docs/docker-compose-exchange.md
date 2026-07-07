@@ -59,10 +59,13 @@ docker compose exec reactor-exchange node daemonctl.js generate-tls-cert
 Generate CA-signed TLS certificate (Let's Encrypt via certbot webroot):
 
 ```bash
-docker compose exec reactor-exchange node daemonctl.js generate-tls-cert --signed --cn exchange.example.com --domain ws.exchange.example.com --webroot /var/www/html --bits 4096
+cd exchange-server
+node daemonctl.js generate-tls-cert --signed --cn exchange.example.com --domain ws.exchange.example.com --webroot /var/www/html --bits 4096
+docker compose restart reactor-exchange
 ```
 
-`--signed` requires certbot and access to `/etc/letsencrypt/live/<domain>` in the runtime environment.
+`--signed` is host-only and must be run outside Docker, like coturn setup.
+It requires certbot and access to `/etc/letsencrypt/live/<domain>` on the host runtime environment.
 
 In this setup, certificate generation runs inside the container and schedules an automatic container restart.
 No manual permission fix is required when `USER_UID`/`USER_GID` match the host ownership of `exchange-server/cert`.

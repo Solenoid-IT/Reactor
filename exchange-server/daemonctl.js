@@ -541,6 +541,10 @@ async function handleGenerateTlsCert(rest) {
 	} = extractTlsCertFlags(rest);
 
 	if (signed) {
+		if (isRunningInsideDocker()) {
+			throw new Error('generate-tls-cert --signed must run on the host (outside Docker). Run it from exchange-server/, then restart reactor-exchange.');
+		}
+
 		const domains = normalizeDomains(cn, explicitDomains);
 		runCertbotWebroot(domains, webroot, bits);
 		await installLetsEncryptCert(domains[0]);
