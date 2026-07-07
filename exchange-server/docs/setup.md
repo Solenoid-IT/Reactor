@@ -89,7 +89,7 @@ Generate a CA-signed certificate (Let's Encrypt via certbot webroot):
 
 ```bash
 cd exchange-server
-node daemonctl.js generate-tls-cert --signed --cn exchange.example.com --domain ws.exchange.example.com --webroot /var/www/html --bits 4096
+node daemonctl.js generate-tls-cert --signed --cn example.com --domain www.example.com --webroot /var/www/html --bits 4096
 docker compose restart reactor-exchange
 ```
 
