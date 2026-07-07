@@ -130,6 +130,11 @@
 	let envRowIdCounter = 0;
 	let status = 'Ready';
 	let settingsOpen = false;
+	let exportOptionsOpen = false;
+	let backupIncludeConnections = true;
+	let backupIncludeEndpoints = true;
+	let backupEndpointFilter = '';
+	let backupSelectedEndpointPaths = [];
 	let renameOpen = false;
 	let renameEndpointPath = '';
 	let renameOriginalEndpointName = '';
@@ -268,6 +273,36 @@
 	}
 
 	$: selectedEndpoint = selectedIndex >= 0 ? endpoints[selectedIndex] : null;
+
+	$: backupEndpointCandidates = (Array.isArray(endpoints) ? endpoints : [])
+		.map((endpoint) => {
+			const safePath = String(endpoint?.path || '').trim();
+			if (!safePath) {
+				return null;
+			}
+
+			return {
+				path: safePath,
+				name: endpointDisplayName(endpoint?.name, 'unknown'),
+			};
+		})
+		.filter(Boolean)
+		.sort((left, right) => String(left.name || '').localeCompare(String(right.name || '')));
+
+	$: backupFilteredEndpointCandidates = backupEndpointCandidates.filter((entry) =>
+		String(entry?.name || '').toLowerCase().includes(String(backupEndpointFilter || '').trim().toLowerCase()),
+	);
+
+	$: {
+		const availablePaths = backupEndpointCandidates.map((entry) => entry.path);
+		const availablePathSet = new Set(availablePaths);
+		const filteredSelection = backupSelectedEndpointPaths.filter((entryPath) => availablePathSet.has(entryPath));
+		if (!sameStringArray(filteredSelection, backupSelectedEndpointPaths)) {
+			backupSelectedEndpointPaths = filteredSelection;
+		}
+	}
+
+	$: backupSelectedCount = backupSelectedEndpointPaths.length;
 
 	function endpointDisplayName(name, fallback = 'unknown') {
 		const rawName = String(name || '').trim();
@@ -1831,14 +1866,83 @@
 		await refreshAll();
 	}
 
-	async function exportBackupHandler() {
+	async function exportBackupHandler(options = {}) {
 		status = 'Exporting backup ZIP...';
-		const result = await exportBackup();
+		const result = await exportBackup(options);
 		if (result?.canceled) {
 			status = 'Backup export cancelled';
 			return;
 		}
 		status = result?.ok ? `Backup exported: ${result.path || 'ZIP created'}` : `Error: ${result?.error || 'unknown'}`;
+	}
+
+	function sameStringArray(left, right) {
+		if (left === right) {
+			return true;
+		}
+
+		if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+			return false;
+		}
+
+		for (let index = 0; index < left.length; index += 1) {
+			if (String(left[index]) !== String(right[index])) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	function openExportOptionsModal() {
+		if (backupSelectedEndpointPaths.length === 0) {
+			backupSelectedEndpointPaths = backupEndpointCandidates.map((entry) => entry.path);
+		}
+		exportOptionsOpen = true;
+	}
+
+	function closeExportOptionsModal() {
+		exportOptionsOpen = false;
+	}
+
+	function toggleBackupEndpointSelection(endpointPath, enabled) {
+		const safePath = String(endpointPath || '').trim();
+		if (!safePath) {
+			return;
+		}
+
+		if (enabled) {
+			if (!backupSelectedEndpointPaths.includes(safePath)) {
+				backupSelectedEndpointPaths = [...backupSelectedEndpointPaths, safePath];
+			}
+			return;
+		}
+
+		backupSelectedEndpointPaths = backupSelectedEndpointPaths.filter((entryPath) => entryPath !== safePath);
+	}
+
+	function selectAllFilteredEndpoints() {
+		const filteredPaths = backupFilteredEndpointCandidates.map((entry) => entry.path);
+		const next = new Set(backupSelectedEndpointPaths);
+		for (const endpointPath of filteredPaths) {
+			next.add(endpointPath);
+		}
+		backupSelectedEndpointPaths = Array.from(next.values());
+	}
+
+	function deselectAllFilteredEndpoints() {
+		const filteredPathSet = new Set(backupFilteredEndpointCandidates.map((entry) => entry.path));
+		backupSelectedEndpointPaths = backupSelectedEndpointPaths.filter((entryPath) => !filteredPathSet.has(entryPath));
+	}
+
+	async function confirmExportBackupFromModal() {
+		await exportBackupHandler({
+			includeConnections: backupIncludeConnections,
+			includeEndpoints: backupIncludeEndpoints,
+			endpointSelectionProvided: backupIncludeEndpoints,
+			endpointPaths: backupIncludeEndpoints ? backupSelectedEndpointPaths : [],
+		});
+		closeExportOptionsModal();
 	}
 
 	async function importBackupHandler() {
@@ -2145,7 +2249,7 @@
 			onSaveStunConfig={saveStunConfigHandler}
 			onSaveTurnConfig={saveTurnConfigHandler}
 			onRefreshLinkedNodes={() => refreshExchangeLinkedNodes(false)}
-			onExportBackup={exportBackupHandler}
+			onExportBackup={openExportOptionsModal}
 			onImportBackup={importBackupHandler}
 			onTogglePermission={togglePermissionHandler}
 			onOpenSystemPermissionSettings={openSystemPermissionSettingsHandler}
@@ -2155,6 +2259,71 @@
 			onClearMessageQueue={clearMessageQueueHandler}
 			onCopyText={(text) => copyTextToClipboard(text)}
 		/>
+	</Modal>
+
+	<Modal
+		open={exportOptionsOpen}
+		title="Export Backup Options"
+		ariaLabel="Backup export options"
+		cardClass="modal-card settings-modal-card"
+		onClose={closeExportOptionsModal}
+	>
+		<div class="backup-export-options">
+			<label class="backup-toggle-row">
+				<input type="checkbox" class="input permission-toggle-input" bind:checked={backupIncludeConnections} />
+				<span>Include connections (EXCHANGE / STUN / TURN)</span>
+			</label>
+			<label class="backup-toggle-row">
+				<input type="checkbox" class="input permission-toggle-input" bind:checked={backupIncludeEndpoints} />
+				<span>Include endpoints</span>
+			</label>
+
+			{#if backupIncludeEndpoints}
+				<div class="backup-endpoint-picker">
+					<div class="backup-endpoint-picker-toolbar">
+						<input
+							type="text"
+							class="input"
+							placeholder="Filter endpoints"
+							bind:value={backupEndpointFilter}
+						/>
+						<div class="settings-backup-actions">
+							<button type="button" class="btn-secondary" on:click={selectAllFilteredEndpoints}>Select all</button>
+							<button type="button" class="btn-secondary" on:click={deselectAllFilteredEndpoints}>Deselect all</button>
+						</div>
+					</div>
+					<div class="detail-value" style="font-size:0.76em; opacity:0.75;">
+						Selected: {backupSelectedCount} / {backupEndpointCandidates.length}
+					</div>
+					<div class="backup-endpoint-list">
+						{#if backupFilteredEndpointCandidates.length === 0}
+							<div class="detail-value" style="font-size:0.8em; opacity:0.6;">No endpoints match this filter.</div>
+						{:else}
+							{#each backupFilteredEndpointCandidates as endpointEntry (endpointEntry.path)}
+								<label class="permission-toggle-row">
+									<div>
+										<div class="permission-name">{endpointEntry.name}</div>
+									</div>
+									<input
+										type="checkbox"
+										class="input permission-toggle-input"
+										checked={backupSelectedEndpointPaths.includes(endpointEntry.path)}
+										on:change={(event) => toggleBackupEndpointSelection(endpointEntry.path, event.currentTarget.checked)}
+									/>
+								</label>
+							{/each}
+						{/if}
+					</div>
+				</div>
+			{/if}
+		</div>
+
+		<svelte:fragment slot="actions">
+			<button type="button" class="btn-secondary" on:click={closeExportOptionsModal}>Cancel</button>
+			<button type="button" class="btn-primary" on:click={confirmExportBackupFromModal}>
+				<i class="fa-solid fa-file-export me-2"></i>Export ZIP
+			</button>
+		</svelte:fragment>
 	</Modal>
 
 	<Modal
@@ -2962,6 +3131,43 @@
 	.network-empty {
 		opacity: 0.68;
 		font-size: 0.85rem;
+	}
+
+	.backup-export-options {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.backup-toggle-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 0.85em;
+	}
+
+	.backup-endpoint-picker {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 10px;
+		border: 1px solid rgba(255,255,255,0.08);
+		border-radius: 10px;
+		background: rgba(255,255,255,0.02);
+	}
+
+	.backup-endpoint-picker-toolbar {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.backup-endpoint-list {
+		max-height: 200px;
+		overflow: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
 	}
 
 	.network-error {

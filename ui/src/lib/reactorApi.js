@@ -883,18 +883,18 @@ export async function deleteTlsCert() {
 	return { ok: false, error: 'bridge unavailable' };
 }
 
-export async function exportBackup() {
+export async function exportBackup(options = {}) {
 	const bridge = getBridge();
 	if (bridge && bridge.exportBackup) {
-		return bridge.exportBackup();
+		return bridge.exportBackup(options);
 	}
 
 	const mobile = getMobilePlugin();
 	if (mobile && mobile.exportBackup) {
-		return mobile.exportBackup();
+		return mobile.exportBackup(options);
 	}
 
-	const nativeResult = await callNative('exportBackup');
+	const nativeResult = await callNative('exportBackup', options);
 	if (nativeResult) {
 		return nativeResult;
 	}

@@ -2,6 +2,23 @@ const fs = require('fs/promises');
 const path = require('path');
 const AdmZip = require('adm-zip');
 
+function normalizeBackupExportOptions(rawOptions = {}) {
+	const source = rawOptions && typeof rawOptions === 'object' ? rawOptions : {};
+	const includeConnections = source.includeConnections !== false;
+	const includeEndpoints = source.includeEndpoints !== false;
+	const endpointPaths = Array.isArray(source.endpointPaths)
+		? Array.from(new Set(source.endpointPaths.map((value) => String(value || '').trim()).filter(Boolean)))
+		: [];
+	const endpointSelectionProvided = source.endpointSelectionProvided === true;
+
+	return {
+		includeConnections,
+		includeEndpoints,
+		endpointPaths,
+		endpointSelectionProvided,
+	};
+}
+
 function getBackupEntries(rootDir) {
 	return [
 		{ sourcePath: path.join(rootDir, 'endpoints'), archiveName: 'endpoints' },
@@ -43,9 +60,67 @@ async function addPathToZip(zip, sourcePath, archiveName) {
 	zip.addFile(archiveName.replace(/\\/g, '/'), data);
 }
 
-async function buildBackupZip(rootDir) {
+function resolveSelectableEndpointDirs(rootDir, endpointPaths = []) {
+	const endpointsRoot = path.resolve(path.join(rootDir, 'endpoints'));
+	const selectedDirs = new Set();
+
+	for (const endpointPath of endpointPaths) {
+		const normalizedPath = path.resolve(String(endpointPath || '').trim());
+		if (!normalizedPath.startsWith(endpointsRoot + path.sep)) {
+			continue;
+		}
+
+		const relative = path.relative(endpointsRoot, normalizedPath);
+		if (!relative || relative.startsWith('..')) {
+			continue;
+		}
+
+		const [firstSegment] = relative.split(path.sep);
+		if (!firstSegment) {
+			continue;
+		}
+
+		selectedDirs.add(path.join(endpointsRoot, firstSegment));
+	}
+
+	return Array.from(selectedDirs.values());
+}
+
+async function buildBackupZip(rootDir, rawOptions = {}) {
+	const options = normalizeBackupExportOptions(rawOptions);
 	const zip = new AdmZip();
 	for (const entry of getBackupEntries(rootDir)) {
+		if (entry.archiveName === 'working-mode.json' && !options.includeConnections) {
+			continue;
+		}
+
+		if (entry.archiveName === 'endpoints') {
+			if (!options.includeEndpoints) {
+				continue;
+			}
+
+			const selectedEndpointDirs = resolveSelectableEndpointDirs(rootDir, options.endpointPaths);
+			if (options.endpointSelectionProvided) {
+				if (selectedEndpointDirs.length === 0) {
+					continue;
+				}
+
+				for (const endpointDir of selectedEndpointDirs) {
+					const archiveName = path.join('endpoints', path.basename(endpointDir));
+					await addPathToZip(zip, endpointDir, archiveName);
+				}
+				continue;
+			}
+
+			if (selectedEndpointDirs.length > 0) {
+				for (const endpointDir of selectedEndpointDirs) {
+					const archiveName = path.join('endpoints', path.basename(endpointDir));
+					await addPathToZip(zip, endpointDir, archiveName);
+				}
+				continue;
+			}
+		}
+
 		await addPathToZip(zip, entry.sourcePath, entry.archiveName);
 	}
 

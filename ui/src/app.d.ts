@@ -36,7 +36,7 @@ declare global {
 			setMessageQueueTtlDays?: (ttlDays: number) => Promise<any>;
 			flushMessageQueue?: () => Promise<any>;
 			clearMessageQueue?: () => Promise<any>;
-			exportBackup?: () => Promise<any>;
+			exportBackup?: (options?: any) => Promise<any>;
 			importBackup?: () => Promise<any>;
 			requestRemoteEndpointsP2P?: (target: string, timeoutMs: number) => Promise<any>;
 		};

@@ -407,7 +407,7 @@ function setupIpcHandlers(runtime, options = {}) {
 		return { ok: true, defaultProgramPath: nextSettings.defaultProgramPath };
 	});
 
-	ipcMain.handle('export-backup', async () => {
+	ipcMain.handle('export-backup', async (_, options) => {
 		if (!runtime) {
 			return { ok: false, error: 'runtime not ready' };
 		}
@@ -426,7 +426,7 @@ function setupIpcHandlers(runtime, options = {}) {
 		}
 
 		try {
-			const zip = await buildBackupZip(runtime.reactorRootDir || path.dirname(runtime.endpointsDir));
+			const zip = await buildBackupZip(runtime.reactorRootDir || path.dirname(runtime.endpointsDir), options || {});
 			zip.writeZip(saveResult.filePath);
 			return { ok: true, path: saveResult.filePath };
 		} catch (error) {

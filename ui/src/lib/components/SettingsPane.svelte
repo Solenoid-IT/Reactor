@@ -680,7 +680,7 @@
 	<section class="detail-card settings-backup-card">
 		<h3><i class="fa-solid fa-box-archive me-2"></i>Backup</h3>
 		<div class="detail-value" style="font-size:0.82em; opacity:0.75; margin-bottom:10px;">
-			Export and import a full ZIP backup with endpoints, runtime configuration, and permissions.json.
+			Export and import a ZIP backup with endpoints, runtime configuration, and permissions.
 		</div>
 		<div class="settings-backup-actions">
 			<button type="button" class="btn-secondary" on:click={onExportBackup}>
@@ -857,6 +857,7 @@
 	.settings-backup-actions :global(button) {
 		flex: 1 1 180px;
 	}
+
 
 	.node-accordion-toggle {
 		width: 100%;

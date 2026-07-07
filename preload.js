@@ -61,7 +61,7 @@ contextBridge.exposeInMainWorld('reactor', {
 	setMessageQueueTtlDays: (ttlDays) => ipcRenderer.invoke('set-message-queue-ttl-days', ttlDays),
 	flushMessageQueue: () => ipcRenderer.invoke('flush-message-queue'),
 	clearMessageQueue: () => ipcRenderer.invoke('clear-message-queue'),
-	exportBackup: () => ipcRenderer.invoke('export-backup'),
+	exportBackup: (options) => ipcRenderer.invoke('export-backup', options),
 	importBackup: () => ipcRenderer.invoke('import-backup'),
 	onRuntimeStatus: (callback) => createStatusListener('reactor-runtime-status', callback),
 });

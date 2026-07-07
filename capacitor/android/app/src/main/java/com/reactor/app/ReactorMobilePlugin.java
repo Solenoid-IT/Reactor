@@ -1279,18 +1279,103 @@ public class ReactorMobilePlugin extends Plugin {
         return backupsDir;
     }
 
-    private List<File> getBackupSourceEntries() {
-        return Arrays.asList(
-                getEndpointsDir(),
-                getWorkingModeFile(),
-                getReactorNameFile(),
-                getEnvDir(),
-            getPermissionsFile(),
-                getUiSettingsFile(),
-                getWorkflowFile(),
-                getGlobalLogFile(),
-                getTlsDir()
-        );
+    private List<File> getBackupSourceEntries(boolean includeConnections, boolean includeEndpoints, boolean endpointSelectionProvided, List<File> selectedEndpointDirs) {
+        List<File> entries = new ArrayList<>();
+
+        if (includeEndpoints) {
+            if (endpointSelectionProvided) {
+                if (selectedEndpointDirs != null && !selectedEndpointDirs.isEmpty()) {
+                    entries.addAll(selectedEndpointDirs);
+                }
+            } else if (selectedEndpointDirs != null && !selectedEndpointDirs.isEmpty()) {
+                entries.addAll(selectedEndpointDirs);
+            } else {
+                entries.add(getEndpointsDir());
+            }
+        }
+
+        if (includeConnections) {
+            entries.add(getWorkingModeFile());
+        }
+
+        entries.add(getReactorNameFile());
+        entries.add(getEnvDir());
+        entries.add(getPermissionsFile());
+        entries.add(getUiSettingsFile());
+        entries.add(getWorkflowFile());
+        entries.add(getGlobalLogFile());
+        entries.add(getTlsDir());
+        return entries;
+    }
+
+    private List<String> getRequestedBackupEndpointPaths(PluginCall call) {
+        JSArray input = call != null ? call.getArray("endpointPaths", new JSArray()) : new JSArray();
+        List<String> normalized = new ArrayList<>();
+        if (input == null) {
+            return normalized;
+        }
+
+        for (int index = 0; index < input.length(); index += 1) {
+            String endpointPath = String.valueOf(input.optString(index, "")).trim();
+            if (!endpointPath.isEmpty() && !normalized.contains(endpointPath)) {
+                normalized.add(endpointPath);
+            }
+        }
+
+        return normalized;
+    }
+
+    private List<File> resolveSelectedEndpointExportDirs(List<String> endpointPaths) {
+        List<File> selectedDirs = new ArrayList<>();
+        if (endpointPaths == null || endpointPaths.isEmpty()) {
+            return selectedDirs;
+        }
+
+        try {
+            File endpointsRoot = getEndpointsDir().getCanonicalFile();
+            String endpointsRootPath = endpointsRoot.getCanonicalPath();
+            Set<String> seen = new LinkedHashSet<>();
+
+            for (String endpointPath : endpointPaths) {
+                String rawPath = String.valueOf(endpointPath == null ? "" : endpointPath).trim();
+                if (rawPath.isEmpty()) {
+                    continue;
+                }
+
+                File candidate = new File(rawPath).getCanonicalFile();
+                String candidatePath = candidate.getCanonicalPath();
+                if (!candidatePath.startsWith(endpointsRootPath + File.separator)) {
+                    continue;
+                }
+
+                Path relative = endpointsRoot.toPath().relativize(candidate.toPath());
+                if (relative.getNameCount() < 1) {
+                    continue;
+                }
+
+                String endpointDirName = String.valueOf(relative.getName(0)).trim();
+                if (endpointDirName.isEmpty()) {
+                    continue;
+                }
+
+                File endpointDir = new File(endpointsRoot, endpointDirName).getCanonicalFile();
+                if (!endpointDir.exists() || !endpointDir.isDirectory()) {
+                    continue;
+                }
+
+                String endpointDirPath = endpointDir.getCanonicalPath();
+                if (seen.contains(endpointDirPath)) {
+                    continue;
+                }
+
+                seen.add(endpointDirPath);
+                selectedDirs.add(endpointDir);
+            }
+        } catch (Exception ignored) {
+            // Keep full endpoint export fallback when path parsing fails.
+        }
+
+        return selectedDirs;
     }
 
     private String toArchiveRelativeName(File target) throws IOException {
@@ -3617,11 +3702,17 @@ public class ReactorMobilePlugin extends Plugin {
         try {
             writeUiSettingsSnapshot();
 
+            boolean includeConnections = call.getBoolean("includeConnections", true);
+            boolean includeEndpoints = call.getBoolean("includeEndpoints", true);
+            boolean endpointSelectionProvided = call.getBoolean("endpointSelectionProvided", false);
+            List<String> requestedEndpointPaths = getRequestedBackupEndpointPaths(call);
+            List<File> selectedEndpointDirs = resolveSelectedEndpointExportDirs(requestedEndpointPaths);
+
             String timestamp = String.valueOf(System.currentTimeMillis());
             File target = new File(getContext().getCacheDir(), "reactor-backup-" + timestamp + ".zip");
 
             try (ZipOutputStream output = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(target)))) {
-                for (File source : getBackupSourceEntries()) {
+                for (File source : getBackupSourceEntries(includeConnections, includeEndpoints, endpointSelectionProvided, selectedEndpointDirs)) {
                     addPathToZip(output, source);
                 }
 
