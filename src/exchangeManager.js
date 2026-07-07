@@ -3,6 +3,7 @@ const fs = require('fs/promises');
 const path = require('path');
 const http = require('http');
 const https = require('https');
+const { DEFAULT_LOCAL_SERVER_PORT } = require('./runtime/coreUtils');
 
 const RECONNECT_DELAY_MS = 5000;
 const DEFAULT_WS_HEARTBEAT_INTERVAL_MS = 15000;
@@ -1864,7 +1865,7 @@ class ExchangeManager {
 			this.wsClient.send(JSON.stringify({
 				type: 'profile',
 				endpoints: this._sanitizeDiscoveryEndpoints(endpoints),
-				httpPort: Number(this.runtime.httpServerPort) || 9063,
+				httpPort: Number(this.runtime.httpServerPort) || DEFAULT_LOCAL_SERVER_PORT,
 				httpTls: Boolean(this.runtime.tlsEnabled),
 			}));
 		} catch {
@@ -1885,7 +1886,7 @@ class ExchangeManager {
 			name: safeName,
 			token,
 			endpoints,
-			httpPort: Number(this.runtime.httpServerPort) || 9063,
+			httpPort: Number(this.runtime.httpServerPort) || DEFAULT_LOCAL_SERVER_PORT,
 			httpTls: Boolean(this.runtime.tlsEnabled),
 		};
 	}

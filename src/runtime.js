@@ -21,6 +21,7 @@ const { createNodeRuntimeApi } = require('./platform/nodeRuntimeApi');
 const { ExchangeManager } = require('./exchangeManager');
 const { TlsManager } = require('./tlsManager');
 const { P2PDataChannelManager } = require('./p2pDataChannelManager');
+const { DEFAULT_LOCAL_SERVER_PORT } = require('./runtime/coreUtils');
 
 const ALL_WATCH_LISTENERS = new Set([
 	'file:created',
@@ -100,7 +101,7 @@ function collectKnownEntries(rootPath, map) {
 
 	for (const entry of entries) {
 		const fullPath = path.join(rootPath, entry.name);
-		if (entry.isDirectory()) {
+			httpPort: Number(this.httpServerPort) || DEFAULT_LOCAL_SERVER_PORT,
 			map.set(fullPath, 'dir');
 			collectKnownEntries(fullPath, map);
 		} else if (entry.isFile()) {
@@ -198,7 +199,7 @@ function parseEndpointSelector(rawSelector) {
 	};
 }
 
-function parseNetNodeTarget(rawNode, defaultPort = 9063) {
+function parseNetNodeTarget(rawNode, defaultPort = DEFAULT_LOCAL_SERVER_PORT) {
 	const safeNode = String(rawNode || '').trim().toLowerCase();
 	if (!safeNode) {
 		return null;
@@ -241,7 +242,7 @@ function parseNetNodeTarget(rawNode, defaultPort = 9063) {
 	};
 }
 
-function parseNodeDispatchTarget(rawTarget, defaultDirectPort = 9063) {
+function parseNodeDispatchTarget(rawTarget, defaultDirectPort = DEFAULT_LOCAL_SERVER_PORT) {
 	const trimmed = String(rawTarget || '').trim();
 	if (!trimmed) {
 		return null;
@@ -362,7 +363,7 @@ function getDelayToNextMidnightBoundary(intervalMs, nowMs = Date.now()) {
 	return intervalMs - remainder;
 }
 
-function normalizeHostPort(value, defaultPort = 9063) {
+function normalizeHostPort(value, defaultPort = DEFAULT_LOCAL_SERVER_PORT) {
 	const raw = String(value || '').trim().toLowerCase();
 	if (!raw) {
 		return null;
@@ -1523,7 +1524,7 @@ class ReactorRuntime {
 		this.streamCleanupIntervalMs = this.readQueueDuration('REACTOR_STREAM_CLEANUP_INTERVAL_MS', DEFAULT_STREAM_CLEANUP_INTERVAL_MS, 5 * 1000);
 		this.streamCleanupTimer = null;
 		this.httpServer = null;
-		this.httpServerPort = Number(options.httpServerPort || process.env.REACTOR_HTTP_PORT || 9063);
+		this.httpServerPort = Number(options.httpServerPort || process.env.REACTOR_HTTP_PORT || DEFAULT_LOCAL_SERVER_PORT);
 		this.httpServerLogs = [];
 		this.reactorNamePath = path.join(this.reactorRootDir, 'name');
 		this.cachedReactorName = null;
@@ -2926,7 +2927,7 @@ class ReactorRuntime {
 			address: null,
 			ip: null,
 			port: null,
-			httpPort: Number(this.httpServerPort) || 9063,
+			httpPort: Number(this.httpServerPort) || DEFAULT_LOCAL_SERVER_PORT,
 			httpTls: Boolean(this.tlsEnabled),
 			endpointsEndpoint: null,
 			connectedAt: this.runtimeStartedAt,
@@ -3705,7 +3706,7 @@ class ReactorRuntime {
 		if (rawSender) {
 			const loweredSender = rawSender.toLowerCase();
 			if (isLikelyNetworkIdentity(loweredSender)) {
-				const normalizedSender = normalizeHostPort(loweredSender, 9063);
+				const normalizedSender = normalizeHostPort(loweredSender, DEFAULT_LOCAL_SERVER_PORT);
 				if (normalizedSender) {
 					const [senderHost] = normalizedSender.split(':');
 					candidates.add(normalizedSender);
@@ -3720,7 +3721,7 @@ class ReactorRuntime {
 		}
 
 		if (remoteHost) {
-			const normalizedRemote = normalizeHostPort(remoteHost, 9063);
+			const normalizedRemote = normalizeHostPort(remoteHost, DEFAULT_LOCAL_SERVER_PORT);
 			if (normalizedRemote) {
 				candidates.add(normalizedRemote);
 				candidates.add(`net:${normalizedRemote}`);
@@ -4221,7 +4222,7 @@ class ReactorRuntime {
 
 		const preferredPorts = hasExplicitPort
 			? [null]
-			: Array.from(new Set([this.httpServerPort, 9063].filter((port) => Number.isInteger(port) && port > 0)));
+			: Array.from(new Set([this.httpServerPort, DEFAULT_LOCAL_SERVER_PORT].filter((port) => Number.isInteger(port) && port > 0)));
 
 		const normalizedTargets = hasExplicitPort
 			? [normalizeHostPort(effectiveTarget, this.httpServerPort)].filter(Boolean)
@@ -4252,7 +4253,7 @@ class ReactorRuntime {
 		for (let index = 0; index < normalizedTargets.length; index += 1) {
 			const normalizedTarget = normalizedTargets[index];
 			const [host, portString] = normalizedTarget.split(':');
-			const port = Number(portString || 9063);
+			const port = Number(portString || DEFAULT_LOCAL_SERVER_PORT);
 			const isLast = index === normalizedTargets.length - 1;
 			const shortTimeout = isLast ? undefined : 2000;
 

@@ -1,4 +1,5 @@
 import { getBridge, getMobilePlugin, invokeNative } from './reactorBridge';
+import { DEFAULT_LOCAL_SERVER_PORT } from './defaults';
 
 async function callNative(methodName, options = {}) {
 	const nativeResult = await invokeNative('ReactorMobile', methodName, options);
@@ -40,7 +41,7 @@ export async function getUiSettings() {
 		return nativeResult;
 	}
 
-	return { defaultProgramPath: '', httpServerPort: 9063 };
+	return { defaultProgramPath: '', httpServerPort: DEFAULT_LOCAL_SERVER_PORT };
 }
 
 export async function getPermissionsConfig() {

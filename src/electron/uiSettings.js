@@ -2,6 +2,7 @@ const { app } = require('electron');
 const fs = require('fs/promises');
 const path = require('path');
 const { DEFAULT_CONNECTIONS_CONFIG, readConnectionsConfig, writeConnectionsConfig } = require('../connectionsConfig');
+const { DEFAULT_LOCAL_SERVER_PORT } = require('../runtime/coreUtils');
 
 const UI_SETTINGS_FILE = 'ui-settings.json';
 const CONNECTIONS_FILE = 'connections.json';
@@ -43,13 +44,13 @@ async function readUiSettings() {
 		};
 		return {
 			defaultProgramPath: parsed.defaultProgramPath || '',
-			httpServerPort: Number(parsed.httpServerPort) || 9063,
+			httpServerPort: Number(parsed.httpServerPort) || DEFAULT_LOCAL_SERVER_PORT,
 			...normalizedWorkingMode,
 		};
 	} catch (error) {
 		return {
 			defaultProgramPath: '',
-			httpServerPort: 9063,
+			httpServerPort: DEFAULT_LOCAL_SERVER_PORT,
 			exchangeMode: 'node',
 			exchangeHost: DEFAULT_CONNECTIONS_CONFIG.exchange.host,
 			exchangePort: DEFAULT_CONNECTIONS_CONFIG.exchange.port,
@@ -106,7 +107,7 @@ async function writeUiSettings(nextSettings) {
 	};
 	const uiSettingsOnly = {
 		defaultProgramPath: merged.defaultProgramPath || '',
-		httpServerPort: Number(merged.httpServerPort) || 9063,
+		httpServerPort: Number(merged.httpServerPort) || DEFAULT_LOCAL_SERVER_PORT,
 	};
 	await fs.writeFile(getUiSettingsPath(), `${JSON.stringify(uiSettingsOnly, null, 2)}\n`, 'utf8');
 }

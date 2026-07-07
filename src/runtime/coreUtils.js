@@ -2,6 +2,13 @@ const fsNative = require('fs');
 const os = require('os');
 const path = require('path');
 
+function parsePositiveInt(rawValue, fallback) {
+	const parsed = Number(rawValue);
+	return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const DEFAULT_LOCAL_SERVER_PORT = parsePositiveInt(process.env.DEFAULT_LOCAL_SERVER_PORT, 9063);
+
 function isUuidV4(value) {
 	return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '').trim());
 }
@@ -125,7 +132,7 @@ function getDelayToNextMidnightBoundary(intervalMs, nowMs = Date.now()) {
 	return intervalMs - remainder;
 }
 
-function normalizeHostPort(value, defaultPort = 9063) {
+function normalizeHostPort(value, defaultPort = DEFAULT_LOCAL_SERVER_PORT) {
 	const raw = String(value || '').trim().toLowerCase();
 	if (!raw) {
 		return null;
@@ -182,6 +189,7 @@ function collectKnownEntries(rootPath, map) {
 }
 
 module.exports = {
+	DEFAULT_LOCAL_SERVER_PORT,
 	collectKnownEntries,
 	detectWatchType,
 	getDelayToNextMidnightBoundary,

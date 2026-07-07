@@ -3,6 +3,8 @@
  * Extracts: @enabled, @debug, @schedule, @on, @watch
  */
 
+const { DEFAULT_LOCAL_SERVER_PORT } = require('./runtime/coreUtils');
+
 const VALID_WATCH_LISTENERS = new Set([
 	'file:created',
 	'file:deleted',
@@ -360,7 +362,7 @@ function isLikelyHostSender(value) {
 	return false;
 }
 
-function normalizeMessageSender(rawSender, defaultPort = 9063) {
+function normalizeMessageSender(rawSender, defaultPort = DEFAULT_LOCAL_SERVER_PORT) {
 	const sender = String(rawSender || '').trim();
 	if (!sender) {
 		return null;

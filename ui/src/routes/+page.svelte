@@ -60,12 +60,13 @@
 		subscribeP2PStatus,
 		subscribeExchangeStatus,
 	} from '$lib/reactorApi';
+import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 
 	let endpoints = [];
 	let endpointsPath = '';
 	let selectedIndex = -1;
 	let reactorName = '';
-	let httpPort = 9063;
+	let httpPort = DEFAULT_LOCAL_SERVER_PORT;
 	let exchangeMode = 'node';
 	let exchangeEnabled = false;
 	let exchangeHost = '';
@@ -1370,7 +1371,7 @@
 
 			endpoints = Array.isArray(info?.endpoints) ? info.endpoints : [];
 			endpointsPath = info?.path || '';
-			httpPort = Number(serverConfig?.config?.port || settings?.httpServerPort || 9063);
+			httpPort = Number(serverConfig?.config?.port || settings?.httpServerPort || DEFAULT_LOCAL_SERVER_PORT);
 			reactorName = String(currentReactorName?.name || '');
 			applyPermissionsConfigResult(permissionsConfigResult);
 

@@ -3,9 +3,10 @@
 	import Form from './Form.svelte';
 	import Helper from './Helper.svelte';
 	import PasswordField from './PasswordField.svelte';
+	import { DEFAULT_LOCAL_SERVER_PORT } from '$lib/defaults';
 
 	export let reactorName = '';
-	export let httpPort = 9063;
+	export let httpPort = DEFAULT_LOCAL_SERVER_PORT;
 	export let tlsEnabled = false;
 	export let tlsSubject = '';
 	export let tlsNotAfter = '';
