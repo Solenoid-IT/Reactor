@@ -1574,6 +1574,8 @@ class ReactorRuntime {
 		this.watchCreatedLargeFileBytes = Math.max(1, Number(process.env.REACTOR_WATCH_CREATED_LARGE_FILE_BYTES) || DEFAULT_WATCH_CREATED_LARGE_FILE_BYTES);
 		this.messageQueueFlushTimer = null;
 		this.isFlushingMessageQueue = false;
+		this.exchangeStreamStartQueueTail = Promise.resolve();
+		this.pendingExchangeStreamStarts = 0;
 	}
 
 	setUiStatusSink(handler) {
@@ -1977,6 +1979,7 @@ class ReactorRuntime {
 		);
 		return {
 			...config,
+			pendingQueuedStreams: this.pendingExchangeStreamStarts,
 			statusDebounceMs,
 			connection: this.exchangeManager && typeof this.exchangeManager.getConnectionStatus === 'function'
 				? this.exchangeManager.getConnectionStatus()
@@ -4111,139 +4114,335 @@ class ReactorRuntime {
 		}
 	}
 
-	async streamToNode(target, source, options = {}) {
+	resolveStreamRetryConfig(options = {}) {
 		const safeOptions = options && typeof options === 'object' ? options : {};
-		const safeChunkSize = Math.max(1024, Math.min(1024 * 1024, Number(safeOptions.chunkSize) || 64 * 1024));
-		const streamId = String(safeOptions.streamId || crypto.randomUUID());
-		const contentType = String(safeOptions.contentType || 'application/octet-stream');
-		const metadata = safeOptions.metadata && typeof safeOptions.metadata === 'object' ? safeOptions.metadata : {};
-		const headers = safeOptions.headers && typeof safeOptions.headers === 'object' ? safeOptions.headers : {};
-		const totalBytesHint = Number.isFinite(Number(safeOptions.totalBytes)) ? Math.max(0, Number(safeOptions.totalBytes)) : null;
-
-		const deliveredViaSeen = new Set();
-		const trackDeliveredVia = (result) => {
-			const safe = String(result?.deliveredVia || '').trim().toUpperCase();
-			if (safe === 'LOCAL' || safe === 'P2P_DIRECT' || safe === 'P2P_RELAY' || safe === 'EXCHANGE') {
-				deliveredViaSeen.add(safe);
-			}
-		};
-
-		const startResult = await this.sendNodeMessage(target, {
-			__reactorStream: true,
-			phase: 'start',
-			streamId,
-			contentType,
-			chunkSize: safeChunkSize,
-			totalBytes: totalBytesHint,
-			metadata,
-		}, headers);
-		trackDeliveredVia(startResult);
-
-		let totalBytes = 0;
-		let chunks = 0;
-		const digest = crypto.createHash('sha256');
-
-		for await (const chunk of iterateStreamSourceChunks(source, safeChunkSize)) {
-			digest.update(chunk);
-			totalBytes += chunk.length;
-			const chunkResult = await this.sendNodeMessage(target, {
-				__reactorStream: true,
-				phase: 'chunk',
-				streamId,
-				index: chunks,
-				encoding: 'base64',
-				size: chunk.length,
-				data: chunk.toString('base64'),
-			}, headers);
-			trackDeliveredVia(chunkResult);
-			chunks += 1;
-		}
-
-		const digestSha256 = digest.digest('hex');
-		const endResult = await this.sendNodeMessage(target, {
-			__reactorStream: true,
-			phase: 'end',
-			streamId,
-			chunks,
-			totalBytes,
-			digestSha256,
-		}, headers);
-		trackDeliveredVia(endResult);
-
-		let deliveredVia = null;
-		if (deliveredViaSeen.has('EXCHANGE')) {
-			deliveredVia = 'EXCHANGE';
-		} else if (deliveredViaSeen.has('P2P_RELAY')) {
-			deliveredVia = 'P2P_RELAY';
-		} else if (deliveredViaSeen.has('P2P_DIRECT')) {
-			deliveredVia = 'P2P_DIRECT';
-		} else if (deliveredViaSeen.has('LOCAL')) {
-			deliveredVia = 'LOCAL';
-		}
+		const maxRetriesRaw = Number.isFinite(Number(safeOptions.retryMaxRetries))
+			? Number(safeOptions.retryMaxRetries)
+			: Number(safeOptions.maxRetries);
+		const retryDelayRaw = Number.isFinite(Number(safeOptions.retryDelayMs))
+			? Number(safeOptions.retryDelayMs)
+			: 1000;
+		const reconnectWaitRaw = Number.isFinite(Number(safeOptions.retryReconnectWaitMs))
+			? Number(safeOptions.retryReconnectWaitMs)
+			: 4000;
+		const enabled = safeOptions.retry === undefined ? true : Boolean(safeOptions.retry);
 
 		return {
-			target: String(target || '').trim(),
-			via: 'direct',
-			deliveredVia,
-			streamId,
-			chunks,
-			totalBytes,
-			digestSha256,
+			enabled,
+			maxRetries: Math.max(0, Math.min(200, Number.isFinite(maxRetriesRaw) ? Math.floor(maxRetriesRaw) : 12)),
+			retryDelayMs: Math.max(100, Math.min(30000, Number.isFinite(retryDelayRaw) ? Math.floor(retryDelayRaw) : 1000)),
+			reconnectWaitMs: Math.max(500, Math.min(60000, Number.isFinite(reconnectWaitRaw) ? Math.floor(reconnectWaitRaw) : 4000)),
 		};
+	}
+
+	async waitForExchangeReconnection(timeoutMs) {
+		if (!this.exchangeManager || typeof this.exchangeManager.waitForClientConnection !== 'function') {
+			await new Promise((resolve) => setTimeout(resolve, Math.max(100, Number(timeoutMs) || 1000)));
+			return { connected: false, reason: 'exchange manager does not support waitForClientConnection' };
+		}
+
+		return this.exchangeManager.waitForClientConnection(timeoutMs);
+	}
+
+	isExchangeConnectionReady() {
+		if (!this.exchangeManager || typeof this.exchangeManager.getConnectionStatus !== 'function') {
+			return false;
+		}
+
+		const status = this.exchangeManager.getConnectionStatus();
+		return Boolean(status && status.connected === true);
+	}
+
+	async acquireQueuedExchangeStreamStart(target, options = {}) {
+		const safeOptions = options && typeof options === 'object' ? options : {};
+		const shouldEnqueueOnFail = Boolean(safeOptions.enqueueOnFail) && !Boolean(safeOptions.noEnqueue);
+		if (!shouldEnqueueOnFail) {
+			return () => {};
+		}
+
+		if (this.isExchangeConnectionReady()) {
+			return () => {};
+		}
+
+		const safeTarget = String(target || '').trim() || 'unknown-target';
+		const previousTail = this.exchangeStreamStartQueueTail;
+		let releaseTurn = null;
+		const thisTurn = new Promise((resolve) => {
+			releaseTurn = resolve;
+		});
+
+		this.pendingExchangeStreamStarts += 1;
+		this.exchangeStreamStartQueueTail = previousTail
+			.catch(() => {})
+			.then(() => thisTurn);
+
+		await previousTail.catch(() => {});
+		this.log(`[Exchange] Queued stream start for ${safeTarget} (waiting for exchange connection)`);
+
+		try {
+			let waitCycles = 0;
+			while (!this.isExchangeConnectionReady()) {
+				waitCycles += 1;
+				const waitResult = await this.waitForExchangeReconnection(5000);
+				if (!waitResult || waitResult.connected !== true) {
+					if (waitCycles === 1 || waitCycles % 6 === 0) {
+						const reason = String(waitResult?.reason || 'exchange connection unavailable');
+						this.log(`[Exchange] Stream start still queued for ${safeTarget}: ${reason}`);
+					}
+					await delay(250);
+				}
+			}
+		} catch (error) {
+			this.pendingExchangeStreamStarts = Math.max(0, this.pendingExchangeStreamStarts - 1);
+			if (typeof releaseTurn === 'function') {
+				releaseTurn();
+			}
+			throw error;
+		}
+
+		let released = false;
+		return () => {
+			if (released) {
+				return;
+			}
+			released = true;
+			this.pendingExchangeStreamStarts = Math.max(0, this.pendingExchangeStreamStarts - 1);
+			if (typeof releaseTurn === 'function') {
+				releaseTurn();
+			}
+		};
+	}
+
+	async runExchangeStreamOperationWithRetry(operation, label, retryConfig, onRetry = null) {
+		const safeConfig = retryConfig && typeof retryConfig === 'object'
+			? retryConfig
+			: this.resolveStreamRetryConfig({});
+		const safeLabel = String(label || 'stream operation');
+
+		let attempt = 0;
+		while (true) {
+			try {
+				return await operation();
+			} catch (error) {
+				if (!safeConfig.enabled || attempt >= safeConfig.maxRetries) {
+					throw error;
+				}
+
+				attempt += 1;
+				const errorMessage = String(error?.message || 'unknown exchange stream error');
+				this.log(`[Exchange] ${safeLabel} retry ${attempt}/${safeConfig.maxRetries} after error: ${errorMessage}`);
+
+				if (typeof onRetry === 'function') {
+					try {
+						onRetry({ attempt, error, label: safeLabel });
+					} catch {
+						// Ignore callback errors, retry loop must continue.
+					}
+				}
+
+				const waitResult = await this.waitForExchangeReconnection(safeConfig.reconnectWaitMs);
+				if (!waitResult || waitResult.connected !== true) {
+					const reason = String(waitResult?.reason || 'exchange connection not ready');
+					this.log(`[Exchange] ${safeLabel} retry ${attempt}: waiting for reconnect (${reason})`);
+				}
+
+				await new Promise((resolve) => setTimeout(resolve, safeConfig.retryDelayMs));
+			}
+		}
+	}
+
+	async streamToNode(target, source, options = {}) {
+		const safeOptions = options && typeof options === 'object' ? options : {};
+		const shouldEnqueueOnFail = safeOptions && safeOptions.noEnqueue
+			? false
+			: Boolean(safeOptions.enqueueOnFail);
+		const parsedTarget = parseNodeDispatchTarget(String(target || '').trim(), this.httpServerPort);
+		const needsExchangeAtStart = Boolean(
+			parsedTarget
+			&& parsedTarget.routeKind === 'logical'
+			&& parsedTarget.nodeName
+			&& !this.hasConnectedP2PRoute(parsedTarget.nodeName),
+		);
+
+		if (needsExchangeAtStart && shouldEnqueueOnFail) {
+			return this.streamToExchange(target, source, safeOptions);
+		}
+
+		let releaseQueuedStart = () => {};
+		if (needsExchangeAtStart) {
+			releaseQueuedStart = await this.acquireQueuedExchangeStreamStart(target, {
+				enqueueOnFail: shouldEnqueueOnFail,
+				noEnqueue: Boolean(safeOptions.noEnqueue),
+			});
+		}
+
+		try {
+			const streamDispatchOptions = {
+				enqueueOnFail: shouldEnqueueOnFail,
+				noEnqueue: Boolean(safeOptions.noEnqueue),
+			};
+			const safeChunkSize = Math.max(1024, Math.min(1024 * 1024, Number(safeOptions.chunkSize) || 64 * 1024));
+			const streamId = String(safeOptions.streamId || crypto.randomUUID());
+			const contentType = String(safeOptions.contentType || 'application/octet-stream');
+			const metadata = safeOptions.metadata && typeof safeOptions.metadata === 'object' ? safeOptions.metadata : {};
+			const headers = safeOptions.headers && typeof safeOptions.headers === 'object' ? safeOptions.headers : {};
+			const totalBytesHint = Number.isFinite(Number(safeOptions.totalBytes)) ? Math.max(0, Number(safeOptions.totalBytes)) : null;
+
+			const deliveredViaSeen = new Set();
+			const trackDeliveredVia = (result) => {
+				const safe = String(result?.deliveredVia || '').trim().toUpperCase();
+				if (safe === 'LOCAL' || safe === 'P2P_DIRECT' || safe === 'P2P_RELAY' || safe === 'EXCHANGE') {
+					deliveredViaSeen.add(safe);
+				}
+			};
+
+			const startResult = await this.sendNodeMessage(target, {
+				__reactorStream: true,
+				phase: 'start',
+				streamId,
+				contentType,
+				chunkSize: safeChunkSize,
+				totalBytes: totalBytesHint,
+				metadata,
+			}, headers, streamDispatchOptions);
+			releaseQueuedStart();
+			releaseQueuedStart = () => {};
+			trackDeliveredVia(startResult);
+
+			let totalBytes = 0;
+			let chunks = 0;
+			const digest = crypto.createHash('sha256');
+
+			for await (const chunk of iterateStreamSourceChunks(source, safeChunkSize)) {
+				digest.update(chunk);
+				totalBytes += chunk.length;
+				const chunkResult = await this.sendNodeMessage(target, {
+					__reactorStream: true,
+					phase: 'chunk',
+					streamId,
+					index: chunks,
+					encoding: 'base64',
+					size: chunk.length,
+					data: chunk.toString('base64'),
+				}, headers, streamDispatchOptions);
+				trackDeliveredVia(chunkResult);
+				chunks += 1;
+			}
+
+			const digestSha256 = digest.digest('hex');
+			const endResult = await this.sendNodeMessage(target, {
+				__reactorStream: true,
+				phase: 'end',
+				streamId,
+				chunks,
+				totalBytes,
+				digestSha256,
+			}, headers, streamDispatchOptions);
+			trackDeliveredVia(endResult);
+
+			let deliveredVia = null;
+			if (deliveredViaSeen.has('EXCHANGE')) {
+				deliveredVia = 'EXCHANGE';
+			} else if (deliveredViaSeen.has('P2P_RELAY')) {
+				deliveredVia = 'P2P_RELAY';
+			} else if (deliveredViaSeen.has('P2P_DIRECT')) {
+				deliveredVia = 'P2P_DIRECT';
+			} else if (deliveredViaSeen.has('LOCAL')) {
+				deliveredVia = 'LOCAL';
+			}
+
+			return {
+				target: String(target || '').trim(),
+				via: 'direct',
+				deliveredVia,
+				streamId,
+				chunks,
+				totalBytes,
+				digestSha256,
+			};
+		} finally {
+			releaseQueuedStart();
+		}
 	}
 
 	async streamToExchange(target, source, options = {}) {
 		const safeOptions = options && typeof options === 'object' ? options : {};
+		const shouldEnqueueOnFail = safeOptions && safeOptions.noEnqueue
+			? false
+			: Boolean(safeOptions.enqueueOnFail);
+		let releaseQueuedStart = await this.acquireQueuedExchangeStreamStart(target, {
+			enqueueOnFail: shouldEnqueueOnFail,
+			noEnqueue: Boolean(safeOptions.noEnqueue),
+		});
+		const retryConfig = this.resolveStreamRetryConfig(safeOptions);
+		const exchangeDispatchOptions = {
+			enqueueOnFail: shouldEnqueueOnFail,
+			noEnqueue: true,
+		};
 		const safeChunkSize = Math.max(1024, Math.min(1024 * 1024, Number(safeOptions.chunkSize) || 64 * 1024));
 		const streamId = String(safeOptions.streamId || crypto.randomUUID());
 		const contentType = String(safeOptions.contentType || 'application/octet-stream');
 		const metadata = safeOptions.metadata && typeof safeOptions.metadata === 'object' ? safeOptions.metadata : {};
 		const totalBytesHint = Number.isFinite(Number(safeOptions.totalBytes)) ? Math.max(0, Number(safeOptions.totalBytes)) : null;
 
-		await this.sendExchangeMessage(target, {
-			__reactorStream: true,
-			phase: 'start',
-			streamId,
-			contentType,
-			chunkSize: safeChunkSize,
-			totalBytes: totalBytesHint,
-			metadata,
-		});
+		try {
+			await this.runExchangeStreamOperationWithRetry(() => this.sendExchangeMessage(target, {
+				__reactorStream: true,
+				phase: 'start',
+				streamId,
+				contentType,
+				chunkSize: safeChunkSize,
+				totalBytes: totalBytesHint,
+				metadata,
+			}, exchangeDispatchOptions), `stream-start:${streamId}`, retryConfig);
+			releaseQueuedStart();
+			releaseQueuedStart = () => {};
 
-		let totalBytes = 0;
-		let chunks = 0;
-		const digest = crypto.createHash('sha256');
+			let totalBytes = 0;
+			let chunks = 0;
+			let resumeCount = 0;
+			const digest = crypto.createHash('sha256');
 
-		for await (const chunk of iterateStreamSourceChunks(source, safeChunkSize)) {
-			digest.update(chunk);
-			totalBytes += chunk.length;
-			if (!this.exchangeManager || typeof this.exchangeManager.sendStreamChunkBinary !== 'function') {
-				throw new Error('binary exchange streaming is not supported by current exchange manager');
+			for await (const chunk of iterateStreamSourceChunks(source, safeChunkSize)) {
+				digest.update(chunk);
+				totalBytes += chunk.length;
+				if (!this.exchangeManager || typeof this.exchangeManager.sendStreamChunkBinary !== 'function') {
+					throw new Error('binary exchange streaming is not supported by current exchange manager');
+				}
+
+				const currentIndex = chunks;
+				await this.runExchangeStreamOperationWithRetry(() => this.exchangeManager.sendStreamChunkBinary(target, streamId, currentIndex, chunk, {
+					enqueueOnFail: shouldEnqueueOnFail,
+				}), `stream-chunk:${streamId}:${currentIndex}`, retryConfig, () => {
+					resumeCount += 1;
+				});
+				chunks += 1;
 			}
 
-			await this.exchangeManager.sendStreamChunkBinary(target, streamId, chunks, chunk);
-			chunks += 1;
+			const digestSha256 = digest.digest('hex');
+			await this.runExchangeStreamOperationWithRetry(() => this.sendExchangeMessage(target, {
+				__reactorStream: true,
+				phase: 'end',
+				streamId,
+				chunks,
+				totalBytes,
+				digestSha256,
+			}, exchangeDispatchOptions), `stream-end:${streamId}`, retryConfig);
+
+			return {
+				target: String(target || '').trim().toLowerCase(),
+				via: 'exchange',
+				deliveredVia: 'EXCHANGE',
+				streamId,
+				chunks,
+				totalBytes,
+				digestSha256,
+				resumed: resumeCount > 0,
+				resumeCount,
+			};
+		} finally {
+			releaseQueuedStart();
 		}
-
-		const digestSha256 = digest.digest('hex');
-		await this.sendExchangeMessage(target, {
-			__reactorStream: true,
-			phase: 'end',
-			streamId,
-			chunks,
-			totalBytes,
-			digestSha256,
-		});
-
-		return {
-			target: String(target || '').trim().toLowerCase(),
-			via: 'exchange',
-			deliveredVia: 'EXCHANGE',
-			streamId,
-			chunks,
-			totalBytes,
-			digestSha256,
-		};
 	}
 
 	/**

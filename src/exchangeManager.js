@@ -1748,7 +1748,7 @@ class ExchangeManager {
 		};
 	}
 
-	async sendStreamChunkBinary(target, streamId, index, chunkBuffer) {
+	async sendStreamChunkBinary(target, streamId, index, chunkBuffer, options = {}) {
 		if (this.mode !== 'client') {
 			throw new Error('not in client mode');
 		}
@@ -1766,6 +1766,8 @@ class ExchangeManager {
 			throw new Error('invalid streamId');
 		}
 
+		const shouldEnqueueOnFail = Boolean(options && options.enqueueOnFail);
+
 		const buffer = Buffer.isBuffer(chunkBuffer) ? chunkBuffer : Buffer.from(chunkBuffer || []);
 		const safeIndex = Number.isFinite(Number(index)) ? Number(index) : -1;
 
@@ -1775,6 +1777,7 @@ class ExchangeManager {
 			streamId: safeStreamId,
 			index: safeIndex,
 			size: buffer.length,
+			enqueueOnFail: shouldEnqueueOnFail,
 		}));
 		this.wsClient.send(buffer, { binary: true });
 

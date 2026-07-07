@@ -406,6 +406,10 @@ declare module 'core' {
 	export interface NodeStreamOptions {
 		/** Per-chunk payload size in bytes. */
 		chunkSize?: number;
+		/** Queue stream packets on Exchange target-side failures. */
+		enqueueOnFail?: boolean;
+		/** Disable queue fallback explicitly. */
+		noEnqueue?: boolean;
 		/** Stream content type metadata. */
 		contentType?: string;
 		/** User metadata shipped with stream start/end packets. */
@@ -416,6 +420,14 @@ declare module 'core' {
 		headers?: HeadersMap;
 		/** Custom stream identifier (otherwise auto-generated). */
 		streamId?: string;
+		/** Enable/disable client-side retry/resume loop. Default: true. */
+		retry?: boolean;
+		/** Max number of retry attempts for failed stream operations. */
+		maxRetries?: number;
+		/** Delay between retry attempts in milliseconds. */
+		retryDelayMs?: number;
+		/** Time to wait for Exchange reconnection before next retry. */
+		retryReconnectWaitMs?: number;
 	}
 
 	/** Accepted source types for Node streaming APIs. */
@@ -444,6 +456,10 @@ declare module 'core' {
 		totalBytes: number;
 		/** SHA-256 digest of full stream payload. */
 		digestSha256: string;
+		/** True when one or more chunk retries/resume attempts were required. */
+		resumed?: boolean;
+		/** Number of chunk retry/resume attempts performed. */
+		resumeCount?: number;
 	}
 
 	/** Incoming stream packet helper exposed in STREAM events. */
