@@ -447,7 +447,30 @@ var __reactorCore = {
             var ct = typeof content === 'object' && content !== null
                 ? 'application/json; charset=utf-8'
                 : 'text/plain; charset=utf-8';
-            var r = __native.nodeSendMessage(String(target || ''), body, ct);
+
+            var opts = {};
+            if (typeof optsOrFlag === 'boolean') {
+                opts.enqueueOnFail = optsOrFlag;
+            } else if (optsOrFlag && typeof optsOrFlag === 'object') {
+                opts = optsOrFlag;
+            }
+
+            var nativePayload = {
+                body: body,
+                contentType: ct
+            };
+
+            if (opts.headers && typeof opts.headers === 'object') {
+                nativePayload.headers = opts.headers;
+            }
+            if (Object.prototype.hasOwnProperty.call(opts, 'enqueueOnFail')) {
+                nativePayload.enqueueOnFail = !!opts.enqueueOnFail;
+            }
+            if (Object.prototype.hasOwnProperty.call(opts, 'noEnqueue')) {
+                nativePayload.noEnqueue = !!opts.noEnqueue;
+            }
+
+            var r = __native.nodeSendMessage(String(target || ''), body, JSON.stringify(nativePayload));
             try { return JSON.parse(r); } catch (e) { return {}; }
         },
         exchange: function () {

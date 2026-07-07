@@ -4425,6 +4425,9 @@ public class ReactorHttpService extends Service {
                     // data might contain headers as JSON, try to parse it
                     String messageBody = data;
                     String contentType = "application/octet-stream";
+                    boolean hasEnqueuePreference = false;
+                    boolean enqueueOnFail = false;
+                    boolean noEnqueue = false;
                     try {
                         org.json.JSONObject dataObj = new org.json.JSONObject(data);
                         if (dataObj.has("body")) messageBody = dataObj.getString("body");
@@ -4434,10 +4437,25 @@ public class ReactorHttpService extends Service {
                             Iterator<String> keys = hdrs.keys();
                             while (keys.hasNext()) { String k = keys.next(); extraHeaders.put(k, hdrs.getString(k)); }
                         }
+                        if (dataObj.has("enqueueOnFail")) {
+                            hasEnqueuePreference = true;
+                            enqueueOnFail = parseBooleanLike(dataObj.opt("enqueueOnFail"));
+                        }
+                        if (dataObj.has("noEnqueue")) {
+                            noEnqueue = parseBooleanLike(dataObj.opt("noEnqueue"));
+                        }
                     } catch (Exception ignored) {
                         // If not JSON, treat entire data as message body
                     }
-                    SendDeliveryResult result = sendNodeMessageWithContentType(target, messageBody, contentType, extraHeaders);
+                    SendDeliveryResult result = sendNodeMessageWithContentType(
+                            target,
+                            messageBody,
+                            contentType,
+                            extraHeaders,
+                            hasEnqueuePreference,
+                            enqueueOnFail,
+                            noEnqueue
+                    );
                     appendProjectLog(endpoint, buildReadableGlobalLogLine("NODE_SEND",
                         "target=" + target + " deliveredVia=" + result.deliveredVia + " queued=" + result.queued));
                     org.json.JSONObject resp = new org.json.JSONObject();
@@ -5246,7 +5264,15 @@ public class ReactorHttpService extends Service {
             throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "unable to build stream start packet");
         }
         Set<String> deliveredViaSeen = new HashSet<>();
-        SendDeliveryResult startDelivery = sendNodeMessageWithContentType(streamTarget, start.toString(), "application/json; charset=utf-8", effectiveHeaders);
+        SendDeliveryResult startDelivery = sendNodeMessageWithContentType(
+            streamTarget,
+            start.toString(),
+            "application/json; charset=utf-8",
+            effectiveHeaders,
+            false,
+            false,
+            false
+        );
         deliveredViaSeen.add(String.valueOf(startDelivery.deliveredVia).trim().toUpperCase(Locale.ROOT));
 
         MessageDigest digest;
@@ -5280,7 +5306,15 @@ public class ReactorHttpService extends Service {
                     throw new RuntimeException(jsonError.getMessage() != null ? jsonError.getMessage() : "unable to build stream chunk packet");
                 }
 
-                SendDeliveryResult chunkDelivery = sendNodeMessageWithContentType(streamTarget, packet.toString(), "application/json; charset=utf-8", effectiveHeaders);
+                SendDeliveryResult chunkDelivery = sendNodeMessageWithContentType(
+                    streamTarget,
+                    packet.toString(),
+                    "application/json; charset=utf-8",
+                    effectiveHeaders,
+                    false,
+                    false,
+                    false
+                );
                 deliveredViaSeen.add(String.valueOf(chunkDelivery.deliveredVia).trim().toUpperCase(Locale.ROOT));
                 index += 1;
             }
@@ -5300,7 +5334,15 @@ public class ReactorHttpService extends Service {
         } catch (Exception error) {
             throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "unable to build stream end packet");
         }
-        SendDeliveryResult endDelivery = sendNodeMessageWithContentType(streamTarget, end.toString(), "application/json; charset=utf-8", effectiveHeaders);
+        SendDeliveryResult endDelivery = sendNodeMessageWithContentType(
+            streamTarget,
+            end.toString(),
+            "application/json; charset=utf-8",
+            effectiveHeaders,
+            false,
+            false,
+            false
+        );
         deliveredViaSeen.add(String.valueOf(endDelivery.deliveredVia).trim().toUpperCase(Locale.ROOT));
 
         String streamDeliveredVia = "";
@@ -5344,7 +5386,7 @@ public class ReactorHttpService extends Service {
         } catch (Exception error) {
             throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "unable to build exchange stream start packet");
         }
-        sendExchangeMessageNow(parsedTarget.originalTarget, start.toString(), "application/json");
+        sendExchangeMessageNow(parsedTarget.originalTarget, start.toString(), "application/json", false);
 
         MessageDigest digest;
         try {
@@ -5376,7 +5418,7 @@ public class ReactorHttpService extends Service {
                 } catch (Exception jsonError) {
                     throw new RuntimeException(jsonError.getMessage() != null ? jsonError.getMessage() : "unable to build exchange stream chunk packet");
                 }
-                sendExchangeMessageNow(parsedTarget.originalTarget, packet.toString(), "application/json");
+                sendExchangeMessageNow(parsedTarget.originalTarget, packet.toString(), "application/json", false);
                 index += 1;
             }
         } catch (IOException error) {
@@ -5395,7 +5437,7 @@ public class ReactorHttpService extends Service {
         } catch (Exception error) {
             throw new RuntimeException(error.getMessage() != null ? error.getMessage() : "unable to build exchange stream end packet");
         }
-        sendExchangeMessageNow(parsedTarget.originalTarget, end.toString(), "application/json");
+        sendExchangeMessageNow(parsedTarget.originalTarget, end.toString(), "application/json", false);
         appendGlobalLog(buildExchangeLog("STREAM_DELIVERED", "target=" + parsedTarget.originalTarget + " deliveredVia=EXCHANGE"));
     }
 
@@ -5407,11 +5449,39 @@ public class ReactorHttpService extends Service {
         return builder.toString();
     }
 
-    private SendDeliveryResult sendNodeMessageWithContentType(String target, String content, String contentType, Map<String, String> extraHeaders) {
+    private boolean parseBooleanLike(Object value) {
+        if (value == null || value == JSONObject.NULL) {
+            return false;
+        }
+        if (value instanceof Boolean) {
+            return (Boolean) value;
+        }
+        if (value instanceof Number) {
+            return ((Number) value).intValue() != 0;
+        }
+
+        String normalized = String.valueOf(value).trim().toLowerCase(Locale.ROOT);
+        return "1".equals(normalized)
+                || "true".equals(normalized)
+                || "yes".equals(normalized)
+                || "on".equals(normalized);
+    }
+
+    private SendDeliveryResult sendNodeMessageWithContentType(
+            String target,
+            String content,
+            String contentType,
+            Map<String, String> extraHeaders,
+            boolean hasEnqueuePreference,
+            boolean enqueueOnFail,
+            boolean noEnqueue
+    ) {
         String targetValue = String.valueOf(target).trim();
         if (targetValue.isEmpty()) {
             throw new RuntimeException("invalid target");
         }
+
+        boolean shouldEnqueueOnFail = !noEnqueue && hasEnqueuePreference && enqueueOnFail;
 
         ParsedTarget parsedTarget = parseTarget(targetValue);
         if (parsedTarget == null) {
@@ -5460,9 +5530,17 @@ public class ReactorHttpService extends Service {
             }
 
             try {
-                sendExchangeMessageNow(parsedTarget.originalTarget, String.valueOf(content), String.valueOf(contentType));
+                sendExchangeMessageNow(
+                        parsedTarget.originalTarget,
+                        String.valueOf(content),
+                        String.valueOf(contentType),
+                        shouldEnqueueOnFail
+                );
                 return SendDeliveryResult.success(parsedTarget.originalTarget, "EXCHANGE");
             } catch (Exception exchangeError) {
+                if (!shouldEnqueueOnFail) {
+                    throw new RuntimeException(exchangeError.getMessage() != null ? exchangeError.getMessage() : "exchange send failed");
+                }
                 enqueueOutgoingMessage("exchange", String.valueOf(parsedTarget.originalTarget).trim().toLowerCase(Locale.ROOT), String.valueOf(content), String.valueOf(contentType), new HashMap<>());
                 return SendDeliveryResult.queued(parsedTarget.originalTarget, "EXCHANGE", exchangeError.getMessage());
             }
@@ -5488,16 +5566,22 @@ public class ReactorHttpService extends Service {
         }
 
         if (lastError != null) {
+            if (!shouldEnqueueOnFail) {
+                throw lastError;
+            }
             enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), String.valueOf(contentType), effectiveHeaders);
             return SendDeliveryResult.queued(targetValue, "P2P_DIRECT", lastError.getMessage());
         }
 
+        if (!shouldEnqueueOnFail) {
+            throw new RuntimeException("no direct route found");
+        }
         enqueueOutgoingMessage("direct", targetValue, String.valueOf(content), String.valueOf(contentType), effectiveHeaders);
         return SendDeliveryResult.queued(targetValue, "P2P_DIRECT", "no direct route found");
     }
 
     private SendDeliveryResult sendNodeMessage(String target, String content, Map<String, String> extraHeaders) {
-        return sendNodeMessageWithContentType(target, content, "text/plain; charset=utf-8", extraHeaders);
+        return sendNodeMessageWithContentType(target, content, "text/plain; charset=utf-8", extraHeaders, false, false, false);
     }
 
     private SendDeliveryResult sendExchangeMessage(String target, String content) {
@@ -5507,7 +5591,7 @@ public class ReactorHttpService extends Service {
         }
 
         try {
-            sendExchangeMessageNow(normalizedTarget, String.valueOf(content), "text/plain");
+            sendExchangeMessageNow(normalizedTarget, String.valueOf(content), "text/plain", false);
             return SendDeliveryResult.success(normalizedTarget, "EXCHANGE");
         } catch (Exception error) {
             enqueueOutgoingMessage("exchange", normalizedTarget, String.valueOf(content), "text/plain", new HashMap<>());
@@ -5688,7 +5772,7 @@ public class ReactorHttpService extends Service {
 
             try {
                 if ("exchange".equals(channel)) {
-                    sendExchangeMessageNow(target, content, contentType);
+                    sendExchangeMessageNow(target, content, contentType, false);
                 } else {
                     String reactorName = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                             .getString(PREF_REACTOR_NAME, "mobile-reactor");
@@ -5788,7 +5872,7 @@ public class ReactorHttpService extends Service {
         }
     }
 
-    private void sendExchangeMessageNow(String target, String content, String contentType) {
+    private void sendExchangeMessageNow(String target, String content, String contentType, boolean enqueueOnFail) {
         if (!"node".equals(currentExchangeMode) || wsExchangeClientSocket == null) {
             throw new RuntimeException("exchange client not connected");
         }
@@ -5810,6 +5894,7 @@ public class ReactorHttpService extends Service {
             }
             packet.put("content", String.valueOf(content));
             packet.put("contentType", String.valueOf(contentType));
+            packet.put("enqueueOnFail", enqueueOnFail);
         } catch (JSONException exception) {
             throw new RuntimeException(exception.getMessage() != null ? exception.getMessage() : "exchange packet serialization failed");
         }
@@ -6297,21 +6382,35 @@ public class ReactorHttpService extends Service {
             return;
         }
 
-        String url = (currentExchangeTls ? "wss://" : "ws://") + endpoint.host + ":" + endpoint.port;
+        String reactorName = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(PREF_REACTOR_NAME, "mobile-reactor");
+        String token = readExchangeToken();
+        if (token.isEmpty()) {
+            token = currentExchangeToken != null ? currentExchangeToken.trim() : "";
+        }
+
+        ExchangeRegisterBootstrap bootstrap;
+        try {
+            bootstrap = bootstrapExchangeRegisterSession(endpoint, token, reactorName);
+        } catch (Exception bootstrapError) {
+            String detail = bootstrapError.getMessage() != null ? bootstrapError.getMessage() : "register bootstrap failed";
+            if (currentExchangeTls) {
+                detail = formatTlsCertificateError(detail);
+            }
+            exchangeClientAuthenticated = false;
+            exchangeClientLastError = detail;
+            emitExchangeConnectionStatusUpdate();
+            appendGlobalLog(buildExchangeLog("CLIENT_FAILURE", detail));
+            return;
+        }
+
+        String url = bootstrap.wsUrl;
         appendGlobalLog(buildExchangeLog("CLIENT_CONNECTING", "connecting to " + url));
         exchangeClientAuthenticated = false;
         exchangeClientLastError = "";
         exchangeClientLastCloseReason = "";
         exchangeClientLastCloseCode = 0;
-        Request.Builder requestBuilder = new Request.Builder().url(url);
-        String token = readExchangeToken();
-        if (token.isEmpty()) {
-            token = currentExchangeToken != null ? currentExchangeToken.trim() : "";
-        }
-        if (!token.isEmpty()) {
-            requestBuilder.addHeader("Authorization", "Bearer " + token);
-        }
-        Request request = requestBuilder.build();
+        Request request = new Request.Builder().url(url).build();
 
         WebSocket webSocket = okHttpClient.newWebSocket(request, new WebSocketListener() {
             @Override
@@ -6334,23 +6433,16 @@ public class ReactorHttpService extends Service {
                     lock.notifyAll();
                 }
                 exchangeRemotePeers.clear();
-                String reactorName = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                        .getString(PREF_REACTOR_NAME, "mobile-reactor");
-                String registerToken = readExchangeToken();
-                if (registerToken.isEmpty()) {
-                    registerToken = currentExchangeToken != null ? currentExchangeToken.trim() : "";
-                }
                 try {
                     JSONObject packet = new JSONObject();
                     packet.put("type", "register");
                     packet.put("name", reactorName);
-                    packet.put("token", registerToken);
                     packet.put("endpoints", buildDiscoveryEndpointsPayload());
                     packet.put("httpPort", currentPort);
                     packet.put("httpTls", false);
                     webSocket.send(packet.toString());
                 } catch (Exception ignored) {
-                    webSocket.send("{\"type\":\"register\",\"name\":\"mobile-reactor\",\"token\":\"\",\"endpoints\":[],\"httpPort\":7070,\"httpTls\":false}");
+                    webSocket.send("{\"type\":\"register\",\"name\":\"mobile-reactor\",\"endpoints\":[],\"httpPort\":7070,\"httpTls\":false}");
                 }
                 appendGlobalLog(buildExchangeLog("CLIENT_CONNECTED", "connected to " + url + " as " + reactorName));
                 flushOutgoingQueue();
@@ -6500,6 +6592,85 @@ public class ReactorHttpService extends Service {
                 }
             }
         }
+    }
+
+    private ExchangeRegisterBootstrap bootstrapExchangeRegisterSession(ExchangeEndpoint endpoint, String bearerToken, String clientName) throws Exception {
+        String scheme = currentExchangeTls ? "https" : "http";
+        String endpointUrl = scheme + "://" + endpoint.host + ":" + endpoint.port + "/register";
+        HttpURLConnection connection = null;
+        try {
+            URL registerUrl = new URL(endpointUrl);
+            connection = (HttpURLConnection) registerUrl.openConnection();
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setConnectTimeout((int) WS_CLIENT_CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout((int) WS_CLIENT_CONNECT_TIMEOUT_MS);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            String safeBearer = String.valueOf(bearerToken == null ? "" : bearerToken).trim();
+            if (!safeBearer.isEmpty()) {
+                connection.setRequestProperty("Authorization", "Bearer " + safeBearer);
+            }
+
+            JSONObject payload = new JSONObject();
+            payload.put("clientName", String.valueOf(clientName == null ? "mobile-reactor" : clientName).trim());
+            byte[] payloadBytes = payload.toString().getBytes(StandardCharsets.UTF_8);
+            connection.setRequestProperty("Content-Length", String.valueOf(payloadBytes.length));
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(payloadBytes);
+            }
+
+            int status = connection.getResponseCode();
+            String responseBody = readHttpResponseBody(connection, status);
+            if (status < 200 || status >= 300) {
+                throw new IOException("HTTP " + status + ": " + (responseBody == null ? "register failed" : responseBody));
+            }
+
+            JSONObject parsed = tryParseJsonObject(responseBody);
+            if (parsed == null || !parsed.optBoolean("ok", false)) {
+                String error = parsed != null ? parsed.optString("error", "invalid register response") : "invalid register response";
+                throw new IOException(error);
+            }
+
+            String sessionId = parsed.optString("sessionId", "").trim();
+            if (sessionId.isEmpty()) {
+                throw new IOException("invalid register response: missing sessionId");
+            }
+
+            String wsPath = normalizeExchangeWsPath(parsed.optString("wsPath", ""), sessionId);
+            String wsUrl = (currentExchangeTls ? "wss://" : "ws://") + endpoint.host + ":" + endpoint.port + wsPath;
+            return new ExchangeRegisterBootstrap(wsUrl, sessionId);
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private String normalizeExchangeWsPath(String rawPath, String sessionId) {
+        String safeSession = String.valueOf(sessionId == null ? "" : sessionId).trim();
+        String fallback = "/ws?sessionId=" + URLEncoder.encode(safeSession, StandardCharsets.UTF_8);
+        String value = String.valueOf(rawPath == null ? "" : rawPath).trim();
+        if (value.isEmpty()) {
+            return fallback;
+        }
+
+        try {
+            if (value.startsWith("http://") || value.startsWith("https://") || value.startsWith("ws://") || value.startsWith("wss://")) {
+                URL parsed = new URL(value.replace("ws://", "http://").replace("wss://", "https://"));
+                String file = String.valueOf(parsed.getFile() == null ? "" : parsed.getFile()).trim();
+                if (!file.isEmpty()) {
+                    return file.startsWith("/") ? file : "/" + file;
+                }
+            }
+        } catch (Exception ignored) {
+            // Fallback below.
+        }
+
+        if (!value.startsWith("/")) {
+            return "/" + value;
+        }
+        return value;
     }
 
     private void reconnectExchangeClientInternal(String reason) {
@@ -6803,6 +6974,16 @@ public class ReactorHttpService extends Service {
         ExchangeEndpoint(String host, int port) {
             this.host = host;
             this.port = port;
+        }
+    }
+
+    private static class ExchangeRegisterBootstrap {
+        final String wsUrl;
+        final String sessionId;
+
+        ExchangeRegisterBootstrap(String wsUrl, String sessionId) {
+            this.wsUrl = wsUrl;
+            this.sessionId = sessionId;
         }
     }
 

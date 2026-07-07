@@ -1,6 +1,8 @@
 const { WebSocketServer, WebSocket } = require('ws');
 const fs = require('fs/promises');
 const path = require('path');
+const http = require('http');
+const https = require('https');
 
 const RECONNECT_DELAY_MS = 5000;
 const DEFAULT_WS_HEARTBEAT_INTERVAL_MS = 15000;
@@ -595,6 +597,132 @@ class ExchangeManager {
 		return match ? String(match[1] || '').trim() : '';
 	}
 
+	_resolveExchangePath(rawPath, fallback = '/') {
+		const value = String(rawPath || '').trim();
+		if (!value) {
+			return fallback;
+		}
+
+		try {
+			const parsed = new URL(value, 'http://localhost');
+			return `${parsed.pathname || '/'}${parsed.search || ''}`;
+		} catch {
+			if (value.startsWith('/')) {
+				return value;
+			}
+			return fallback;
+		}
+	}
+
+	_requestJson({ method = 'GET', path: requestPath = '/', body = null, headers = {} } = {}) {
+		const requestBody = body === null ? null : JSON.stringify(body);
+		const transport = this.tls ? https : http;
+		const timeoutMs = 10000;
+		const options = {
+			protocol: this.tls ? 'https:' : 'http:',
+			hostname: this.host,
+			port: this.port,
+			method: String(method || 'GET').toUpperCase(),
+			path: this._resolveExchangePath(requestPath, '/'),
+			headers: {
+				Accept: 'application/json',
+				...headers,
+			},
+			timeout: timeoutMs,
+		};
+
+		if (this.tls) {
+			options.rejectUnauthorized = true;
+		}
+
+		if (requestBody !== null) {
+			options.headers['Content-Type'] = options.headers['Content-Type'] || 'application/json';
+			options.headers['Content-Length'] = Buffer.byteLength(requestBody);
+		}
+
+		return new Promise((resolve, reject) => {
+			const req = transport.request(options, (response) => {
+				const chunks = [];
+				response.on('data', (chunk) => chunks.push(chunk));
+				response.on('end', () => {
+					const statusCode = Number(response.statusCode) || 0;
+					const raw = Buffer.concat(chunks).toString('utf8').trim();
+					let parsedBody = null;
+					if (raw) {
+						try {
+							parsedBody = JSON.parse(raw);
+						} catch {
+							parsedBody = null;
+						}
+					}
+
+					if (statusCode < 200 || statusCode >= 300) {
+						const serverError = parsedBody && typeof parsedBody.error === 'string' ? parsedBody.error : '';
+						const detail = serverError || raw || `HTTP ${statusCode}`;
+						reject(new Error(`HTTP ${statusCode}: ${detail}`));
+						return;
+					}
+
+					resolve({
+						statusCode,
+						body: parsedBody,
+						raw,
+					});
+				});
+			});
+
+			req.on('timeout', () => {
+				req.destroy(new Error('request timeout'));
+			});
+
+			req.on('error', (error) => {
+				reject(error);
+			});
+
+			if (requestBody !== null) {
+				req.write(requestBody);
+			}
+
+			req.end();
+		});
+	}
+
+	async _bootstrapClientWebSocketSession(registerPacket) {
+		const token = String(this.runtime.exchangeAuthToken || '').trim();
+		const headers = token ? { Authorization: `Bearer ${token}` } : {};
+		const payload = {
+			clientName: String(registerPacket?.name || '').trim() || 'unnamed',
+		};
+
+		const response = await this._requestJson({
+			method: 'POST',
+			path: '/register',
+			body: payload,
+			headers,
+		});
+
+		const responseBody = response && typeof response.body === 'object' && response.body ? response.body : {};
+		if (!responseBody.ok) {
+			throw new Error(String(responseBody.error || 'invalid register response'));
+		}
+
+		const sessionId = String(responseBody.sessionId || '').trim();
+		if (!sessionId) {
+			throw new Error('invalid register response: missing sessionId');
+		}
+
+		const wsPath = this._resolveExchangePath(
+			responseBody.wsPath || `/ws?sessionId=${encodeURIComponent(sessionId)}`,
+			`/ws?sessionId=${encodeURIComponent(sessionId)}`,
+		);
+		const scheme = this.tls ? 'wss' : 'ws';
+		return {
+			sessionId,
+			wsUrl: `${scheme}://${this.host}:${this.port}${wsPath}`,
+			expiresAt: String(responseBody.expiresAt || '').trim() || null,
+		};
+	}
+
 	_rejectUpgrade(socket, statusCode, message) {
 		try {
 			socket.write(
@@ -1105,140 +1233,164 @@ class ExchangeManager {
 	}
 
 	// ---------------------------------------------------------------------------
-	// EXCHANGE CLIENT — si connette a ws://host:port
+	// EXCHANGE CLIENT — bootstrap su POST /register, poi connessione WS /ws?sessionId=...
 	// ---------------------------------------------------------------------------
 
 	_startClient() {
 		if (this._stopped) return;
 
-		const scheme = this.tls ? 'wss' : 'ws';
-		const url = `${scheme}://${this.host}:${this.port}`;
-		this.runtime.log(`[Exchange] Connecting to exchange: ${url}`);
-
-		let ws;
-		try {
-			const token = String(this.runtime.exchangeAuthToken || '').trim();
-			const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
-			const options = { headers };
-			if (this.tls) {
-				options.rejectUnauthorized = true;
-			}
-			ws = new WebSocket(url, options);
-		} catch (err) {
-			const detail = this.tls
-				? formatTlsCertificateError(err?.message || 'unable to create secure websocket client')
-				: String(err?.message || 'unable to create websocket client');
-			this.runtime.log(`[Exchange] Unable to create client: ${detail}`);
-			this._clientLastError = detail;
-			this._emitConnectionStatus('exchange-error');
-			this._scheduleReconnect();
-			return;
-		}
-
-		this.wsClient = ws;
-		this._knownRemotePeers.clear();
-		this._clientRegistered = false;
-		this._emitConnectionStatus('exchange-connecting');
-
-		ws.on('open', async () => {
-			this._clientLastError = '';
-			this._clientLastCloseReason = '';
-			this._clientLastCloseCode = 0;
-			this._clientConnectedAt = Date.now();
-			this._clientLastPongAt = Date.now();
-			this._emitConnectionStatus('exchange-open');
-			this._startClientHeartbeat(ws);
-			try {
+		Promise.resolve()
+			.then(async () => {
 				const packet = await this._buildClientRegisterPacket();
-				ws.send(JSON.stringify(packet));
-				this.runtime.log(`[Exchange] Connected as: ${packet.name}`);
-			} catch (err) {
-				this.runtime.log(`[Exchange] Registration error: ${err.message}`);
-			}
-		});
+				const session = await this._bootstrapClientWebSocketSession(packet);
+				const url = session.wsUrl;
+				this.runtime.log(`[Exchange] Connecting to exchange: ${url}`);
 
-		ws.on('message', (data, isBinary) => {
-			this._clientLastPongAt = Date.now();
-			if (isBinary) {
-				const meta = this._clientPendingBinaryChunkMeta.shift();
-				if (!meta) {
-					this.runtime.log('[Exchange] Received binary frame without metadata, dropping');
-					return;
+				const options = {};
+				if (this.tls) {
+					options.rejectUnauthorized = true;
 				}
 
-				const binaryChunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
-				const payload = {
-					__reactorStream: true,
-					phase: 'chunk',
-					streamId: String(meta.streamId || ''),
-					index: Number.isFinite(Number(meta.index)) ? Number(meta.index) : -1,
-					size: binaryChunk.length,
-					encoding: 'binary',
-					binary: binaryChunk,
-				};
+				const ws = new WebSocket(url, options);
 
-				const sender = String(meta.from || 'unknown');
-				this._handleIncomingStreamEnvelope(sender, payload, '', 'application/octet-stream');
-				return;
-			}
-
-			let packet;
-			try { packet = JSON.parse(String(data)); } catch { return; }
-			if (packet && packet.type === 'message') this._handleIncomingMessage(packet);
-			if (packet && packet.type === 'signal') this._handleIncomingSignal(packet);
-			if (packet && packet.type === 'peer-list') this._handleIncomingPeerList(packet);
-			if (packet && packet.type === 'registered') {
-				this._clientRegistered = true;
-				this._clientLastError = '';
-				this._clientLastCloseReason = '';
-				this._clientLastCloseCode = 0;
-				this._emitConnectionStatus('exchange-registered');
-			}
-			if (packet && packet.type === 'stream-chunk-bin') {
-				this._clientPendingBinaryChunkMeta.push(packet);
-			}
-			if (packet && packet.type === 'auth-error') {
-				this.runtime.log(`[Exchange] Authentication failed: ${packet.error || 'invalid exchange token'}`);
-				this._clientLastError = String(packet.error || 'invalid exchange token');
+				this.wsClient = ws;
+				this._knownRemotePeers.clear();
 				this._clientRegistered = false;
-				this._emitConnectionStatus('exchange-auth-error');
-			}
-		});
+				this._emitConnectionStatus('exchange-connecting');
 
-		ws.on('pong', () => {
-			this._clientLastPongAt = Date.now();
-		});
+				ws.on('open', async () => {
+					if (this.wsClient !== ws) {
+						this.runtime.log('[Exchange] Stale client connection opened, ignoring');
+						try {
+							ws.terminate();
+						} catch {
+							// Ignore close errors for stale sockets.
+						}
+						return;
+					}
 
-		ws.on('close', (code, reason) => {
-			const isCurrentSocket = this.wsClient === ws;
-			this._stopClientHeartbeat();
-			if (isCurrentSocket) this.wsClient = null;
-			this._knownRemotePeers.clear();
-			this._clientConnectedAt = 0;
-			this._clientRegistered = false;
-			this._clientLastCloseCode = Number(code) || 0;
-			this._clientLastCloseReason = String(reason || '').trim();
-			this.runtime.log(isCurrentSocket ? '[Exchange] Connection closed, reconnecting...' : '[Exchange] Stale client connection closed');
-			this._emitConnectionStatus('exchange-close');
-			if (isCurrentSocket) {
+					this._clientLastError = '';
+					this._clientLastCloseReason = '';
+					this._clientLastCloseCode = 0;
+					this._clientConnectedAt = Date.now();
+					this._clientLastPongAt = Date.now();
+					this._emitConnectionStatus('exchange-open');
+					this._startClientHeartbeat(ws);
+					try {
+						ws.send(JSON.stringify(packet));
+						this.runtime.log(`[Exchange] Connected as: ${packet.name}`);
+					} catch (err) {
+						this.runtime.log(`[Exchange] Registration error: ${err.message}`);
+					}
+				});
+
+				ws.on('message', (data, isBinary) => {
+					if (this.wsClient !== ws) {
+						return;
+					}
+
+					this._clientLastPongAt = Date.now();
+					if (isBinary) {
+						const meta = this._clientPendingBinaryChunkMeta.shift();
+						if (!meta) {
+							this.runtime.log('[Exchange] Received binary frame without metadata, dropping');
+							return;
+						}
+
+						const binaryChunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+						const payload = {
+							__reactorStream: true,
+							phase: 'chunk',
+							streamId: String(meta.streamId || ''),
+							index: Number.isFinite(Number(meta.index)) ? Number(meta.index) : -1,
+							size: binaryChunk.length,
+							encoding: 'binary',
+							binary: binaryChunk,
+						};
+
+						const sender = String(meta.from || 'unknown');
+						this._handleIncomingStreamEnvelope(sender, payload, '', 'application/octet-stream');
+						return;
+					}
+
+					let packet;
+					try { packet = JSON.parse(String(data)); } catch { return; }
+					if (packet && packet.type === 'message') this._handleIncomingMessage(packet);
+					if (packet && packet.type === 'signal') this._handleIncomingSignal(packet);
+					if (packet && packet.type === 'peer-list') this._handleIncomingPeerList(packet);
+					if (packet && packet.type === 'registered') {
+						this._clientRegistered = true;
+						this._clientLastError = '';
+						this._clientLastCloseReason = '';
+						this._clientLastCloseCode = 0;
+						this._emitConnectionStatus('exchange-registered');
+					}
+					if (packet && packet.type === 'stream-chunk-bin') {
+						this._clientPendingBinaryChunkMeta.push(packet);
+					}
+					if (packet && packet.type === 'auth-error') {
+						this.runtime.log(`[Exchange] Authentication failed: ${packet.error || 'invalid exchange token'}`);
+						this._clientLastError = String(packet.error || 'invalid exchange token');
+						this._clientRegistered = false;
+						this._emitConnectionStatus('exchange-auth-error');
+					}
+				});
+
+				ws.on('pong', () => {
+					if (this.wsClient !== ws) {
+						return;
+					}
+
+					this._clientLastPongAt = Date.now();
+				});
+
+				ws.on('close', (code, reason) => {
+					const isCurrentSocket = this.wsClient === ws;
+					if (!isCurrentSocket) {
+						this.runtime.log('[Exchange] Stale client connection closed');
+						return;
+					}
+
+					this._stopClientHeartbeat();
+					this.wsClient = null;
+					this._knownRemotePeers.clear();
+					this._clientConnectedAt = 0;
+					this._clientRegistered = false;
+					this._clientLastCloseCode = Number(code) || 0;
+					this._clientLastCloseReason = String(reason || '').trim();
+					this.runtime.log('[Exchange] Connection closed, reconnecting...');
+					this._emitConnectionStatus('exchange-close');
+					this._scheduleReconnect();
+				});
+
+				ws.on('error', (err) => {
+					const isCurrentSocket = this.wsClient === ws;
+					if (!isCurrentSocket) {
+						this.runtime.log(`[Exchange] Stale client connection error ignored: ${err?.message || 'unknown error'}`);
+						return;
+					}
+
+					this._stopClientHeartbeat();
+					this._knownRemotePeers.clear();
+					this._clientLastError = this.tls
+						? formatTlsCertificateError(err?.message || 'tls connection failed')
+						: String(err?.message || 'unknown error');
+					this._clientRegistered = false;
+					this.runtime.log(`[Exchange] Error: ${this._clientLastError}`);
+					this._emitConnectionStatus('exchange-error');
+					this._scheduleReconnect();
+				});
+			})
+			.catch((err) => {
+				const detail = this.tls
+					? formatTlsCertificateError(err?.message || 'failed exchange register bootstrap')
+					: String(err?.message || 'failed exchange register bootstrap');
+				this.runtime.log(`[Exchange] Unable to create client: ${detail}`);
+				this._clientLastError = detail;
+				this._clientRegistered = false;
+				this._emitConnectionStatus('exchange-error');
 				this._scheduleReconnect();
-			}
-		});
-
-		ws.on('error', (err) => {
-			const isCurrentSocket = this.wsClient === ws;
-			this._stopClientHeartbeat();
-			this._knownRemotePeers.clear();
-			this._clientLastError = this.tls
-				? formatTlsCertificateError(err?.message || 'tls connection failed')
-				: String(err?.message || 'unknown error');
-			this._clientRegistered = false;
-			this.runtime.log(`[Exchange] Error: ${this._clientLastError}`);
-			this._emitConnectionStatus('exchange-error');
-			if (isCurrentSocket) {
-				this._scheduleReconnect();
-			}
-		});
+			});
 	}
 
 	async waitForClientConnection(timeoutMs = 5000) {
@@ -1517,11 +1669,13 @@ class ExchangeManager {
 	// API pubblica
 	// ---------------------------------------------------------------------------
 
-	async sendViaExchange(target, content) {
+	async sendViaExchange(target, content, options = {}) {
 		if (this.mode !== 'client') throw new Error('not in client mode');
 		if (!this.wsClient || this.wsClient.readyState !== WebSocket.OPEN) {
 			throw new Error('exchange client not connected');
 		}
+
+		const shouldEnqueueOnFail = Boolean(options && options.enqueueOnFail);
 
 		let serializedContent, contentType;
 		if (Buffer.isBuffer(content) || content instanceof Uint8Array) {
@@ -1548,6 +1702,7 @@ class ExchangeManager {
 			targetEndpointId: parsedTarget.endpointId || null,
 			content: serializedContent,
 			contentType,
+			enqueueOnFail: shouldEnqueueOnFail,
 		}));
 		return {
 			target: parsedTarget.rawTarget,

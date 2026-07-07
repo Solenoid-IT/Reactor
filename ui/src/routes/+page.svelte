@@ -86,6 +86,8 @@
 	let exchangeDiscovery = false;
 	let exchangeActive = false;
 	let exchangeStatus = { state: 'disconnected', connected: false, authenticated: false, reason: '', mode: 'node' };
+	let exchangeStatusDebounceTimer = null;
+	let exchangePendingStatus = null;
 	let exchangeClients = [];
 	let exchangeLinkedNodes = [];
 	let exchangeLinkedNodesTotal = 0;
@@ -165,6 +167,80 @@
 	};
 
 	const REMOTE_ENDPOINTS_P2P_TIMEOUT_MS = 12000;
+	const DEFAULT_EXCHANGE_STATUS_DOWNGRADE_DEBOUNCE_MS = 550;
+	let exchangeStatusDowngradeDebounceMs = DEFAULT_EXCHANGE_STATUS_DOWNGRADE_DEBOUNCE_MS;
+
+	function normalizeExchangeStatusDebounceMs(value, fallback = DEFAULT_EXCHANGE_STATUS_DOWNGRADE_DEBOUNCE_MS) {
+		const numeric = Number(value);
+		if (!Number.isFinite(numeric) || numeric < 0) {
+			return Math.max(0, Math.floor(Number(fallback) || DEFAULT_EXCHANGE_STATUS_DOWNGRADE_DEBOUNCE_MS));
+		}
+
+		return Math.floor(numeric);
+	}
+
+	function normalizeExchangeStatusPayload(connection, fallbackMode = exchangeMode || 'node') {
+		const raw = connection && typeof connection === 'object' ? connection : {};
+		const state = String(raw.state || '').trim().toLowerCase() || 'disconnected';
+		const connectedByState = state === 'connected' || state === 'active';
+		const connected = Boolean(raw.connected || connectedByState);
+		return {
+			...raw,
+			state,
+			connected,
+			authenticated: raw.authenticated === undefined ? connected : Boolean(raw.authenticated),
+			reason: String(raw.reason || ''),
+			mode: raw.mode || fallbackMode || 'node',
+		};
+	}
+
+	function commitExchangeStatus(connection, fallbackMode = exchangeMode || 'node') {
+		const normalized = normalizeExchangeStatusPayload(connection, fallbackMode);
+		exchangeStatus = normalized;
+		exchangeActive = Boolean(normalized.connected);
+	}
+
+	function scheduleExchangeStatusUpdate(connection, fallbackMode = exchangeMode || 'node') {
+		const nextStatus = normalizeExchangeStatusPayload(connection, fallbackMode);
+		const currentState = String(exchangeStatus?.state || '').trim().toLowerCase();
+		const currentConnected = Boolean(exchangeStatus?.connected || currentState === 'connected' || currentState === 'active');
+		const nextConnected = Boolean(nextStatus.connected);
+		const debounceMs = normalizeExchangeStatusDebounceMs(exchangeStatusDowngradeDebounceMs);
+
+		if (nextConnected || !currentConnected) {
+			if (exchangeStatusDebounceTimer) {
+				clearTimeout(exchangeStatusDebounceTimer);
+				exchangeStatusDebounceTimer = null;
+			}
+			exchangePendingStatus = null;
+			commitExchangeStatus(nextStatus, fallbackMode);
+			return;
+		}
+
+		if (debounceMs === 0) {
+			if (exchangeStatusDebounceTimer) {
+				clearTimeout(exchangeStatusDebounceTimer);
+				exchangeStatusDebounceTimer = null;
+			}
+			exchangePendingStatus = null;
+			commitExchangeStatus(nextStatus, fallbackMode);
+			return;
+		}
+
+		exchangePendingStatus = nextStatus;
+		if (exchangeStatusDebounceTimer) {
+			clearTimeout(exchangeStatusDebounceTimer);
+		}
+
+		exchangeStatusDebounceTimer = setTimeout(() => {
+			exchangeStatusDebounceTimer = null;
+			if (!exchangePendingStatus) {
+				return;
+			}
+			commitExchangeStatus(exchangePendingStatus, fallbackMode);
+			exchangePendingStatus = null;
+		}, debounceMs);
+	}
 
 	function isBridgeUnavailable(result) {
 		return String(result?.error || '').toLowerCase().includes('bridge unavailable');
@@ -603,10 +679,13 @@
 			exchangeTls = Boolean(ec.tls);
 			exchangeToken = ec.token || '';
 			exchangeDiscovery = Boolean(ec.discovery ?? ec.exposeDiscoveryEndpoint);
-			exchangeActive = Boolean(ec.active || ec.connection?.connected);
+			exchangeStatusDowngradeDebounceMs = normalizeExchangeStatusDebounceMs(
+				ec.statusDebounceMs,
+				exchangeStatusDowngradeDebounceMs,
+			);
 			exchangeClients = Array.isArray(ec.connectedClients) ? ec.connectedClients : [];
 			exchangeEnabled = Boolean((ec.host || '').trim());
-			exchangeStatus = ec.connection && typeof ec.connection === 'object'
+			const nextConnectionStatus = ec.connection && typeof ec.connection === 'object'
 				? ec.connection
 				: {
 					state: ec.mode === 'node' && Boolean((ec.host || '').trim()) ? 'connecting' : (ec.active ? 'connected' : 'disconnected'),
@@ -615,11 +694,17 @@
 					reason: ec.active ? '' : (ec.mode === 'node' && Boolean((ec.host || '').trim()) ? 'Connecting to Exchange' : 'Exchange connection unavailable'),
 					mode: ec.mode || 'node',
 				};
+			scheduleExchangeStatusUpdate(nextConnectionStatus, ec.mode || 'node');
 			return;
 		}
 
-		exchangeActive = false;
-		exchangeStatus = { state: 'disconnected', connected: false, authenticated: false, reason: 'Exchange connection unavailable', mode: 'node' };
+		scheduleExchangeStatusUpdate({
+			state: 'disconnected',
+			connected: false,
+			authenticated: false,
+			reason: 'Exchange connection unavailable',
+			mode: 'node',
+		});
 	}
 
 	function formatExchangeConnectionFailure(connectionTest) {
@@ -2020,6 +2105,11 @@
 		if (networkCopiedTimer) {
 			clearTimeout(networkCopiedTimer);
 		}
+		if (exchangeStatusDebounceTimer) {
+			clearTimeout(exchangeStatusDebounceTimer);
+			exchangeStatusDebounceTimer = null;
+		}
+		exchangePendingStatus = null;
 	});
 
 	async function stopBackgroundProcessHandler() {
@@ -2086,8 +2176,7 @@
 		});
 		const unsubscribeExchangeStatus = subscribeExchangeStatus((payload) => {
 			if (payload?.connection && typeof payload.connection === 'object') {
-				exchangeStatus = payload.connection;
-				exchangeActive = Boolean(payload.connection.connected);
+				scheduleExchangeStatusUpdate(payload.connection, payload.connection.mode || exchangeMode || 'node');
 			}
 		});
 
@@ -2300,16 +2389,14 @@
 							<div class="detail-value" style="font-size:0.8em; opacity:0.6;">No endpoints match this filter.</div>
 						{:else}
 							{#each backupFilteredEndpointCandidates as endpointEntry (endpointEntry.path)}
-								<label class="permission-toggle-row">
-									<div>
-										<div class="permission-name">{endpointEntry.name}</div>
-									</div>
+								<label class="permission-toggle-row d-flex align-items-center">
 									<input
 										type="checkbox"
-										class="input permission-toggle-input"
+										class="input permission-toggle-input me-2"
 										checked={backupSelectedEndpointPaths.includes(endpointEntry.path)}
 										on:change={(event) => toggleBackupEndpointSelection(endpointEntry.path, event.currentTarget.checked)}
 									/>
+									<span class="permission-name">{endpointEntry.name}</span>
 								</label>
 							{/each}
 						{/if}

@@ -450,6 +450,15 @@ function parseBooleanOption(rawValue, fallback = false) {
 	return Boolean(fallback);
 }
 
+function parseNonNegativeIntegerOption(rawValue, fallback = 0) {
+	const numeric = Number(rawValue);
+	if (!Number.isFinite(numeric) || numeric < 0) {
+		return Math.max(0, Math.floor(Number(fallback) || 0));
+	}
+
+	return Math.floor(numeric);
+}
+
 function normalizeRelayEndpointConfig(rawValue, fallback = { host: '', port: 3478, tls: false, username: '', password: '' }) {
 	const value = rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue) ? rawValue : {};
 	const fallbackValue = fallback && typeof fallback === 'object' ? fallback : { host: '', port: 3478, tls: false, username: '', password: '' };
@@ -1962,8 +1971,13 @@ class ReactorRuntime {
 
 	getExchangeConfig() {
 		const config = this.exchangeManager.getConfig();
+		const statusDebounceMs = parseNonNegativeIntegerOption(
+			process.env.REACTOR_EXCHANGE_STATUS_DEBOUNCE_MS,
+			550,
+		);
 		return {
 			...config,
+			statusDebounceMs,
 			connection: this.exchangeManager && typeof this.exchangeManager.getConnectionStatus === 'function'
 				? this.exchangeManager.getConnectionStatus()
 				: null,
@@ -4060,17 +4074,19 @@ class ReactorRuntime {
 	}
 
 	async sendExchangeMessage(target, content, options = {}) {
+		const shouldEnqueueOnFail = options && options.noEnqueue
+			? false
+			: Boolean(options && options.enqueueOnFail);
+
 		try {
-			const result = await this.exchangeManager.sendViaExchange(target, content);
+			const result = await this.exchangeManager.sendViaExchange(target, content, {
+				enqueueOnFail: shouldEnqueueOnFail,
+			});
 			return {
 				...result,
 				deliveredVia: 'EXCHANGE',
 			};
 		} catch (error) {
-			const shouldEnqueueOnFail = options && options.noEnqueue
-				? false
-				: Boolean(options && options.enqueueOnFail);
-
 			if (options && (options.noEnqueue || !shouldEnqueueOnFail)) {
 				throw error;
 			}
