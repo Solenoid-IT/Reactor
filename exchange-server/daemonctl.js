@@ -33,6 +33,7 @@ function usage() {
 	console.log('Usage:');
 	console.log('  node daemonctl.js status');
 	console.log('  node daemonctl.js generate-tls-cert [--bits <1024-8192>] [--days <1-36500>]');
+	console.log('  node daemonctl.js generate-tls-cert --signed [--cn <primary-domain>] [--domain <domain>] [--webroot <path>] [--bits <1024-8192>]');
 	console.log('  node daemonctl.js fix-tls-perms');
 	process.exit(1);
 }
@@ -59,11 +60,43 @@ function scheduleContainerRestart() {
 
 function extractTlsCertFlags(args) {
 	const values = [...args];
+	let cn = 'exchange.local';
 	let bits;
 	let days;
+	let signed = false;
+	let webroot = '/var/www/html';
+	const domains = [];
 
 	for (let index = 0; index < values.length; index += 1) {
 		const value = String(values[index] || '').trim();
+		if (value === '--signed') {
+			signed = true;
+			values.splice(index, 1);
+			index -= 1;
+			continue;
+		}
+		if (value === '--cn') {
+			cn = String(values[index + 1] || '').trim() || cn;
+			values.splice(index, 2);
+			index -= 1;
+			continue;
+		}
+		if (value === '--domain') {
+			const domain = String(values[index + 1] || '').trim();
+			if (!domain) {
+				usage();
+			}
+			domains.push(domain);
+			values.splice(index, 2);
+			index -= 1;
+			continue;
+		}
+		if (value === '--webroot') {
+			webroot = String(values[index + 1] || '').trim() || webroot;
+			values.splice(index, 2);
+			index -= 1;
+			continue;
+		}
 		if (value === '--bits') {
 			bits = Number(values[index + 1]);
 			values.splice(index, 2);
@@ -92,7 +125,96 @@ function extractTlsCertFlags(args) {
 		process.exit(1);
 	}
 
-	return { bits, days };
+	if (signed && days !== undefined) {
+		console.error('[daemonctl] generate-tls-cert: --days is only supported for self-signed certificates');
+		process.exit(1);
+	}
+
+	if (signed && !webroot) {
+		console.error('[daemonctl] generate-tls-cert: --webroot is required when --signed is used');
+		process.exit(1);
+	}
+
+	return { cn, bits, days, signed, webroot, domains };
+}
+
+function normalizeDomains(cn, explicitDomains = []) {
+	const all = [String(cn || '').trim(), ...explicitDomains.map((value) => String(value || '').trim())]
+		.filter(Boolean)
+		.map((value) => value.toLowerCase());
+
+	return [...new Set(all)];
+}
+
+function runCertbotWebroot(domains, webroot, bits) {
+	if (!Array.isArray(domains) || domains.length === 0) {
+		throw new Error('at least one domain is required for --signed');
+	}
+
+	const certbotCmd = [
+		'certbot',
+		'certonly',
+		'--webroot',
+		'-w', webroot,
+		'--rsa-key-size', String(Number.isInteger(bits) ? bits : 4096),
+		'--non-interactive',
+		'--agree-tos',
+		'--register-unsafely-without-email',
+		...domains.flatMap((domain) => ['-d', domain]),
+	].join(' ');
+
+	const shellCmd = `if [ "$(id -u)" -eq 0 ]; then ${certbotCmd}; else sudo ${certbotCmd}; fi`;
+
+	try {
+		execFileSync('sh', ['-lc', shellCmd], { stdio: 'inherit' });
+	} catch (err) {
+		const msg = err.stderr ? String(err.stderr).trim() : err.message;
+		throw new Error(`certbot failed: ${msg}`);
+	}
+}
+
+function shellEscape(value) {
+	return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
+async function installLetsEncryptCert(primaryDomain) {
+	const liveDir = path.join('/etc/letsencrypt/live', primaryDomain);
+	const fullchainPath = path.join(liveDir, 'fullchain.pem');
+	const privkeyPath = path.join(liveDir, 'privkey.pem');
+	const { tlsDir, certPath, keyPath } = getCertPaths();
+
+	try {
+		await fs.mkdir(tlsDir, { recursive: true });
+		await Promise.all([
+			fs.copyFile(fullchainPath, certPath),
+			fs.copyFile(privkeyPath, keyPath),
+		]);
+		await ensureTlsPermissions({ tlsDir, certPath, keyPath });
+		return;
+	} catch (error) {
+		if (!['EACCES', 'EPERM'].includes(error.code)) {
+			throw error;
+		}
+	}
+
+	const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+	const gid = typeof process.getgid === 'function' ? process.getgid() : undefined;
+	if (!Number.isInteger(uid) || !Number.isInteger(gid)) {
+		throw new Error('cannot resolve current uid/gid to install signed certificate');
+	}
+
+	const sudoInstallCmd = [
+		'sudo', 'install', '-d', '-m', '700', '-o', String(uid), '-g', String(gid), shellEscape(tlsDir),
+		'&&', 'sudo', 'install', '-m', '644', '-o', String(uid), '-g', String(gid), shellEscape(fullchainPath), shellEscape(certPath),
+		'&&', 'sudo', 'install', '-m', '600', '-o', String(uid), '-g', String(gid), shellEscape(privkeyPath), shellEscape(keyPath),
+	].join(' ');
+
+	try {
+		execFileSync('sh', ['-lc', sudoInstallCmd], { stdio: 'inherit' });
+	} catch (error) {
+		const msg = error.stderr ? String(error.stderr).trim() : error.message;
+		throw new Error(`cannot install signed certificate files from /etc/letsencrypt: ${msg}`);
+	}
 }
 
 function parseEnvFile(content) {
@@ -409,7 +531,32 @@ async function printStatus() {
 }
 
 async function handleGenerateTlsCert(rest) {
-	const { bits, days } = extractTlsCertFlags(rest);
+	const {
+		cn,
+		bits,
+		days,
+		signed,
+		webroot,
+		domains: explicitDomains,
+	} = extractTlsCertFlags(rest);
+
+	if (signed) {
+		const domains = normalizeDomains(cn, explicitDomains);
+		runCertbotWebroot(domains, webroot, bits);
+		await installLetsEncryptCert(domains[0]);
+		const tls = await getTlsCertInfo();
+		scheduleContainerRestart();
+		console.log('Signed TLS certificate generated');
+		console.log(`cert.pem: ${tls.certPath || '-'}`);
+		console.log(`key.pem:  ${tls.keyPath || '-'}`);
+		console.log('Mode:    signed (Let\'s Encrypt)');
+		console.log(`Domains: ${domains.join(', ')}`);
+		if (tls.subject) console.log(`Subject: ${tls.subject}`);
+		if (tls.notAfter) console.log(`NotAfter:${tls.notAfter}`);
+		if (tls.fingerprint) console.log(`SHA256:  ${tls.fingerprint}`);
+		return;
+	}
+
 	const reactorName = String(process.env.REACTOR_NAME || 'reactor').trim() || 'reactor';
 	const tls = await generateSelfSignedCert(reactorName, bits, days);
 	scheduleContainerRestart();

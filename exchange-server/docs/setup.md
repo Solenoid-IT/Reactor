@@ -85,6 +85,18 @@ Optional parameters:
 docker compose exec reactor-exchange node daemonctl.js generate-tls-cert --bits 4096 --days 3650
 ```
 
+Generate a CA-signed certificate (Let's Encrypt via certbot webroot):
+
+```bash
+docker compose exec reactor-exchange node daemonctl.js generate-tls-cert --signed --cn exchange.example.com --domain ws.exchange.example.com --webroot /var/www/html --bits 4096
+```
+
+Notes for `--signed`:
+
+- `--days` is not accepted for signed certificates.
+- certbot and access to `/etc/letsencrypt/live/<domain>` must be available in the execution environment.
+- `--webroot` must point to a webroot already serving ACME challenge files for the requested domains.
+
 You can normalize permissions from inside the container too:
 
 ```bash
