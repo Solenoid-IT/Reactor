@@ -808,6 +808,7 @@ public class ReactorHttpService extends Service {
             queue.put("pending", 0);
             queue.put("directPending", 0);
             queue.put("exchangePending", 0);
+            queue.put("streamPending", 0);
             queue.put("ttlMs", DEFAULT_MESSAGE_QUEUE_TTL_MS);
             queue.put("ttlDays", 7.0);
             queue.put("retryMs", DEFAULT_MESSAGE_QUEUE_RETRY_MS);
@@ -819,6 +820,7 @@ public class ReactorHttpService extends Service {
         int pending = 0;
         int directPending = 0;
         int exchangePending = 0;
+        int streamPending = 0;
         for (JSONObject item : entries) {
             if (item == null) {
                 continue;
@@ -835,14 +837,28 @@ public class ReactorHttpService extends Service {
             }
         }
 
+        List<JSONObject> streamEntries = instance.readOutgoingStreamQueueEntries();
+        for (JSONObject item : streamEntries) {
+            if (item == null) {
+                continue;
+            }
+            long expiresAt = item.optLong("expiresAt", 0L);
+            if (expiresAt > 0 && expiresAt <= now) {
+                continue;
+            }
+            streamPending += 1;
+        }
+
         long ttlMs = instance.getQueueTtlMs();
         queue.put("pending", pending);
         queue.put("directPending", directPending);
         queue.put("exchangePending", exchangePending);
+        queue.put("streamPending", streamPending);
         queue.put("ttlMs", ttlMs);
         queue.put("ttlDays", ((double) ttlMs) / (24.0 * 60.0 * 60.0 * 1000.0));
         queue.put("retryMs", instance.getQueueRetryMs());
-        queue.put("path", instance.getOutgoingQueueFile().getAbsolutePath());
+        queue.put("path", instance.getOutgoingQueueDir().getAbsolutePath());
+        queue.put("streamPath", instance.getOutgoingStreamQueueDir().getAbsolutePath());
         return queue;
     }
 
@@ -862,6 +878,7 @@ public class ReactorHttpService extends Service {
     public static void flushOutgoingQueueNow() {
         if (instance != null) {
             instance.flushOutgoingQueue();
+            instance.flushOutgoingStreamQueue();
         }
     }
 
@@ -870,6 +887,7 @@ public class ReactorHttpService extends Service {
             return;
         }
         instance.writeOutgoingQueueEntries(new ArrayList<>());
+        instance.writeOutgoingStreamQueueEntries(new ArrayList<>());
     }
 
         private String normalizeExchangeMode(String rawMode) {
@@ -4394,6 +4412,9 @@ public class ReactorHttpService extends Service {
                 try {
                     Map<String, String> extraHeaders = new HashMap<>();
                     org.json.JSONObject metadataOverride = null;
+                    boolean hasEnqueuePreference = false;
+                    boolean enqueueOnFail = false;
+                    boolean noEnqueue = false;
                     // meta might contain headers as JSON, try to parse it
                     try {
                         org.json.JSONObject metaObj = new org.json.JSONObject(meta);
@@ -4407,8 +4428,33 @@ public class ReactorHttpService extends Service {
                             Iterator<String> keys = hdrs.keys();
                             while (keys.hasNext()) { String k = keys.next(); extraHeaders.put(k, hdrs.getString(k)); }
                         }
+                        if (metaObj.has("enqueueOnFail")) {
+                            hasEnqueuePreference = true;
+                            enqueueOnFail = parseBooleanLike(metaObj.opt("enqueueOnFail"));
+                        }
+                        if (metaObj.has("noEnqueue")) {
+                            noEnqueue = parseBooleanLike(metaObj.opt("noEnqueue"));
+                        }
                     } catch (Exception ignored) {}
-                    streamFileToNode(target, filePath, extraHeaders, metadataOverride);
+                    boolean shouldEnqueueOnFail = hasEnqueuePreference && enqueueOnFail && !noEnqueue;
+
+                    try {
+                        streamFileToNode(target, filePath, extraHeaders, metadataOverride);
+                    } catch (Exception streamError) {
+                        if (!shouldEnqueueOnFail) {
+                            throw streamError;
+                        }
+
+                        ParsedTarget parsedTarget = parseTarget(target);
+                        String route = parsedTarget != null && parsedTarget.directAddress ? "node" : "node";
+                        enqueueOutgoingStream(route, target, filePath, extraHeaders, metadataOverride);
+                        org.json.JSONObject queuedResponse = new org.json.JSONObject();
+                        queuedResponse.put("ok", true);
+                        queuedResponse.put("queued", true);
+                        queuedResponse.put("reason", streamError.getMessage() != null ? streamError.getMessage() : "stream failed");
+                        return queuedResponse.toString();
+                    }
+
                     appendProjectLog(endpoint, buildReadableGlobalLogLine("NODE_STREAM",
                         "target=" + target + " path=" + filePath));
                     return "{\"ok\":true}";
@@ -5625,8 +5671,108 @@ public class ReactorHttpService extends Service {
         return candidates;
     }
 
-    private File getOutgoingQueueFile() {
+    private File getOutgoingQueueDir() {
+        return new File(getFilesDir(), "message-queue");
+    }
+
+    private File getOutgoingStreamQueueDir() {
+        return new File(getFilesDir(), "stream-queue");
+    }
+
+    private File getOutgoingQueueLegacyFile() {
         return new File(getFilesDir(), "outgoing-message-queue.json");
+    }
+
+    private String sanitizeQueueEntryId(String rawId) {
+        String safe = String.valueOf(rawId == null ? "" : rawId).trim();
+        if (safe.isEmpty()) {
+            safe = UUID.randomUUID().toString();
+        }
+        safe = safe.replaceAll("[^a-zA-Z0-9._-]", "_");
+        if (safe.isEmpty()) {
+            safe = UUID.randomUUID().toString();
+        }
+        return safe;
+    }
+
+    private File queueEntryFile(File dir, String entryId) {
+        return new File(dir, sanitizeQueueEntryId(entryId) + ".json");
+    }
+
+    private synchronized void migrateLegacyOutgoingQueueIfNeeded() {
+        File legacyFile = getOutgoingQueueLegacyFile();
+        if (!legacyFile.exists()) {
+            return;
+        }
+
+        try {
+            File queueDir = getOutgoingQueueDir();
+            if (!queueDir.exists() && !queueDir.mkdirs()) {
+                return;
+            }
+
+            File[] currentEntries = queueDir.listFiles((dir, name) -> name != null && name.endsWith(".json"));
+            if (currentEntries != null && currentEntries.length > 0) {
+                Files.deleteIfExists(legacyFile.toPath());
+                return;
+            }
+
+            String raw = readTextFile(legacyFile).trim();
+            if (!raw.isEmpty()) {
+                JSONArray parsed = new JSONArray(raw);
+                for (int i = 0; i < parsed.length(); i += 1) {
+                    JSONObject item = parsed.optJSONObject(i);
+                    if (item == null) {
+                        continue;
+                    }
+                    String id = item.optString("id", UUID.randomUUID().toString());
+                    writeTextFile(queueEntryFile(queueDir, id), item.toString() + "\n");
+                }
+            }
+
+            Files.deleteIfExists(legacyFile.toPath());
+            appendGlobalLog(buildExchangeLog("QUEUE_MIGRATED", "legacy outgoing-message-queue.json migrated to message-queue directory"));
+        } catch (Exception ignored) {
+            // Keep legacy queue as fallback if migration fails.
+        }
+    }
+
+    private List<File> listQueueEntryFiles(File dir) {
+        List<File> files = new ArrayList<>();
+        if (dir == null) {
+            return files;
+        }
+
+        try {
+            if (!dir.exists()) {
+                dir.mkdirs();
+            }
+            File[] entries = dir.listFiles((d, name) -> name != null && name.endsWith(".json"));
+            if (entries != null) {
+                files.addAll(Arrays.asList(entries));
+            }
+        } catch (Exception ignored) {
+            // Best effort listing.
+        }
+
+        files.sort((a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+        return files;
+    }
+
+    private JSONObject readQueueEntryFile(File file) {
+        if (file == null || !file.exists() || !file.isFile()) {
+            return null;
+        }
+
+        try {
+            String raw = readTextFile(file).trim();
+            if (raw.isEmpty()) {
+                return null;
+            }
+            return new JSONObject(raw);
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private long getQueueTtlMs() {
@@ -5648,41 +5794,79 @@ public class ReactorHttpService extends Service {
     }
 
     private synchronized List<JSONObject> readOutgoingQueueEntries() {
+        migrateLegacyOutgoingQueueIfNeeded();
         List<JSONObject> entries = new ArrayList<>();
-        try {
-            File queueFile = getOutgoingQueueFile();
-            if (!queueFile.exists()) {
-                return entries;
+        for (File entryFile : listQueueEntryFiles(getOutgoingQueueDir())) {
+            JSONObject item = readQueueEntryFile(entryFile);
+            if (item != null) {
+                entries.add(item);
             }
-
-            String raw = readTextFile(queueFile).trim();
-            if (raw.isEmpty()) {
-                return entries;
-            }
-
-            JSONArray parsed = new JSONArray(raw);
-            for (int i = 0; i < parsed.length(); i += 1) {
-                JSONObject item = parsed.optJSONObject(i);
-                if (item != null) {
-                    entries.add(item);
-                }
-            }
-        } catch (Exception ignored) {
-            // keep empty queue on parse failures
         }
         return entries;
     }
 
     private synchronized void writeOutgoingQueueEntries(List<JSONObject> entries) {
-        JSONArray out = new JSONArray();
-        for (JSONObject entry : entries) {
-            out.put(entry);
-        }
-
         try {
-            writeTextFile(getOutgoingQueueFile(), out.toString() + "\n");
+            File queueDir = getOutgoingQueueDir();
+            if (!queueDir.exists()) {
+                queueDir.mkdirs();
+            }
+
+            for (File entryFile : listQueueEntryFiles(queueDir)) {
+                try {
+                    Files.deleteIfExists(entryFile.toPath());
+                } catch (Exception ignored) {
+                    // Keep best effort cleanup.
+                }
+            }
+
+            for (JSONObject entry : entries) {
+                if (entry == null) {
+                    continue;
+                }
+                String entryId = entry.optString("id", UUID.randomUUID().toString());
+                writeTextFile(queueEntryFile(queueDir, entryId), entry.toString() + "\n");
+            }
         } catch (Exception ignored) {
             // ignore queue persistence failures
+        }
+    }
+
+    private synchronized List<JSONObject> readOutgoingStreamQueueEntries() {
+        List<JSONObject> entries = new ArrayList<>();
+        for (File entryFile : listQueueEntryFiles(getOutgoingStreamQueueDir())) {
+            JSONObject item = readQueueEntryFile(entryFile);
+            if (item != null) {
+                entries.add(item);
+            }
+        }
+        return entries;
+    }
+
+    private synchronized void writeOutgoingStreamQueueEntries(List<JSONObject> entries) {
+        try {
+            File queueDir = getOutgoingStreamQueueDir();
+            if (!queueDir.exists()) {
+                queueDir.mkdirs();
+            }
+
+            for (File entryFile : listQueueEntryFiles(queueDir)) {
+                try {
+                    Files.deleteIfExists(entryFile.toPath());
+                } catch (Exception ignored) {
+                    // Keep best effort cleanup.
+                }
+            }
+
+            for (JSONObject entry : entries) {
+                if (entry == null) {
+                    continue;
+                }
+                String entryId = entry.optString("id", UUID.randomUUID().toString());
+                writeTextFile(queueEntryFile(queueDir, entryId), entry.toString() + "\n");
+            }
+        } catch (Exception ignored) {
+            // ignore stream queue persistence failures
         }
     }
 
@@ -5714,6 +5898,38 @@ public class ReactorHttpService extends Service {
         queue.add(entry);
         writeOutgoingQueueEntries(queue);
         appendGlobalLog(buildExchangeLog("QUEUE_ENQUEUED", "channel=" + channel + " target=" + target));
+    }
+
+    private void enqueueOutgoingStream(String route, String target, String sourcePath, Map<String, String> headers, JSONObject metadata) {
+        long now = System.currentTimeMillis();
+        JSONObject entry = new JSONObject();
+        try {
+            entry.put("id", now + "-" + Math.abs(new SecureRandom().nextInt()));
+            entry.put("route", String.valueOf(route == null ? "node" : route).trim().toLowerCase(Locale.ROOT));
+            entry.put("target", String.valueOf(target));
+            entry.put("sourcePath", String.valueOf(sourcePath));
+            entry.put("createdAt", now);
+            entry.put("expiresAt", now + getQueueTtlMs());
+            entry.put("nextAttemptAt", now + getQueueRetryMs());
+            entry.put("attempts", 0);
+
+            JSONObject headersJson = new JSONObject();
+            if (headers != null) {
+                for (Map.Entry<String, String> header : headers.entrySet()) {
+                    headersJson.put(header.getKey(), String.valueOf(header.getValue()));
+                }
+            }
+            entry.put("headers", headersJson);
+            entry.put("metadata", metadata != null ? metadata : new JSONObject());
+        } catch (JSONException exception) {
+            appendGlobalLog(buildExchangeLog("STREAM_QUEUE_ENQUEUE_FAILED", "target=" + target + " error=" + exception.getMessage()));
+            return;
+        }
+
+        List<JSONObject> queue = readOutgoingStreamQueueEntries();
+        queue.add(entry);
+        writeOutgoingStreamQueueEntries(queue);
+        appendGlobalLog(buildExchangeLog("STREAM_QUEUE_ENQUEUED", "route=" + route + " target=" + target));
     }
 
     private Map<String, String> jsonToHeaders(JSONObject headersJson) {
@@ -5799,6 +6015,69 @@ public class ReactorHttpService extends Service {
         }
     }
 
+    private void flushOutgoingStreamQueue() {
+        List<JSONObject> queue = readOutgoingStreamQueueEntries();
+        if (queue.isEmpty()) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        List<JSONObject> nextQueue = new ArrayList<>();
+        int delivered = 0;
+
+        for (JSONObject item : queue) {
+            if (item == null) {
+                continue;
+            }
+
+            long expiresAt = item.optLong("expiresAt", 0L);
+            if (expiresAt > 0 && expiresAt <= now) {
+                continue;
+            }
+
+            long nextAttemptAt = item.optLong("nextAttemptAt", 0L);
+            if (nextAttemptAt > now) {
+                nextQueue.add(item);
+                continue;
+            }
+
+            String route = item.optString("route", "node");
+            String target = item.optString("target", "");
+            String sourcePath = item.optString("sourcePath", "");
+            JSONObject headersJson = item.optJSONObject("headers");
+            JSONObject metadata = item.optJSONObject("metadata");
+
+            try {
+                File source = resolveStreamFilePath(sourcePath);
+                if (source == null || !source.exists() || !source.isFile()) {
+                    throw new RuntimeException("stream source file not found");
+                }
+
+                if ("exchange".equals(route)) {
+                    streamFileToExchange(target, source.getAbsolutePath());
+                } else {
+                    streamFileToNode(target, source.getAbsolutePath(), jsonToHeaders(headersJson), metadata);
+                }
+                delivered += 1;
+            } catch (Exception error) {
+                int attempts = item.optInt("attempts", 0) + 1;
+                long backoffMs = Math.min(getQueueRetryMs() * Math.max(1, attempts), 30L * 60L * 1000L);
+                try {
+                    item.put("attempts", attempts);
+                    item.put("nextAttemptAt", now + backoffMs);
+                } catch (JSONException jsonException) {
+                    appendGlobalLog(buildExchangeLog("STREAM_QUEUE_RETRY_UPDATE_FAILED", "target=" + target + " error=" + jsonException.getMessage()));
+                }
+                nextQueue.add(item);
+            }
+        }
+
+        writeOutgoingStreamQueueEntries(nextQueue);
+        if (delivered > 0) {
+            appendGlobalLog(buildExchangeLog("STREAM_QUEUE_FLUSH", "delivered=" + delivered + " pending=" + nextQueue.size()));
+        }
+    }
+
     private void startOutgoingQueueFlusher() {
         if (outgoingQueueFlusherRunning) {
             return;
@@ -5809,6 +6088,7 @@ public class ReactorHttpService extends Service {
             while (outgoingQueueFlusherRunning) {
                 try {
                     flushOutgoingQueue();
+                    flushOutgoingStreamQueue();
                 } catch (Exception ignored) {
                     // best effort
                 }
@@ -6015,6 +6295,7 @@ public class ReactorHttpService extends Service {
                     appendGlobalLog(buildExchangeLog("CLIENT_CONNECTING", "exchange already active with unchanged config"));
                 }
                 flushOutgoingQueue();
+                flushOutgoingStreamQueue();
                 return;
             }
 
@@ -6033,9 +6314,11 @@ public class ReactorHttpService extends Service {
                 wsExchangeClients.clear();
                 appendGlobalLog(buildExchangeLog("SERVER_START", "Exchange server active on HTTP port " + currentPort));
                 flushOutgoingQueue();
+                flushOutgoingStreamQueue();
             } else if ("node".equals(mode) && !safeHost.isEmpty()) {
                 startWsExchangeClient();
                 flushOutgoingQueue();
+                flushOutgoingStreamQueue();
             }
 
             exchangeStarted = true;
@@ -6446,6 +6729,7 @@ public class ReactorHttpService extends Service {
                 }
                 appendGlobalLog(buildExchangeLog("CLIENT_CONNECTED", "connected to " + url + " as " + reactorName));
                 flushOutgoingQueue();
+                flushOutgoingStreamQueue();
             }
 
             @Override

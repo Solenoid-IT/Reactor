@@ -436,7 +436,22 @@ var __reactorCore = {
         getHomeDirectory: function () { return __native.getHomeDirectory(); },
         stream: function (target, source, opts) {
             var fp = (source && source.__path) ? source.__path : String(source || '');
-            var meta = JSON.stringify(opts && opts.metadata ? opts.metadata : {});
+            var nativeOpts = {};
+            if (opts && typeof opts === 'object') {
+                if (opts.metadata && typeof opts.metadata === 'object') {
+                    nativeOpts.metadata = opts.metadata;
+                }
+                if (opts.headers && typeof opts.headers === 'object') {
+                    nativeOpts.headers = opts.headers;
+                }
+                if (Object.prototype.hasOwnProperty.call(opts, 'enqueueOnFail')) {
+                    nativeOpts.enqueueOnFail = !!opts.enqueueOnFail;
+                }
+                if (Object.prototype.hasOwnProperty.call(opts, 'noEnqueue')) {
+                    nativeOpts.noEnqueue = !!opts.noEnqueue;
+                }
+            }
+            var meta = JSON.stringify(nativeOpts);
             var r = __native.nodeStream(String(target || ''), fp, meta);
             try { return JSON.parse(r); } catch (e) { return {}; }
         },

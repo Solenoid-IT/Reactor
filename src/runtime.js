@@ -3,6 +3,7 @@ const fsNative = require('fs');
 const crypto = require('crypto');
 const dns = require('dns');
 const http = require('http');
+const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 const dgram = require('dgram');
 const net = require('net');
@@ -1561,7 +1562,9 @@ class ReactorRuntime {
 		this.workingModeConfigPath = path.join(this.reactorRootDir, 'working-mode.json');
 		this.tlsManager = new TlsManager(path.join(this.reactorRootDir, 'tls'));
 		this.tlsEnabled = false; // impostato da startHttpServer
-		this.messageQueuePath = path.join(this.reactorRootDir, 'outgoing-message-queue.json');
+		this.messageQueueDir = path.join(this.reactorRootDir, 'message-queue');
+		this.messageQueueLegacyPath = path.join(this.reactorRootDir, 'outgoing-message-queue.json');
+		this.streamQueueDir = path.join(this.reactorRootDir, 'stream-queue');
 		this.messageQueueConfigPath = path.join(this.reactorRootDir, 'message-queue-config.json');
 		this.envDirPath = path.join(this.reactorRootDir, 'envs');
 		this.envMap = Object.freeze({});
@@ -1573,7 +1576,9 @@ class ReactorRuntime {
 		this.watchCreatedTimeoutMs = this.readQueueDuration('REACTOR_WATCH_CREATED_TIMEOUT_MS', DEFAULT_WATCH_CREATED_TIMEOUT_MS, this.watchCreatedQuietMs);
 		this.watchCreatedLargeFileBytes = Math.max(1, Number(process.env.REACTOR_WATCH_CREATED_LARGE_FILE_BYTES) || DEFAULT_WATCH_CREATED_LARGE_FILE_BYTES);
 		this.messageQueueFlushTimer = null;
+		this.streamQueueFlushTimer = null;
 		this.isFlushingMessageQueue = false;
+		this.isFlushingStreamQueue = false;
 		this.exchangeStreamStartQueueTail = Promise.resolve();
 		this.pendingExchangeStreamStarts = 0;
 	}
@@ -1643,13 +1648,89 @@ class ReactorRuntime {
 	}
 
 	async readMessageQueue() {
+		return this.readQueueEntriesFromDir(this.messageQueueDir);
+	}
+
+	async readQueueEntriesFromDir(queueDir) {
 		try {
-			const raw = await fs.readFile(this.messageQueuePath, 'utf8');
-			const parsed = JSON.parse(raw);
-			return Array.isArray(parsed) ? parsed : [];
+			await fs.mkdir(queueDir, { recursive: true });
+			const entries = await fs.readdir(queueDir, { withFileTypes: true });
+			const queue = [];
+
+			for (const entry of entries) {
+				if (!entry.isFile() || !entry.name.endsWith('.json')) {
+					continue;
+				}
+
+				const filePath = path.join(queueDir, entry.name);
+				try {
+					const raw = await fs.readFile(filePath, 'utf8');
+					const parsed = JSON.parse(raw);
+					if (parsed && typeof parsed === 'object') {
+						queue.push(parsed);
+					}
+				} catch {
+					// Skip malformed queue entries.
+				}
+			}
+
+			queue.sort((a, b) => Number(a?.createdAt || 0) - Number(b?.createdAt || 0));
+			return queue;
 		} catch {
 			return [];
 		}
+	}
+
+	getQueueEntryJsonPath(queueDir, id) {
+		return path.join(queueDir, `${String(id || '').trim() || crypto.randomUUID()}.json`);
+	}
+
+	async replaceQueueEntriesInDir(queueDir, queue) {
+		await fs.mkdir(queueDir, { recursive: true });
+		const entries = await fs.readdir(queueDir, { withFileTypes: true }).catch(() => []);
+		for (const entry of entries) {
+			if (entry.isFile() && entry.name.endsWith('.json')) {
+				await fs.unlink(path.join(queueDir, entry.name)).catch(() => {});
+			}
+		}
+
+		for (const rawItem of Array.isArray(queue) ? queue : []) {
+			if (!rawItem || typeof rawItem !== 'object') {
+				continue;
+			}
+
+			const item = {
+				...rawItem,
+				id: String(rawItem.id || crypto.randomUUID()),
+			};
+			await fs.writeFile(
+				this.getQueueEntryJsonPath(queueDir, item.id),
+				`${JSON.stringify(item, null, 2)}\n`,
+				'utf8',
+			);
+		}
+	}
+
+	async migrateLegacyMessageQueueFileIfNeeded() {
+		let legacyQueue = [];
+		try {
+			const raw = await fs.readFile(this.messageQueueLegacyPath, 'utf8');
+			const parsed = JSON.parse(raw);
+			if (Array.isArray(parsed)) {
+				legacyQueue = parsed;
+			}
+		} catch {
+			return;
+		}
+
+		if (legacyQueue.length > 0) {
+			const currentQueue = await this.readMessageQueue();
+			const mergedQueue = [...currentQueue, ...legacyQueue];
+			await this.writeMessageQueue(mergedQueue);
+			this.log(`[Queue] Migrated ${legacyQueue.length} legacy message(s) to message-queue directory`);
+		}
+
+		await fs.unlink(this.messageQueueLegacyPath).catch(() => {});
 	}
 
 	async loadMessageQueueConfig() {
@@ -1684,14 +1765,18 @@ class ReactorRuntime {
 		const pendingItems = queue.filter((item) => item && Number(item.expiresAt || 0) > now);
 		const exchangePending = pendingItems.filter((item) => item.channel === 'exchange').length;
 		const directPending = pendingItems.filter((item) => item.channel !== 'exchange').length;
+		const streamQueue = await this.readStreamQueue();
+		const streamPending = streamQueue.filter((item) => item && Number(item.expiresAt || 0) > now).length;
 		return {
 			pending: pendingItems.length,
 			directPending,
 			exchangePending,
+			streamPending,
 			ttlMs: this.messageQueueTtlMs,
 			ttlDays: Number((this.messageQueueTtlMs / (24 * 60 * 60 * 1000)).toFixed(2)),
 			retryMs: this.messageQueueRetryMs,
-			path: this.messageQueuePath,
+			path: this.messageQueueDir,
+			streamPath: this.streamQueueDir,
 		};
 	}
 
@@ -1708,12 +1793,12 @@ class ReactorRuntime {
 
 	async clearMessageQueue() {
 		await this.writeMessageQueue([]);
+		await this.clearStreamQueue();
 		return this.getMessageQueueStatus();
 	}
 
 	async writeMessageQueue(queue) {
-		await fs.mkdir(path.dirname(this.messageQueuePath), { recursive: true });
-		await fs.writeFile(this.messageQueuePath, `${JSON.stringify(queue, null, 2)}\n`, 'utf8');
+		await this.replaceQueueEntriesInDir(this.messageQueueDir, queue);
 	}
 
 	async enqueueMessageForRetry(entry) {
@@ -1794,6 +1879,174 @@ class ReactorRuntime {
 		}
 	}
 
+	async readStreamQueue() {
+		return this.readQueueEntriesFromDir(this.streamQueueDir);
+	}
+
+	async writeStreamQueueEntry(entry) {
+		const safeEntry = {
+			...entry,
+			id: String(entry?.id || crypto.randomUUID()),
+		};
+		await fs.mkdir(this.streamQueueDir, { recursive: true });
+		await fs.writeFile(
+			this.getQueueEntryJsonPath(this.streamQueueDir, safeEntry.id),
+			`${JSON.stringify(safeEntry, null, 2)}\n`,
+			'utf8',
+		);
+		return safeEntry;
+	}
+
+	async removeStreamQueueEntry(entry) {
+		const safeId = String(entry?.id || '').trim();
+		if (!safeId) {
+			return;
+		}
+
+		await fs.unlink(this.getQueueEntryJsonPath(this.streamQueueDir, safeId)).catch(() => {});
+		if (entry && entry.payloadPath) {
+			await fs.unlink(String(entry.payloadPath)).catch(() => {});
+		}
+	}
+
+	async clearStreamQueue() {
+		const queue = await this.readStreamQueue();
+		for (const entry of queue) {
+			await this.removeStreamQueueEntry(entry);
+		}
+	}
+
+	async enqueueStreamForRetry(route, target, source, options = {}) {
+		const safeRoute = String(route || '').trim().toLowerCase() || 'exchange';
+		const safeTarget = String(target || '').trim();
+		if (!safeTarget) {
+			throw new Error('invalid queued stream target');
+		}
+
+		const safeOptions = options && typeof options === 'object' ? options : {};
+		const safeChunkSize = Math.max(1024, Math.min(1024 * 1024, Number(safeOptions.chunkSize) || 64 * 1024));
+		const streamId = String(safeOptions.streamId || crypto.randomUUID());
+		const payloadId = crypto.randomUUID();
+		const payloadPath = path.join(this.streamQueueDir, `${payloadId}.bin`);
+		const payloadWriter = fsNative.createWriteStream(payloadPath, { flags: 'w' });
+
+		try {
+			await fs.mkdir(this.streamQueueDir, { recursive: true });
+			await pipeline(Readable.from(iterateStreamSourceChunks(source, safeChunkSize)), payloadWriter);
+			const payloadStats = await fs.stat(payloadPath);
+			const now = Date.now();
+			const queueEntry = await this.writeStreamQueueEntry({
+				id: payloadId,
+				createdAt: now,
+				expiresAt: now + this.messageQueueTtlMs,
+				nextAttemptAt: now + this.messageQueueRetryMs,
+				attempts: 0,
+				route: safeRoute,
+				target: safeTarget,
+				streamId,
+				payloadPath,
+				options: {
+					chunkSize: safeChunkSize,
+					contentType: String(safeOptions.contentType || 'application/octet-stream'),
+					metadata: safeOptions.metadata && typeof safeOptions.metadata === 'object' ? safeOptions.metadata : {},
+					headers: safeOptions.headers && typeof safeOptions.headers === 'object' ? safeOptions.headers : {},
+					totalBytes: Number(payloadStats.size || 0),
+				},
+			});
+
+			this.log(`[Queue] Stream enqueued (${safeRoute}) target=${safeTarget} size=${Number(payloadStats.size || 0)}B`);
+			return queueEntry;
+		} catch (error) {
+			await fs.unlink(payloadPath).catch(() => {});
+			throw error;
+		}
+	}
+
+	async deliverStreamQueueEntry(entry) {
+		const safeEntry = entry && typeof entry === 'object' ? entry : null;
+		if (!safeEntry) {
+			throw new Error('invalid queued stream entry');
+		}
+
+		const payloadPath = String(safeEntry.payloadPath || '').trim();
+		if (!payloadPath) {
+			throw new Error('missing queued stream payload path');
+		}
+
+		await fs.access(payloadPath);
+		const options = safeEntry.options && typeof safeEntry.options === 'object' ? safeEntry.options : {};
+		const streamSource = fsNative.createReadStream(payloadPath, {
+			highWaterMark: Math.max(1024, Math.min(1024 * 1024, Number(options.chunkSize) || 64 * 1024)),
+		});
+		const streamOptions = {
+			...options,
+			streamId: String(safeEntry.streamId || crypto.randomUUID()),
+			enqueueOnFail: false,
+			noEnqueue: true,
+		};
+
+		if (String(safeEntry.route || '').toLowerCase() === 'direct') {
+			return this.streamToNode(safeEntry.target, streamSource, streamOptions);
+		}
+
+		return this.streamToExchange(safeEntry.target, streamSource, streamOptions);
+	}
+
+	async flushStreamQueue() {
+		if (this.isFlushingStreamQueue) {
+			return;
+		}
+
+		this.isFlushingStreamQueue = true;
+		try {
+			const queue = await this.readStreamQueue();
+			if (queue.length === 0) {
+				return;
+			}
+
+			const now = Date.now();
+			let delivered = 0;
+			let dropped = 0;
+
+			for (const item of queue) {
+				if (!item || typeof item !== 'object') {
+					continue;
+				}
+
+				if (Number(item.expiresAt || 0) <= now) {
+					dropped += 1;
+					await this.removeStreamQueueEntry(item);
+					continue;
+				}
+
+				if (Number(item.nextAttemptAt || 0) > now) {
+					continue;
+				}
+
+				try {
+					await this.deliverStreamQueueEntry(item);
+					delivered += 1;
+					await this.removeStreamQueueEntry(item);
+				} catch {
+					const attempts = Number(item.attempts || 0) + 1;
+					const backoff = Math.min(this.messageQueueRetryMs * Math.max(1, attempts), 30 * 60 * 1000);
+					await this.writeStreamQueueEntry({
+						...item,
+						attempts,
+						nextAttemptAt: now + backoff,
+					});
+				}
+			}
+
+			if (delivered > 0 || dropped > 0) {
+				const pending = (await this.readStreamQueue()).length;
+				this.log(`[Queue] Stream flush completed delivered=${delivered} dropped=${dropped} pending=${pending}`);
+			}
+		} finally {
+			this.isFlushingStreamQueue = false;
+		}
+	}
+
 	startMessageQueueFlushTimer() {
 		if (this.messageQueueFlushTimer) {
 			clearInterval(this.messageQueueFlushTimer);
@@ -1802,6 +2055,18 @@ class ReactorRuntime {
 		this.messageQueueFlushTimer = setInterval(() => {
 			this.flushMessageQueue().catch((error) => {
 				this.log(`[Queue] Flush failed: ${error.message}`);
+			});
+		}, this.messageQueueRetryMs);
+	}
+
+	startStreamQueueFlushTimer() {
+		if (this.streamQueueFlushTimer) {
+			clearInterval(this.streamQueueFlushTimer);
+		}
+
+		this.streamQueueFlushTimer = setInterval(() => {
+			this.flushStreamQueue().catch((error) => {
+				this.log(`[Queue] Stream flush failed: ${error.message}`);
 			});
 		}, this.messageQueueRetryMs);
 	}
@@ -4370,6 +4635,27 @@ class ReactorRuntime {
 		const shouldEnqueueOnFail = safeOptions && safeOptions.noEnqueue
 			? false
 			: Boolean(safeOptions.enqueueOnFail);
+		const shouldPersistStreamOnFail = shouldEnqueueOnFail && !Boolean(safeOptions.noEnqueue);
+		if (shouldPersistStreamOnFail) {
+			const queuedEntry = await this.enqueueStreamForRetry('exchange', target, source, safeOptions);
+			try {
+				const result = await this.deliverStreamQueueEntry(queuedEntry);
+				await this.removeStreamQueueEntry(queuedEntry);
+				return result;
+			} catch (error) {
+				this.log(`[Queue] Stream delivery deferred target=${String(target || '').trim().toLowerCase()} reason=${error.message}`);
+				return {
+					target: String(target || '').trim().toLowerCase(),
+					via: 'exchange',
+					deliveredVia: 'EXCHANGE',
+					queued: true,
+					queueId: queuedEntry.id,
+					reason: String(error?.message || 'stream delivery failed'),
+					expiresAt: Number(queuedEntry.expiresAt || 0),
+				};
+			}
+		}
+
 		let releaseQueuedStart = await this.acquireQueuedExchangeStreamStart(target, {
 			enqueueOnFail: shouldEnqueueOnFail,
 			noEnqueue: Boolean(safeOptions.noEnqueue),
@@ -5837,8 +6123,11 @@ class ReactorRuntime {
 
 	async init() {
 		await this.loadMessageQueueConfig();
+		await this.migrateLegacyMessageQueueFileIfNeeded();
 		await fs.mkdir(this.endpointsDir, { recursive: true });
 		await fs.mkdir(this.streamStorageDir, { recursive: true });
+		await fs.mkdir(this.messageQueueDir, { recursive: true });
+		await fs.mkdir(this.streamQueueDir, { recursive: true });
 		await this.loadEnvMapFromDisk();
 		await this.cleanupOrphanStreamFiles();
 		this.startStreamCleanupTimer();
@@ -5857,7 +6146,9 @@ class ReactorRuntime {
 			});
 		}
 		this.startMessageQueueFlushTimer();
+		this.startStreamQueueFlushTimer();
 		await this.flushMessageQueue();
+		await this.flushStreamQueue();
 		await this.emitEvent('BOOT');
 	}
 
@@ -6249,6 +6540,9 @@ class ReactorRuntime {
 				this.flushMessageQueue().catch((error) => {
 					this.log(`[Queue] Flush on ${eventName} failed: ${error.message}`);
 				});
+				this.flushStreamQueue().catch((error) => {
+					this.log(`[Queue] Stream flush on ${eventName} failed: ${error.message}`);
+				});
 			}
 			return;
 		}
@@ -6265,6 +6559,9 @@ class ReactorRuntime {
 		if (eventName === 'NET_UP' || eventName === 'WIFI_ON') {
 			this.flushMessageQueue().catch((error) => {
 				this.log(`[Queue] Flush on ${eventName} failed: ${error.message}`);
+			});
+			this.flushStreamQueue().catch((error) => {
+				this.log(`[Queue] Stream flush on ${eventName} failed: ${error.message}`);
 			});
 		}
 	}
@@ -6495,6 +6792,11 @@ class ReactorRuntime {
 		if (this.messageQueueFlushTimer) {
 			clearInterval(this.messageQueueFlushTimer);
 			this.messageQueueFlushTimer = null;
+		}
+
+		if (this.streamQueueFlushTimer) {
+			clearInterval(this.streamQueueFlushTimer);
+			this.streamQueueFlushTimer = null;
 		}
 
 		if (this.httpServer) {
