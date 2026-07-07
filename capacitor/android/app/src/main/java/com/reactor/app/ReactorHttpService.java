@@ -713,9 +713,6 @@ public class ReactorHttpService extends Service {
             turnServer.put("urls", urls);
             turnServer.put("username", !turnUsername.isEmpty() ? turnUsername : token);
             turnServer.put("credential", !turnPassword.isEmpty() ? turnPassword : token);
-            if (turnTls) {
-                turnServer.put("tlsCertPolicy", "insecure_no_check");
-            }
             iceServers.put(turnServer);
         }
 
@@ -6459,6 +6456,9 @@ public class ReactorHttpService extends Service {
                 if (response != null) {
                     detail += " (HTTP " + response.code() + ")";
                 }
+                if (currentExchangeTls) {
+                    detail = formatTlsCertificateError(detail);
+                }
                 exchangeClientAuthenticated = false;
                 exchangeClientLastError = detail;
                 emitExchangeConnectionStatusUpdate();
@@ -6712,35 +6712,31 @@ public class ReactorHttpService extends Service {
         });
 
         if (tls) {
-            try {
-                X509TrustManager trustAll = new X509TrustManager() {
-                    @Override
-                    public void checkClientTrusted(X509Certificate[] chain, String authType) {
-                        // Intentionally permissive to support self-signed Reactor exchange certs.
-                    }
-
-                    @Override
-                    public void checkServerTrusted(X509Certificate[] chain, String authType) {
-                        // Intentionally permissive to support self-signed Reactor exchange certs.
-                    }
-
-                    @Override
-                    public X509Certificate[] getAcceptedIssuers() {
-                        return new X509Certificate[0];
-                    }
-                };
-
-                SSLContext sslContext = SSLContext.getInstance("TLS");
-                sslContext.init(null, new TrustManager[]{trustAll}, new SecureRandom());
-                builder.sslSocketFactory(sslContext.getSocketFactory(), trustAll);
-                builder.hostnameVerifier((hostname, session) -> true);
-                appendGlobalLog(buildExchangeLog("CLIENT_TLS", "TLS enabled (certificate validation disabled for exchange client)"));
-            } catch (Exception error) {
-                appendGlobalLog(buildExchangeLog("CLIENT_TLS_ERROR", "unable to configure permissive TLS: " + error.getMessage()));
-            }
+            appendGlobalLog(buildExchangeLog("CLIENT_TLS", "TLS enabled (strict certificate validation active for exchange client)"));
         }
 
         return builder.build();
+    }
+
+    private String formatTlsCertificateError(String rawDetail) {
+        String detail = String.valueOf(rawDetail == null ? "" : rawDetail).trim();
+        if (detail.isEmpty()) {
+            return "TLS certificate validation failed";
+        }
+
+        String lowered = detail.toLowerCase(Locale.ROOT);
+        boolean certificateIssue = lowered.contains("self signed")
+                || lowered.contains("unable to verify")
+                || lowered.contains("certificate")
+                || lowered.contains("hostname")
+                || lowered.contains("x509")
+                || lowered.contains("cert_");
+
+        if (certificateIssue) {
+            return "TLS certificate validation failed: " + detail;
+        }
+
+        return detail;
     }
 
     private ExchangeEndpoint normalizeExchangeEndpoint(String rawHost, int rawPort) {

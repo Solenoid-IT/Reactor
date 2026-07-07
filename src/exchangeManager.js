@@ -9,6 +9,30 @@ const DEFAULT_UNDELIVERED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_UNDELIVERED_RETRY_MS = 30 * 1000;
 const DEFAULT_PENDING_SIGNAL_TTL_MS = 15000;
 
+function formatTlsCertificateError(rawError, fallback = 'TLS certificate validation failed') {
+	const message = String(rawError || '').trim();
+	const lowered = message.toLowerCase();
+	if (!lowered) {
+		return fallback;
+	}
+
+	const certificateIssue =
+		lowered.includes('self signed')
+		|| lowered.includes('unable to verify')
+		|| lowered.includes('unable to get local issuer certificate')
+		|| lowered.includes('certificate has expired')
+		|| lowered.includes('hostname/ip does not match certificate')
+		|| lowered.includes('altname')
+		|| lowered.includes('x509')
+		|| lowered.includes('cert_');
+
+	if (certificateIssue) {
+		return `TLS certificate validation failed: ${message}`;
+	}
+
+	return message;
+}
+
 function parseExchangeEndpointSelector(rawSelector) {
 	const trimmed = String(rawSelector || '').trim();
 	if (!trimmed) {
@@ -292,6 +316,14 @@ class ExchangeManager {
 			|| safeReason.includes('http 401')
 		) {
 			return 'authentication';
+		}
+		if (
+			safeReason.includes('self signed')
+			|| safeReason.includes('unable to verify')
+			|| safeReason.includes('certificate')
+			|| safeReason.includes('x509')
+		) {
+			return 'tls-certificate';
 		}
 		return 'connection';
 	}
@@ -1085,12 +1117,20 @@ class ExchangeManager {
 
 		let ws;
 		try {
-			// rejectUnauthorized: false per supportare certificati self-signed
 			const token = String(this.runtime.exchangeAuthToken || '').trim();
 			const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
-			ws = new WebSocket(url, { rejectUnauthorized: false, headers });
+			const options = { headers };
+			if (this.tls) {
+				options.rejectUnauthorized = true;
+			}
+			ws = new WebSocket(url, options);
 		} catch (err) {
-			this.runtime.log(`[Exchange] Unable to create client: ${err.message}`);
+			const detail = this.tls
+				? formatTlsCertificateError(err?.message || 'unable to create secure websocket client')
+				: String(err?.message || 'unable to create websocket client');
+			this.runtime.log(`[Exchange] Unable to create client: ${detail}`);
+			this._clientLastError = detail;
+			this._emitConnectionStatus('exchange-error');
 			this._scheduleReconnect();
 			return;
 		}
@@ -1189,9 +1229,11 @@ class ExchangeManager {
 			const isCurrentSocket = this.wsClient === ws;
 			this._stopClientHeartbeat();
 			this._knownRemotePeers.clear();
-			this._clientLastError = String(err?.message || 'unknown error');
+			this._clientLastError = this.tls
+				? formatTlsCertificateError(err?.message || 'tls connection failed')
+				: String(err?.message || 'unknown error');
 			this._clientRegistered = false;
-			this.runtime.log(`[Exchange] Error: ${err.message}`);
+			this.runtime.log(`[Exchange] Error: ${this._clientLastError}`);
 			this._emitConnectionStatus('exchange-error');
 			if (isCurrentSocket) {
 				this._scheduleReconnect();

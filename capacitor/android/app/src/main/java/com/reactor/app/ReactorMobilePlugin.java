@@ -72,7 +72,9 @@ import java.util.LinkedHashSet;
 import java.util.Set;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 import javax.crypto.Mac;
@@ -919,17 +921,7 @@ public class ReactorMobilePlugin extends Plugin {
         SSLSocket socket = null;
         try {
             int safeTimeoutMs = timeoutMs > 0 ? timeoutMs : TURN_RELAY_TEST_TIMEOUT_MS;
-            X509TrustManager trustAll = new X509TrustManager() {
-                @Override public void checkClientTrusted(X509Certificate[] chain, String authType) {}
-                @Override public void checkServerTrusted(X509Certificate[] chain, String authType) {}
-                @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-            };
-            SSLContext sslContext = SSLContext.getInstance("TLS");
-            sslContext.init(null, new TrustManager[] { trustAll }, new SecureRandom());
-            socket = (SSLSocket) sslContext.getSocketFactory().createSocket();
-            socket.connect(new InetSocketAddress(address, port), safeTimeoutMs);
-            socket.setSoTimeout(safeTimeoutMs);
-            socket.startHandshake();
+            socket = createStrictTlsSocket(host, address, port, safeTimeoutMs);
 
             socket.getOutputStream().write(request.message);
             socket.getOutputStream().flush();
@@ -948,7 +940,7 @@ public class ReactorMobilePlugin extends Plugin {
 
             return new JSObject().put("ok", true).put("protocol", "tls-auth").put("messageType", parsed.type).put("message", parsed);
         } catch (Exception error) {
-            return buildRelayTestFailure(error.getMessage() != null ? error.getMessage() : "TURN TLS request failed", "connection");
+            return buildRelayTestFailure(formatTlsCertificateError(error), "connection");
         } finally {
             if (socket != null) {
                 try {
@@ -983,18 +975,7 @@ public class ReactorMobilePlugin extends Plugin {
             try {
                 if (tls) {
                     int safeTimeoutMs = timeoutMs > 0 ? timeoutMs : TURN_RELAY_TEST_TIMEOUT_MS;
-                    X509TrustManager trustAll = new X509TrustManager() {
-                        @Override public void checkClientTrusted(X509Certificate[] chain, String authType) {}
-                        @Override public void checkServerTrusted(X509Certificate[] chain, String authType) {}
-                        @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-                    };
-
-                    SSLContext sslContext = SSLContext.getInstance("TLS");
-                    sslContext.init(null, new TrustManager[] { trustAll }, new SecureRandom());
-                    persistentTlsSocket = (SSLSocket) sslContext.getSocketFactory().createSocket();
-                    persistentTlsSocket.connect(new InetSocketAddress(address, port), safeTimeoutMs);
-                    persistentTlsSocket.setSoTimeout(safeTimeoutMs);
-                    persistentTlsSocket.startHandshake();
+                    persistentTlsSocket = createStrictTlsSocket(host, address, port, safeTimeoutMs);
                 }
 
                 TurnRequest challengeRequest = buildTurnAllocateRequest("", "", "", "");
@@ -1062,7 +1043,7 @@ public class ReactorMobilePlugin extends Plugin {
                     break;
                 }
             } catch (Exception error) {
-                lastError = error.getMessage() != null ? error.getMessage() : "TURN authentication failed";
+                lastError = formatTlsCertificateError(error);
                 lastErrorType = "connection";
             } finally {
                 if (persistentTlsSocket != null) {
@@ -1131,8 +1112,46 @@ public class ReactorMobilePlugin extends Plugin {
 
             return new JSObject().put("ok", true).put("protocol", "tls-auth").put("messageType", parsed.type).put("message", parsed);
         } catch (Exception error) {
-            return buildRelayTestFailure(error.getMessage() != null ? error.getMessage() : "TURN TLS request failed", "connection");
+            return buildRelayTestFailure(formatTlsCertificateError(error), "connection");
         }
+    }
+
+    private SSLSocket createStrictTlsSocket(String host, InetAddress address, int port, int timeoutMs) throws Exception {
+        String safeHost = sanitizeNetworkHost(host);
+        int safeTimeoutMs = timeoutMs > 0 ? timeoutMs : TURN_RELAY_TEST_TIMEOUT_MS;
+        if (safeHost.isEmpty() || address == null || port < 1 || port > 65535) {
+            throw new IOException("invalid TURN TLS request parameters");
+        }
+
+        Socket tcpSocket = new Socket();
+        tcpSocket.connect(new InetSocketAddress(address, port), safeTimeoutMs);
+        tcpSocket.setSoTimeout(safeTimeoutMs);
+
+        SSLSocketFactory factory = (SSLSocketFactory) SSLSocketFactory.getDefault();
+        SSLSocket sslSocket = (SSLSocket) factory.createSocket(tcpSocket, safeHost, port, true);
+        SSLParameters sslParameters = sslSocket.getSSLParameters();
+        sslParameters.setEndpointIdentificationAlgorithm("HTTPS");
+        sslSocket.setSSLParameters(sslParameters);
+        sslSocket.setSoTimeout(safeTimeoutMs);
+        sslSocket.startHandshake();
+        return sslSocket;
+    }
+
+    private String formatTlsCertificateError(Exception error) {
+        String detail = error != null && error.getMessage() != null
+                ? error.getMessage().trim()
+                : "TLS certificate validation failed";
+        String lowered = detail.toLowerCase(Locale.ROOT);
+        boolean certificateIssue = lowered.contains("self signed")
+                || lowered.contains("unable to verify")
+                || lowered.contains("certificate")
+                || lowered.contains("hostname")
+                || lowered.contains("x509")
+                || lowered.contains("cert_");
+        if (certificateIssue) {
+            return "TLS certificate validation failed: " + detail;
+        }
+        return detail;
     }
 
     private String readHttpResponseBody(HttpURLConnection connection, int status) throws IOException {
@@ -1155,12 +1174,12 @@ public class ReactorMobilePlugin extends Plugin {
         X509TrustManager trustAll = new X509TrustManager() {
             @Override
             public void checkClientTrusted(X509Certificate[] chain, String authType) {
-                // Intentionally permissive for Exchange discovery over self-signed certs.
+				// Intentionally permissive for DoH fallback over IP endpoints.
             }
 
             @Override
             public void checkServerTrusted(X509Certificate[] chain, String authType) {
-                // Intentionally permissive for Exchange discovery over self-signed certs.
+				// Intentionally permissive for DoH fallback over IP endpoints.
             }
 
             @Override
@@ -3221,9 +3240,6 @@ public class ReactorMobilePlugin extends Plugin {
         try {
             URL url = new URL(endpointUrl);
             connection = (HttpURLConnection) url.openConnection();
-            if (tls && connection instanceof HttpsURLConnection) {
-                applyInsecureTls((HttpsURLConnection) connection);
-            }
 
             connection.setRequestMethod("GET");
             connection.setConnectTimeout(5000);
@@ -3274,7 +3290,11 @@ public class ReactorMobilePlugin extends Plugin {
             result.put("nodes", filteredNodes);
             return result;
         } catch (Exception error) {
-            return new JSObject().put("ok", false).put("error", error.getMessage()).put("nodes", new JSArray()).put("total", 0);
+            String detail = error.getMessage() != null ? error.getMessage() : "exchange discovery request failed";
+            if (tls) {
+                detail = formatTlsCertificateError(error);
+            }
+            return new JSObject().put("ok", false).put("error", detail).put("nodes", new JSArray()).put("total", 0);
         } finally {
             if (connection != null) {
                 connection.disconnect();

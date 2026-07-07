@@ -26,8 +26,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -374,9 +372,6 @@ public final class AndroidP2PWebRtcManager {
             PeerConnection.IceServer.Builder builder = PeerConnection.IceServer.builder(
                     scheme + config.turnHost + ":" + config.turnPort + "?transport=tcp"
             );
-            if (config.turnTls) {
-                applyInsecureTurnTlsPolicy(builder);
-            }
             String username = config.turnUsername != null && !config.turnUsername.isEmpty() ? config.turnUsername : config.token;
             String password = config.turnPassword != null && !config.turnPassword.isEmpty() ? config.turnPassword : config.token;
             if (username != null && !username.isEmpty()) {
@@ -389,22 +384,6 @@ public final class AndroidP2PWebRtcManager {
         }
 
         return servers;
-    }
-
-    private void applyInsecureTurnTlsPolicy(PeerConnection.IceServer.Builder builder) {
-        if (builder == null) {
-            return;
-        }
-
-        try {
-            Class<?> policyClass = Class.forName("org.webrtc.PeerConnection$TlsCertPolicy");
-            Field insecurePolicy = policyClass.getField("TLS_CERT_POLICY_INSECURE_NO_CHECK");
-            Object policyValue = insecurePolicy.get(null);
-            Method setTlsCertPolicyMethod = builder.getClass().getMethod("setTlsCertPolicy", policyClass);
-            setTlsCertPolicyMethod.invoke(builder, policyValue);
-        } catch (Exception ignored) {
-            // Keep default strict TLS validation if policy API is unavailable.
-        }
     }
 
     private void handleIncomingSignal(String from, String sessionId, String signalType, JSONObject payload) {

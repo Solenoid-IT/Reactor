@@ -59,6 +59,30 @@ const P2P_REMOTE_ENDPOINTS_TIMEOUT_MS = Number(process.env.REACTOR_P2P_ENDPOINTS
 	? Number(process.env.REACTOR_P2P_ENDPOINTS_TIMEOUT_MS)
 	: 12000;
 
+function formatTlsCertificateError(rawError, fallback = 'TLS certificate validation failed') {
+	const message = String(rawError || '').trim();
+	const lowered = message.toLowerCase();
+	if (!lowered) {
+		return fallback;
+	}
+
+	const certificateIssue =
+		lowered.includes('self signed')
+		|| lowered.includes('unable to verify')
+		|| lowered.includes('unable to get local issuer certificate')
+		|| lowered.includes('certificate has expired')
+		|| lowered.includes('hostname/ip does not match certificate')
+		|| lowered.includes('altname')
+		|| lowered.includes('x509')
+		|| lowered.includes('cert_');
+
+	if (certificateIssue) {
+		return `TLS certificate validation failed: ${message}`;
+	}
+
+	return message;
+}
+
 function delay(ms) {
 	return new Promise((resolve) => {
 		setTimeout(resolve, Math.max(0, Number(ms) || 0));
@@ -766,7 +790,7 @@ function sendTurnAllocateRequestTls(host, address, port, request, timeoutMs = 50
 		const socket = tls.connect({
 			host: safeAddress,
 			port: safePort,
-			rejectUnauthorized: false,
+			rejectUnauthorized: true,
 			servername: safeHost,
 		});
 		const finish = (result) => {
@@ -810,7 +834,7 @@ function sendTurnAllocateRequestTls(host, address, port, request, timeoutMs = 50
 		});
 
 		socket.once('error', (error) => {
-			finish({ ok: false, error: error.message || 'tls connection failed' });
+			finish({ ok: false, error: formatTlsCertificateError(error?.message, 'tls connection failed') });
 		});
 
 		socket.once('end', () => {
@@ -841,7 +865,7 @@ function createTurnTlsRequester(host, address, port, timeoutMs = 5000) {
 	const socket = tls.connect({
 		host: safeAddress,
 		port: safePort,
-		rejectUnauthorized: false,
+		rejectUnauthorized: true,
 		servername: safeHost,
 	});
 
@@ -882,7 +906,7 @@ function createTurnTlsRequester(host, address, port, timeoutMs = 5000) {
 	});
 
 	socket.once('error', (error) => {
-		closedError = error?.message || 'tls connection failed';
+		closedError = formatTlsCertificateError(error?.message, 'tls connection failed');
 		if (queueResolver) {
 			const resolve = queueResolver;
 			queueResolver = null;
@@ -896,7 +920,7 @@ function createTurnTlsRequester(host, address, port, timeoutMs = 5000) {
 		});
 
 		socket.once('error', (error) => {
-			resolve({ ok: false, error: error?.message || 'tls connection failed' });
+			resolve({ ok: false, error: formatTlsCertificateError(error?.message, 'tls connection failed') });
 		});
 	});
 
@@ -1193,7 +1217,7 @@ function testTlsRelayWithAddress(host, address, port, timeoutMs = 5000) {
 		const socket = tls.connect({
 			host: safeAddress,
 			port: safePort,
-			rejectUnauthorized: false,
+			rejectUnauthorized: true,
 			servername: safeHost,
 		});
 
@@ -1216,7 +1240,7 @@ function testTlsRelayWithAddress(host, address, port, timeoutMs = 5000) {
 		});
 
 		socket.once('error', (error) => {
-			finish({ ok: false, error: error.message || 'tls connection failed' });
+			finish({ ok: false, error: formatTlsCertificateError(error?.message, 'tls connection failed') });
 		});
 
 		const timer = setTimeout(() => {
@@ -2006,9 +2030,6 @@ class ReactorRuntime {
 				username,
 				credential,
 			};
-			if (Boolean(this.turn?.tls)) {
-				turnServer.tlsCertPolicy = 'insecure_no_check';
-			}
 			servers.push(turnServer);
 		}
 
@@ -2725,7 +2746,7 @@ class ReactorRuntime {
 						Accept: 'application/json',
 						Authorization: `Bearer ${token}`,
 					},
-					insecureTls: Boolean(this.exchangeTls),
+					insecureTls: false,
 				});
 
 				let parsed = null;
@@ -2758,9 +2779,12 @@ class ReactorRuntime {
 					nodes: mergedNodes,
 				};
 			} catch (error) {
+				const detail = this.exchangeTls
+					? formatTlsCertificateError(error?.message, 'unable to reach exchange discovery endpoint')
+					: String(error?.message || 'unable to reach exchange discovery endpoint');
 				return {
 					ok: false,
-					error: error.message || 'unable to reach exchange discovery endpoint',
+					error: detail,
 					nodes: [],
 					total: 0,
 				};
