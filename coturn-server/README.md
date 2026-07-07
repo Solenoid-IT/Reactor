@@ -19,6 +19,20 @@ cd coturn-server
 node coturnctl.js generate-tls-cert --bits 4096 --days 3650
 ```
 
+Generate a Let's Encrypt signed certificate (webroot challenge) from the host repo checkout:
+
+```bash
+cd coturn-server
+node coturnctl.js generate-tls-cert --signed --cn example.com --domain www.example.com --webroot /var/www/html --bits 4096
+```
+
+Requirements for signed mode:
+
+- `certbot` must be installed on the host.
+- The domains must point to this server.
+- Port `80` must be reachable for HTTP challenge.
+- The provided `--webroot` must be served by your web server for those domains.
+
 The CLI writes `cert.pem` and `key.pem` into `coturn-server/cert/`. When Docker Compose is available on the host, it also restarts the `coturn` container so the new certificate is picked up.
 
 If you prefer to generate the certificate directly inside the running container, use:
