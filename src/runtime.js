@@ -10,7 +10,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const tls = require('tls');
-const { readWorkingModeConfig, writeWorkingModeConfig } = require('./workingModeConfig');
+const { readConnectionsConfig, writeConnectionsConfig } = require('./connectionsConfig');
 const { parseScheduleExpression } = require('./scheduleParser');
 const { parseEndpointMetadata } = require('./metadata');
 const { loadEndpointModule } = require('./scriptLoader');
@@ -198,7 +198,7 @@ function parseEndpointSelector(rawSelector) {
 	};
 }
 
-function parseNetNodeTarget(rawNode, defaultPort = 7070) {
+function parseNetNodeTarget(rawNode, defaultPort = 9063) {
 	const safeNode = String(rawNode || '').trim().toLowerCase();
 	if (!safeNode) {
 		return null;
@@ -241,7 +241,7 @@ function parseNetNodeTarget(rawNode, defaultPort = 7070) {
 	};
 }
 
-function parseNodeDispatchTarget(rawTarget, defaultDirectPort = 7070) {
+function parseNodeDispatchTarget(rawTarget, defaultDirectPort = 9063) {
 	const trimmed = String(rawTarget || '').trim();
 	if (!trimmed) {
 		return null;
@@ -362,7 +362,7 @@ function getDelayToNextMidnightBoundary(intervalMs, nowMs = Date.now()) {
 	return intervalMs - remainder;
 }
 
-function normalizeHostPort(value, defaultPort = 7070) {
+function normalizeHostPort(value, defaultPort = 9063) {
 	const raw = String(value || '').trim().toLowerCase();
 	if (!raw) {
 		return null;
@@ -1523,7 +1523,7 @@ class ReactorRuntime {
 		this.streamCleanupIntervalMs = this.readQueueDuration('REACTOR_STREAM_CLEANUP_INTERVAL_MS', DEFAULT_STREAM_CLEANUP_INTERVAL_MS, 5 * 1000);
 		this.streamCleanupTimer = null;
 		this.httpServer = null;
-		this.httpServerPort = Number(options.httpServerPort || process.env.REACTOR_HTTP_PORT || 7070);
+		this.httpServerPort = Number(options.httpServerPort || process.env.REACTOR_HTTP_PORT || 9063);
 		this.httpServerLogs = [];
 		this.reactorNamePath = path.join(this.reactorRootDir, 'name');
 		this.cachedReactorName = null;
@@ -1559,7 +1559,7 @@ class ReactorRuntime {
 		this.p2pAutodialAttempts = new Map();
 		this.p2pAutodialCooldownMs = this.readQueueDuration('REACTOR_P2P_AUTODIAL_COOLDOWN_MS', 30 * 1000, 5 * 1000);
 		this.p2pRemoteEndpointRequests = new Map();
-		this.workingModeConfigPath = path.join(this.reactorRootDir, 'working-mode.json');
+		this.connectionsConfigPath = path.join(this.reactorRootDir, 'connections.json');
 		this.tlsManager = new TlsManager(path.join(this.reactorRootDir, 'tls'));
 		this.tlsEnabled = false; // impostato da startHttpServer
 		this.messageQueueDir = path.join(this.reactorRootDir, 'message-queue');
@@ -2761,25 +2761,26 @@ class ReactorRuntime {
 	}
 
 	async getExchangeToken() {
-		const config = await readWorkingModeConfig(this.workingModeConfigPath);
-		const token = String(config.token || '').trim();
+		const config = await readConnectionsConfig(this.connectionsConfigPath);
+		const token = String(config.exchange?.token || '').trim();
 		return {
 			exists: Boolean(token),
 			token,
-			path: this.workingModeConfigPath,
+			path: this.connectionsConfigPath,
 		};
 	}
 
 	async generateExchangeToken() {
 		const token = crypto.randomBytes(32).toString('base64url');
-		await fs.mkdir(path.dirname(this.workingModeConfigPath), { recursive: true });
-		await writeWorkingModeConfig(this.workingModeConfigPath, {
-			type: this.exchangeMode,
-			host: this.exchangeHost,
-			port: this.exchangePort,
-			tls: this.exchangeTls,
-			token,
-			discovery: this.exchangeDiscoveryEndpointEnabled,
+		await fs.mkdir(path.dirname(this.connectionsConfigPath), { recursive: true });
+		await writeConnectionsConfig(this.connectionsConfigPath, {
+			exchange: {
+				host: this.exchangeHost,
+				port: this.exchangePort,
+				tls: this.exchangeTls,
+				token,
+				discovery: this.exchangeDiscoveryEndpointEnabled,
+			},
 			stun: this.stun,
 			turn: this.turn,
 		});
@@ -2787,7 +2788,7 @@ class ReactorRuntime {
 		return {
 			exists: true,
 			token,
-			path: this.workingModeConfigPath,
+			path: this.connectionsConfigPath,
 		};
 	}
 
@@ -2833,13 +2834,14 @@ class ReactorRuntime {
 		this.turn = normalizeRelayEndpointConfig(turn, this.turn);
 		this.exchangeManager.configure(internalMode, safeHost, safePort, safeTls);
 		await this.exchangeManager.start(this.httpServer);
-		await writeWorkingModeConfig(this.workingModeConfigPath, {
-			type: this.exchangeMode,
-			host: this.exchangeHost,
-			port: this.exchangePort,
-			tls: this.exchangeTls,
-			token: this.exchangeAuthToken,
-			discovery: this.exchangeDiscoveryEndpointEnabled,
+		await writeConnectionsConfig(this.connectionsConfigPath, {
+			exchange: {
+				host: this.exchangeHost,
+				port: this.exchangePort,
+				tls: this.exchangeTls,
+				token: this.exchangeAuthToken,
+				discovery: this.exchangeDiscoveryEndpointEnabled,
+			},
 			stun: this.stun,
 			turn: this.turn,
 		});
@@ -2895,13 +2897,14 @@ class ReactorRuntime {
 			this.turn = normalizeRelayEndpointConfig(relayConfig, this.turn);
 		}
 
-		await writeWorkingModeConfig(this.workingModeConfigPath, {
-			type: this.exchangeMode,
-			host: this.exchangeHost,
-			port: this.exchangePort,
-			tls: this.exchangeTls,
-			token: this.exchangeAuthToken,
-			discovery: this.exchangeDiscoveryEndpointEnabled,
+		await writeConnectionsConfig(this.connectionsConfigPath, {
+			exchange: {
+				host: this.exchangeHost,
+				port: this.exchangePort,
+				tls: this.exchangeTls,
+				token: this.exchangeAuthToken,
+				discovery: this.exchangeDiscoveryEndpointEnabled,
+			},
 			stun: this.stun,
 			turn: this.turn,
 		});
@@ -2923,7 +2926,7 @@ class ReactorRuntime {
 			address: null,
 			ip: null,
 			port: null,
-			httpPort: Number(this.httpServerPort) || 7070,
+			httpPort: Number(this.httpServerPort) || 9063,
 			httpTls: Boolean(this.tlsEnabled),
 			endpointsEndpoint: null,
 			connectedAt: this.runtimeStartedAt,
@@ -3702,7 +3705,7 @@ class ReactorRuntime {
 		if (rawSender) {
 			const loweredSender = rawSender.toLowerCase();
 			if (isLikelyNetworkIdentity(loweredSender)) {
-				const normalizedSender = normalizeHostPort(loweredSender, 7070);
+				const normalizedSender = normalizeHostPort(loweredSender, 9063);
 				if (normalizedSender) {
 					const [senderHost] = normalizedSender.split(':');
 					candidates.add(normalizedSender);
@@ -3717,7 +3720,7 @@ class ReactorRuntime {
 		}
 
 		if (remoteHost) {
-			const normalizedRemote = normalizeHostPort(remoteHost, 7070);
+			const normalizedRemote = normalizeHostPort(remoteHost, 9063);
 			if (normalizedRemote) {
 				candidates.add(normalizedRemote);
 				candidates.add(`net:${normalizedRemote}`);
@@ -4218,7 +4221,7 @@ class ReactorRuntime {
 
 		const preferredPorts = hasExplicitPort
 			? [null]
-			: Array.from(new Set([this.httpServerPort, 7070].filter((port) => Number.isInteger(port) && port > 0)));
+			: Array.from(new Set([this.httpServerPort, 9063].filter((port) => Number.isInteger(port) && port > 0)));
 
 		const normalizedTargets = hasExplicitPort
 			? [normalizeHostPort(effectiveTarget, this.httpServerPort)].filter(Boolean)
@@ -4249,7 +4252,7 @@ class ReactorRuntime {
 		for (let index = 0; index < normalizedTargets.length; index += 1) {
 			const normalizedTarget = normalizedTargets[index];
 			const [host, portString] = normalizedTarget.split(':');
-			const port = Number(portString || 7070);
+			const port = Number(portString || 9063);
 			const isLast = index === normalizedTargets.length - 1;
 			const shortTimeout = isLast ? undefined : 2000;
 

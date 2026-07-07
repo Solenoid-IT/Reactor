@@ -360,7 +360,7 @@ function isLikelyHostSender(value) {
 	return false;
 }
 
-function normalizeMessageSender(rawSender, defaultPort = 7070) {
+function normalizeMessageSender(rawSender, defaultPort = 9063) {
 	const sender = String(rawSender || '').trim();
 	if (!sender) {
 		return null;

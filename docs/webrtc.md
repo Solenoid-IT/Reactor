@@ -83,7 +83,7 @@ Android WebRTC is implemented in [capacitor/android/app/src/main/java/com/reacto
 
 ### Android-specific note
 
-The Android responder must use the real `working-mode.json` relay configuration when creating the peer connection. That file provides STUN, TURN, and TURN credentials.
+The Android responder must use the real `connections.json` relay configuration when creating the peer connection. That file provides STUN, TURN, and TURN credentials.
 
 ## Exchange Signaling Layer
 
@@ -160,7 +160,7 @@ If P2P does not open:
 * Verify that both nodes are connected to Exchange.
 * Verify that both nodes have STUN and TURN configured.
 * Verify that the desktop runtime can load `@roamhq/wrtc`.
-* Verify that Android uses the real `working-mode.json` values.
+* Verify that Android uses the real `connections.json` values.
 * Check whether the remote description is set before ICE candidates are flushed.
 * If TURN uses TLS with a self-signed certificate, Android native WebRTC is configured to allow insecure TURN TLS cert policy when `turn.tls=true`.
 * Desktop includes a best-effort TURN TLS policy hint (`tlsCertPolicy=insecure_no_check`) in ICE server config for WebRTC runtimes that support it.

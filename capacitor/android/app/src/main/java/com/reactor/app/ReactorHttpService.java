@@ -110,7 +110,7 @@ public class ReactorHttpService extends Service {
     public static final String PREF_MESSAGE_QUEUE_TTL_MS = "messageQueueTtlMs";
     public static final String PREF_MESSAGE_QUEUE_RETRY_MS = "messageQueueRetryMs";
     public static final int DEFAULT_PORT = 7070;
-    private static final String WORKING_MODE_FILE = "working-mode.json";
+    private static final String WORKING_MODE_FILE = "connections.json";
     private static final String ENV_DIR = "envs";
 
     private static final String CHANNEL_ID = "reactor_http_channel";

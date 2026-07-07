@@ -328,7 +328,7 @@ MESSAGE sender filter rules:
 - @on MESSAGE [R1] receives only from sender R1
 - @on MESSAGE [R1,R2] receives only from listed senders
 - sender can be reactor name, net:host, or net:host:port
-- net:host without port matches that host with default port 7070
+- net:host without port matches that host with default port 9063
 - Sender list uses OR semantics: @on MESSAGE[R2,net:1.2.3.4:5678] matches messages coming from R2 OR from net:1.2.3.4:5678.
 
 MESSAGE target rules:
@@ -397,7 +397,7 @@ Complete header example:
 HTTP server notes:
 - Reactor starts an internal HTTP server for health and message dispatch
 - `POST /message` is used by `@on MESSAGE` and `@on MESSAGE [sender_a,sender_b]`
-- Default port: 7070
+- Default port: 9063
 - Port can be configured at runtime (UI bridge) or with environment variable REACTOR_HTTP_PORT
 
 ## Endpoint Contract

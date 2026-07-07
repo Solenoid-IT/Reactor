@@ -22,7 +22,7 @@ function normalizeBackupExportOptions(rawOptions = {}) {
 function getBackupEntries(rootDir) {
 	return [
 		{ sourcePath: path.join(rootDir, 'endpoints'), archiveName: 'endpoints' },
-		{ sourcePath: path.join(rootDir, 'working-mode.json'), archiveName: 'working-mode.json' },
+		{ sourcePath: path.join(rootDir, 'connections.json'), archiveName: 'connections.json' },
 		{ sourcePath: path.join(rootDir, 'name'), archiveName: 'name' },
 		{ sourcePath: path.join(rootDir, 'permissions.json'), archiveName: 'permissions.json' },
 		{ sourcePath: path.join(rootDir, 'envs'), archiveName: 'envs' },
@@ -90,7 +90,7 @@ async function buildBackupZip(rootDir, rawOptions = {}) {
 	const options = normalizeBackupExportOptions(rawOptions);
 	const zip = new AdmZip();
 	for (const entry of getBackupEntries(rootDir)) {
-		if (entry.archiveName === 'working-mode.json' && !options.includeConnections) {
+		if (entry.archiveName === 'connections.json' && !options.includeConnections) {
 			continue;
 		}
 
@@ -139,7 +139,7 @@ function resolveSafeBackupTarget(rootDir, rawEntryName) {
 	}
 
 	const firstSegment = normalized.split('/')[0];
-	const allowedRoots = new Set(['endpoints', 'working-mode.json', 'name', 'permissions.json', 'envs', 'ui-settings.json', 'workflow.json', 'activity.log', 'tls', 'backup-meta.json']);
+	const allowedRoots = new Set(['endpoints', 'connections.json', 'name', 'permissions.json', 'envs', 'ui-settings.json', 'workflow.json', 'activity.log', 'tls', 'backup-meta.json']);
 	if (!allowedRoots.has(firstSegment)) {
 		return null;
 	}

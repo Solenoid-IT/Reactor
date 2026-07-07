@@ -40,7 +40,7 @@ export async function getUiSettings() {
 		return nativeResult;
 	}
 
-	return { defaultProgramPath: '', httpServerPort: 7070 };
+	return { defaultProgramPath: '', httpServerPort: 9063 };
 }
 
 export async function getPermissionsConfig() {

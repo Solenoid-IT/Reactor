@@ -95,7 +95,7 @@ public class ReactorMobilePlugin extends Plugin {
 
     private static final int DEFAULT_HTTP_PORT = 7070;
     private static final String TAG = "ReactorMobilePlugin";
-    private static final String WORKING_MODE_FILE = "working-mode.json";
+    private static final String WORKING_MODE_FILE = "connections.json";
     private static final String REACTOR_NAME_FILE = "name";
     private static final String ENV_DIR = "envs";
     private static final String ENDPOINT_TEMPLATES_DIR = "templates";
@@ -1433,7 +1433,7 @@ public class ReactorMobilePlugin extends Plugin {
     private List<String> getAllowedBackupRoots() {
         return Arrays.asList(
                 "endpoints",
-                "working-mode.json",
+                "connections.json",
                 "name",
                 "envs",
                 "permissions.json",

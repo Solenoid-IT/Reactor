@@ -1864,7 +1864,7 @@ class ExchangeManager {
 			this.wsClient.send(JSON.stringify({
 				type: 'profile',
 				endpoints: this._sanitizeDiscoveryEndpoints(endpoints),
-				httpPort: Number(this.runtime.httpServerPort) || 7070,
+				httpPort: Number(this.runtime.httpServerPort) || 9063,
 				httpTls: Boolean(this.runtime.tlsEnabled),
 			}));
 		} catch {
@@ -1885,7 +1885,7 @@ class ExchangeManager {
 			name: safeName,
 			token,
 			endpoints,
-			httpPort: Number(this.runtime.httpServerPort) || 7070,
+			httpPort: Number(this.runtime.httpServerPort) || 9063,
 			httpTls: Boolean(this.runtime.tlsEnabled),
 		};
 	}

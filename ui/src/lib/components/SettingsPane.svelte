@@ -1,17 +1,15 @@
 <script>
-	import { onDestroy } from 'svelte';
 	import { formatUiDateTime } from '$lib/dateTime';
 	import Form from './Form.svelte';
 	import Helper from './Helper.svelte';
 	import PasswordField from './PasswordField.svelte';
 
 	export let reactorName = '';
-	export let httpPort = 7070;
+	export let httpPort = 9063;
 	export let tlsEnabled = false;
 	export let tlsSubject = '';
 	export let tlsNotAfter = '';
 	export let tlsFingerprint = '';
-	export let exchangeMode = 'node';
 	export let exchangeEnabled = false;
 	export let exchangeHost = '';
 	export let exchangePort = 7070;
@@ -31,21 +29,14 @@
 	export let discovery = false;
 	export let exchangeActive = false;
 	export let exchangeStatus = { state: 'disconnected', connected: false, authenticated: false, reason: '', errorType: '' };
-	export let exchangeClients = [];
-	export let p2pStatus = { enabled: false, signalingViaExchange: true, sessions: [], remotePeers: [], iceServersConfigured: false, iceServers: [] };
-	export let linkedNodes = [];
-	export let linkedNodesTotal = 0;
-	export let linkedNodesLoading = false;
 	export let onSaveReactorName = () => {};
 	export let onSaveHttpServerData = () => {};
 	export let onOpenServerStatus = () => {};
 	export let onGenerateTlsCert = () => {};
 	export let onDeleteTlsCert = () => {};
-	export let onGenerateExchangeToken = () => {};
 	export let onSaveExchangeConfig = () => {};
 	export let onSaveStunConfig = () => {};
 	export let onSaveTurnConfig = () => {};
-	export let onRefreshLinkedNodes = () => {};
 	export let onExportBackup = () => {};
 	export let onImportBackup = () => {};
 	export let permissionsPlatform = '';
@@ -60,84 +51,9 @@
 	export let onSaveMessageQueueTtlDays = () => {};
 	export let onFlushMessageQueue = () => {};
 	export let onClearMessageQueue = () => {};
-	export let onCopyText = async () => ({ ok: false, error: 'copy handler unavailable' });
 
-	let copiedEndpointUuid = '';
-	let copiedEndpointTimer = null;
-
-	$: p2pRemotePeers = (() => {
-		const fromStatus = Array.isArray(p2pStatus?.remotePeers)
-			? p2pStatus.remotePeers.map((peer) => String(peer || '').trim().toLowerCase()).filter(Boolean)
-			: [];
-		const fromLinkedNodes = Array.isArray(linkedNodes)
-			? linkedNodes
-				.map((node) => String(node?.name || '').trim().toLowerCase())
-				.filter(Boolean)
-			: [];
-		return Array.from(new Set([...fromStatus, ...fromLinkedNodes])).sort((a, b) => a.localeCompare(b));
-	})();
-
-	function showCopiedFeedback(endpointUuid) {
-		copiedEndpointUuid = String(endpointUuid || '').trim();
-		if (copiedEndpointTimer) {
-			clearTimeout(copiedEndpointTimer);
-		}
-
-		copiedEndpointTimer = setTimeout(() => {
-			copiedEndpointUuid = '';
-			copiedEndpointTimer = null;
-		}, 1500);
-	}
-
-	async function copyNodeEndpointUuid(endpointUuid) {
-		const safeUuid = String(endpointUuid || '').trim();
-		if (!safeUuid) {
-			return;
-		}
-
-		try {
-			if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-				await navigator.clipboard.writeText(safeUuid);
-				showCopiedFeedback(safeUuid);
-				return;
-			}
-		} catch {
-			// Fallback below.
-		}
-
-		try {
-			const result = await onCopyText(safeUuid);
-			if (result && result.ok) {
-				showCopiedFeedback(safeUuid);
-				return;
-			}
-		} catch {
-			// Fallback below.
-		}
-
-		if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
-			window.prompt('Copy endpoint UUID', safeUuid);
-			showCopiedFeedback(safeUuid);
-		}
-	}
-
-	function endpointDisplayName(name, fallback = 'unknown') {
-		const rawName = String(name || '').trim();
-		const stripped = rawName.replace(/\.(ts|js)$/i, '').trim();
-		if (stripped) {
-			return stripped;
-		}
-		if (rawName) {
-			return rawName;
-		}
-		return fallback;
-	}
-
-	onDestroy(() => {
-		if (copiedEndpointTimer) {
-			clearTimeout(copiedEndpointTimer);
-		}
-	});
+	let stunAccordionOpen = false;
+	let turnAccordionOpen = false;
 
 	function onNameSubmit(event) {
 		if (!event.detail.valid) {
@@ -161,7 +77,6 @@
 		const values = event.detail.values || {};
 		const exchangeValues = values.exchange || {};
 		onSaveExchangeConfig(
-			values.type ?? exchangeMode,
 			exchangeValues.host ?? exchangeHost,
 			exchangeValues.port ?? exchangePort,
 			exchangeValues.tls ?? exchangeTls,
@@ -187,15 +102,12 @@
 		turnPort = turnTls ? 5349 : 3478;
 	}
 
-	function confirmGenerateExchangeToken() {
-		if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
-			const confirmed = window.confirm('Generate a new token? Nodes will need to use the new token to authenticate.');
-			if (!confirmed) {
-				return;
-			}
-		}
+	function toggleStunAccordion() {
+		stunAccordionOpen = !stunAccordionOpen;
+	}
 
-		onGenerateExchangeToken();
+	function toggleTurnAccordion() {
+		turnAccordionOpen = !turnAccordionOpen;
 	}
 
 	function onQueuePolicySubmit(event) {
@@ -304,118 +216,13 @@
 	<section class="detail-card settings-mode-card">
 		<h3 class="d-flex align-items-center">
 			<i class="fa-solid fa-arrows-left-right me-2"></i>
-			<span>Working Mode</span>
-			<Helper ariaLabel="Working Mode Help">
-				<div><strong>Node</strong>: run local endpoints and can use <code>Node.sendMessage</code> to communicate with other nodes.</div>
-				<div class="mt-1"><strong>Use EXCHANGE</strong>: connect this node to a remote EXCHANGE for message routing.</div>
-				<div class="mt-1"><strong>Exchange</strong>: run this Reactor as a central hub (like a router).</div>
-				<div class="mt-1">Exchange is used when nodes are on different networks, not on the same LAN.</div>
+			<span>Connections</span>
+			<Helper ariaLabel="Connections Help">
+				<div>This panel configures EXCHANGE, STUN, and TURN for this node.</div>
 			</Helper>
 		</h3>
 		<Form on:submit={onWorkingModeSubmit}>
-			<div class="exchange-mode-group mt-2">
-				<select class="input" name="type" data-required="true" data-type="string" bind:value={exchangeMode}>
-					<option value="node">Node</option>
-					<option value="exchange">Exchange</option>
-				</select>
-			</div>
-
-			{#if exchangeMode === 'exchange'}
-				<div class="row mt-3 settings-inline-row">
-					<div class="col">
-						<label class="d-block m-0">
-							<span class="detail-label">Token</span>
-							<div class="settings-token-row">
-								<input type="text" class="input" name="exchange.token" data-type="string" bind:value={exchangeToken} readonly style="border-top-right-radius:0; border-bottom-right-radius:0;" />
-								<button
-									type="button"
-									class="btn-secondary"
-									on:click={confirmGenerateExchangeToken}
-									aria-label="Generate Secure Token"
-									style="border-top-left-radius:0; border-bottom-left-radius:0; min-width:42px; padding:0 12px; display:flex; align-items:center; justify-content:center;"
-									title="generate"
-								>
-									<i class="fa-solid fa-dice"></i>
-								</button>
-							</div>
-						</label>
-					</div>
-				</div>
-
-				<div class="row mt-2">
-					<div class="col">
-						<label class="d-flex align-items-center m-0">
-							<input type="checkbox" class="input me-2" name="exchange.discovery" data-type="bool" bind:checked={discovery} />
-							Enable discovery
-						</label>
-					</div>
-				</div>
-
-				{#if exchangeActive}
-					<div class="detail-value mt-4" style="color: var(--color-success, #4caf50);">
-						<i class="fa-solid fa-circle me-1"></i>Active — {exchangeClients.length} client(s)
-					</div>
-					{#if exchangeClients.length > 0}
-						<div class="detail-value" style="font-size:0.8em; opacity:0.7;">{exchangeClients.join(', ')}</div>
-					{/if}
-				{:else}
-					<div class="detail-value mt-4" style="opacity:0.5;"><i class="fa-solid fa-circle me-1"></i>Not active</div>
-				{/if}
-
-				{#if discovery}
-					<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
-						<div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
-							<span class="detail-label">Linked Nodes ({linkedNodesTotal})</span>
-							<div style="display:flex; align-items:center; gap:8px;">
-								<button type="button" class="btn-secondary" on:click={onRefreshLinkedNodes} disabled={linkedNodesLoading}>
-									<i class="fa-solid fa-rotate-right me-1"></i>{linkedNodesLoading ? 'Refreshing...' : 'Refresh'}
-								</button>
-							</div>
-						</div>
-						{#if linkedNodes.length === 0}
-							<div class="detail-value mt-2" style="opacity:0.65;">No linked nodes</div>
-						{:else}
-							<div class="detail-value mt-2" style="max-height:220px; overflow:auto; font-size:0.78em;">
-								{#each linkedNodes as node}
-									<div style="padding:6px 0; border-bottom:1px dashed rgba(255,255,255,0.08);">
-										<details class="node-accordion-details">
-											<summary class="node-accordion-toggle">
-												<span class="node-accordion-title">
-													<strong>{node.name || 'unknown'}</strong>
-													{node.ip ? ` (${node.ip}${node.port ? `:${node.port}` : ''})` : ''}
-												</span>
-												<i class="fa-solid fa-chevron-down node-accordion-icon"></i>
-											</summary>
-											<div style="opacity:0.7; margin-top:6px;">Connected: {formatUiDateTime(node.connectedAt, '-')}</div>
-											<div style="opacity:0.7;">Last seen: {formatUiDateTime(node.lastSeenAt, '-')}</div>
-											{#if Array.isArray(node.endpoints) && node.endpoints.length > 0}
-												<div style="margin-top:6px; padding-left:8px; border-left:2px solid rgba(255,255,255,0.14);">
-													{#each node.endpoints as endpoint}
-														<div style="padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.06);">
-															<div><strong>{endpointDisplayName(endpoint.name, 'unnamed')}</strong></div>
-															<div style="display:flex; align-items:center; gap:6px; opacity:0.78;">
-																<span>{endpoint.uuid || '-'}</span>
-																<button type="button" class="btn-secondary" style="padding:1px 6px; font-size:0.9em;" on:click={() => copyNodeEndpointUuid(endpoint.uuid)}>{copiedEndpointUuid && copiedEndpointUuid === String(endpoint.uuid || '').trim() ? 'Copied' : 'Copy'}</button>
-															</div>
-															<div style="opacity:0.68;">Triggers: {Array.isArray(endpoint.triggers) && endpoint.triggers.length > 0 ? endpoint.triggers.join(', ') : '-'}</div>
-															<div style="opacity:0.68;">Enabled: {endpoint.enabled ? 'yes' : 'no'} · Mutex: {endpoint.mutex ? 'yes' : 'no'}</div>
-														</div>
-													{/each}
-												</div>
-											{:else}
-												<div style="margin-top:6px; opacity:0.65;">No endpoints exposed by this node</div>
-											{/if}
-										</details>
-									</div>
-								{/each}
-							</div>
-						{/if}
-					</div>
-				{/if}
-			{/if}
-
-			{#if exchangeMode === 'node'}
-				<fieldset class="mt-3 settings-exchange-fieldset" style="border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 10px;">
+			<fieldset class="mt-3 settings-exchange-fieldset" style="border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 10px;">
 					<legend>EXCHANGE</legend>
 
 					<div class="row mt-1">
@@ -427,144 +234,156 @@
 						</div>
 					</div>
 
-					<div class="row settings-host-port-row mt-2">
-						<div class="col">
-							<label class="d-block m-0">
-								<span class="detail-label">Host</span>
-								<input type="text" class="input" name="exchange.host" data-required={exchangeEnabled ? 'true' : 'false'} data-type="string" bind:value={exchangeHost} placeholder="192.168.1.10" disabled={!exchangeEnabled} />
-							</label>
-						</div>
-						<div class="col-2 settings-port-col">
-							<label class="d-block m-0">
-								<span class="detail-label">Port</span>
-								<input type="number" class="input" name="exchange.port" data-required={exchangeEnabled ? 'true' : 'false'} data-type="int" min="1" max="65535" bind:value={exchangePort} disabled={!exchangeEnabled} />
-							</label>
-						</div>
-					</div>
-
-					<div class="row mt-2">
-						<div class="col">
-							<label class="d-block m-0">
-								<span class="detail-label">Token</span>
-								<input type="text" class="input" name="exchange.token" data-required={exchangeEnabled ? 'true' : 'false'} data-type="string" bind:value={exchangeToken} disabled={!exchangeEnabled} />
-							</label>
-						</div>
-					</div>
-
-					<div class="row mt-3">
-						<div class="col">
-							<label class="d-flex align-items-center m-0">
-								<input type="checkbox" class="input me-2" name="exchange.tls" data-type="bool" bind:checked={exchangeTls} disabled={!exchangeEnabled} />
-								TLS
-							</label>
-						</div>
-					</div>
-
 					{#if exchangeEnabled}
-						<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
-							<div class="detail-label" style="margin-bottom:8px;">
-								STUN (optional)
+						<div class="row settings-host-port-row mt-2">
+							<div class="col">
+								<label class="d-block m-0">
+									<span class="detail-label">Host</span>
+									<input type="text" class="input" name="exchange.host" data-required="true" data-type="string" bind:value={exchangeHost} placeholder="192.168.1.10" />
+								</label>
+							</div>
+							<div class="col-2 settings-port-col">
+								<label class="d-block m-0">
+									<span class="detail-label">Port</span>
+									<input type="number" class="input" name="exchange.port" data-required="true" data-type="int" min="1" max="65535" bind:value={exchangePort} />
+								</label>
+							</div>
+						</div>
 
-								<Helper ariaLabel="STUN Help">
-									STUN is used to discover the public IP address of this node when behind a NAT. It is required for P2P connections to work across different networks.
-								</Helper>
+						<div class="row mt-2">
+							<div class="col">
+								<label class="d-block m-0">
+									<span class="detail-label">Token</span>
+									<input type="text" class="input" name="exchange.token" data-required="true" data-type="string" bind:value={exchangeToken} />
+								</label>
 							</div>
-							{#if stunTestConnected === true}
-								<div class="detail-value" style="color: var(--color-success, #4caf50);"><i class="fa-solid fa-circle-check me-1"></i>Connected</div>
-							{:else if stunTestConnected === false}
-								<div class="detail-value" style="color: var(--color-danger, #ff6b6b);"><i class="fa-solid fa-circle-xmark me-1"></i>Not connected</div>
-							{/if}
-							<div class="row settings-host-port-row">
-								<div class="col">
-									<label class="d-block m-0">
-										<span class="detail-label">Server</span>
-										<input type="text" class="input" name="exchange.stun.host" data-type="string" bind:value={stunHost} placeholder="stun.example.com" />
-									</label>
-								</div>
-								<div class="col-2 settings-port-col">
-									<label class="d-block m-0">
-										<span class="detail-label">Port</span>
-										<input type="number" class="input" name="exchange.stun.port" data-type="int" min="1" max="65535" bind:value={stunPort} />
-									</label>
-								</div>
+						</div>
+
+						<div class="row mt-3">
+							<div class="col">
+								<label class="d-flex align-items-center m-0">
+									<input type="checkbox" class="input me-2" name="exchange.tls" data-type="bool" bind:checked={exchangeTls} />
+									TLS
+								</label>
 							</div>
-							<div class="row mt-2">
-								<div class="col">
-									<div class="detail-value" style="opacity:0.75;">Transport: UDP</div>
+						</div>
+
+						<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
+							<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px;">
+								<div class="detail-label" style="display:flex; align-items:center; gap:6px; margin:0;">
+									<span>STUN (optional)</span>
+									<Helper ariaLabel="STUN Help">
+										STUN is used to discover the public IP address of this node when behind a NAT. It is required for P2P connections to work across different networks.
+									</Helper>
 								</div>
+								<button type="button" class="btn-secondary" on:click={toggleStunAccordion} aria-expanded={stunAccordionOpen}>
+									<i class={`fa-solid ${stunAccordionOpen ? 'fa-chevron-up' : 'fa-chevron-down'} me-1`}></i>{stunAccordionOpen ? 'Hide' : 'Expand'}
+								</button>
 							</div>
-							<div class="row mt-2 settings-submit-row">
-								<div class="col text-center">
-									<button type="button" class="btn-primary" on:click={saveStunConfig}>
-										<i class="fa-solid fa-floppy-disk me-2"></i>
-										Save
-									</button>
+							{#if stunAccordionOpen}
+								{#if stunTestConnected === true}
+									<div class="detail-value" style="color: var(--color-success, #4caf50);"><i class="fa-solid fa-circle-check me-1"></i>Connected</div>
+								{:else if stunTestConnected === false}
+									<div class="detail-value" style="color: var(--color-danger, #ff6b6b);"><i class="fa-solid fa-circle-xmark me-1"></i>Not connected</div>
+								{/if}
+								<div class="row settings-host-port-row">
+									<div class="col">
+										<label class="d-block m-0">
+											<span class="detail-label">Server</span>
+											<input type="text" class="input" name="exchange.stun.host" data-type="string" bind:value={stunHost} placeholder="stun.example.com" />
+										</label>
+									</div>
+									<div class="col-2 settings-port-col">
+										<label class="d-block m-0">
+											<span class="detail-label">Port</span>
+											<input type="number" class="input" name="exchange.stun.port" data-type="int" min="1" max="65535" bind:value={stunPort} />
+										</label>
+									</div>
 								</div>
-							</div>
-							{#if stunTestStatus}
-								<div class="detail-value mt-2" style="opacity:0.85;">{stunTestStatus}</div>
+								<div class="row mt-2">
+									<div class="col">
+										<div class="detail-value" style="opacity:0.75;">Transport: UDP</div>
+									</div>
+								</div>
+								<div class="row mt-2 settings-submit-row">
+									<div class="col text-center">
+										<button type="button" class="btn-primary" on:click={saveStunConfig}>
+											<i class="fa-solid fa-floppy-disk me-2"></i>
+											Save
+										</button>
+									</div>
+								</div>
+								{#if stunTestStatus}
+									<div class="detail-value mt-2" style="opacity:0.85;">{stunTestStatus}</div>
+								{/if}
 							{/if}
 						</div>
 
 						<div class="mt-3" style="border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
-							<div class="detail-label" style="margin-bottom:8px;">
-								TURN (optional)
-
-								<Helper ariaLabel="TURN Help">
-									TURN is used to relay data when direct peer-to-peer connections are not possible. It is optional but recommended for better connectivity across different networks.
-								</Helper>
+							<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px;">
+								<div class="detail-label" style="display:flex; align-items:center; gap:6px; margin:0;">
+									<span>TURN (optional)</span>
+									<Helper ariaLabel="TURN Help">
+										TURN is used to relay data when direct peer-to-peer connections are not possible. It is optional but recommended for better connectivity across different networks.
+									</Helper>
+								</div>
+								<button type="button" class="btn-secondary" on:click={toggleTurnAccordion} aria-expanded={turnAccordionOpen}>
+									<i class={`fa-solid ${turnAccordionOpen ? 'fa-chevron-up' : 'fa-chevron-down'} me-1`}></i>{turnAccordionOpen ? 'Hide' : 'Expand'}
+								</button>
 							</div>
-							{#if turnTestConnected === true}
-								<div class="detail-value" style="color: var(--color-success, #4caf50);"><i class="fa-solid fa-circle-check me-1"></i>Connected</div>
-							{:else if turnTestConnected === false}
-								<div class="detail-value" style="color: var(--color-danger, #ff6b6b);"><i class="fa-solid fa-circle-xmark me-1"></i>Not connected</div>
-							{/if}
-							<div class="row settings-host-port-row">
-								<div class="col">
-									<label class="d-block m-0">
-										<span class="detail-label">Server</span>
-										<input type="text" class="input" name="exchange.turn.host" data-type="string" bind:value={turnHost} placeholder="turn.example.com" />
-									</label>
+							{#if turnAccordionOpen}
+								{#if turnTestConnected === true}
+									<div class="detail-value" style="color: var(--color-success, #4caf50);"><i class="fa-solid fa-circle-check me-1"></i>Connected</div>
+								{:else if turnTestConnected === false}
+									<div class="detail-value" style="color: var(--color-danger, #ff6b6b);"><i class="fa-solid fa-circle-xmark me-1"></i>Not connected</div>
+								{/if}
+								<div class="row settings-host-port-row">
+									<div class="col">
+										<label class="d-block m-0">
+											<span class="detail-label">Server</span>
+											<input type="text" class="input" name="exchange.turn.host" data-type="string" bind:value={turnHost} placeholder="turn.example.com" />
+										</label>
+									</div>
+									<div class="col-2 settings-port-col">
+										<label class="d-block m-0">
+											<span class="detail-label">Port</span>
+											<input type="number" class="input" name="exchange.turn.port" data-type="int" min="1" max="65535" bind:value={turnPort} />
+										</label>
+									</div>
 								</div>
-								<div class="col-2 settings-port-col">
-									<label class="d-block m-0">
-										<span class="detail-label">Port</span>
-										<input type="number" class="input" name="exchange.turn.port" data-type="int" min="1" max="65535" bind:value={turnPort} />
-									</label>
+								<div class="row settings-host-port-row settings-credentials-row mt-2">
+									<div class="col">
+										<label class="d-block m-0">
+											<span class="detail-label">User</span>
+											<input type="text" class="input" name="exchange.turn.username" data-type="string" bind:value={turnUsername} placeholder="turn-user" />
+										</label>
+									</div>
+									<div class="col">
+										<label class="d-block m-0">
+											<span class="detail-label">Password</span>
+											<PasswordField name="exchange.turn.password" dataType="string" bind:value={turnPassword} placeholder="turn-password" />
+										</label>
+									</div>
 								</div>
-							</div>
-							<div class="row settings-host-port-row settings-credentials-row mt-2">
-								<div class="col">
-									<label class="d-block m-0">
-										<span class="detail-label">User</span>
-										<input type="text" class="input" name="exchange.turn.username" data-type="string" bind:value={turnUsername} placeholder="turn-user" />
-									</label>
+								<div class="row mt-2">
+									<div class="col">
+										<label class="d-flex align-items-center m-0">
+											<input type="checkbox" class="input me-2" name="exchange.turn.tls" data-type="bool" bind:checked={turnTls} on:change={onTurnTlsChange} />
+											TLS
+										</label>
+									</div>
 								</div>
-								<div class="col">
-									<label class="d-block m-0">
-										<span class="detail-label">Password</span>
-										<PasswordField name="exchange.turn.password" dataType="string" bind:value={turnPassword} placeholder="turn-password" />
-									</label>
+								<div class="row mt-2 settings-submit-row">
+									<div class="col text-center">
+										<button type="button" class="btn-primary" on:click={saveTurnConfig}>
+											<i class="fa-solid fa-floppy-disk me-2"></i>
+											Save
+										</button>
+									</div>
 								</div>
-							</div>
-							<div class="row mt-2">
-								<div class="col">
-									<label class="d-flex align-items-center m-0">
-										<input type="checkbox" class="input me-2" name="exchange.turn.tls" data-type="bool" bind:checked={turnTls} on:change={onTurnTlsChange} />
-										TLS
-									</label>
-								</div>
-							</div>
-							<div class="row mt-2 settings-submit-row">
-								<div class="col text-center">
-									<button type="button" class="btn-primary" on:click={saveTurnConfig}>
-										<i class="fa-solid fa-floppy-disk me-2"></i>
-										Save
-									</button>
-								</div>
-							</div>
-							{#if turnTestStatus}
-								<div class="detail-value mt-2" style="opacity:0.85;">{turnTestStatus}</div>
+								{#if turnTestStatus}
+									<div class="detail-value mt-2" style="opacity:0.85;">{turnTestStatus}</div>
+								{/if}
 							{/if}
 						</div>
 					{/if}
@@ -580,7 +399,6 @@
 						{/if}
 					{/if}
 				</fieldset>
-			{/if}
 
 			<div class="row mt-3 settings-submit-row">
 				<div class="col text-center">
@@ -899,18 +717,6 @@
 		font-size: 0.9em;
 		flex-shrink: 0;
 		transition: transform 0.16s ease;
-	}
-
-	.node-accordion-details > summary {
-		list-style: none;
-	}
-
-	.node-accordion-details > summary::-webkit-details-marker {
-		display: none;
-	}
-
-	.node-accordion-details[open] .node-accordion-icon {
-		transform: rotate(180deg);
 	}
 
 	@media (max-width: 760px) {

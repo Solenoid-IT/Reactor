@@ -1,74 +1,74 @@
 const { app } = require('electron');
 const fs = require('fs/promises');
 const path = require('path');
-const { DEFAULT_WORKING_MODE_CONFIG, readWorkingModeConfig, writeWorkingModeConfig } = require('../workingModeConfig');
+const { DEFAULT_CONNECTIONS_CONFIG, readConnectionsConfig, writeConnectionsConfig } = require('../connectionsConfig');
 
 const UI_SETTINGS_FILE = 'ui-settings.json';
-const WORKING_MODE_FILE = 'working-mode.json';
+const CONNECTIONS_FILE = 'connections.json';
 
 function getUiSettingsPath() {
 	return path.join(app.getPath('userData'), UI_SETTINGS_FILE);
 }
 
-function getWorkingModeSettingsPath() {
-	return path.join(app.getPath('userData'), WORKING_MODE_FILE);
+function getConnectionsSettingsPath() {
+	return path.join(app.getPath('userData'), CONNECTIONS_FILE);
 }
 
 async function readUiSettings() {
-	const workingModeSettings = await readWorkingModeConfig(getWorkingModeSettingsPath());
+	const connectionsSettings = await readConnectionsConfig(getConnectionsSettingsPath());
 	try {
 		const raw = await fs.readFile(getUiSettingsPath(), 'utf8');
 		const parsed = JSON.parse(raw);
 		const normalizedWorkingMode = {
-			exchangeMode: workingModeSettings.type,
-			exchangeHost: workingModeSettings.host,
-			exchangePort: workingModeSettings.port,
-			exchangeTls: workingModeSettings.tls,
-			exchangeToken: workingModeSettings.token,
-			exchangeDiscovery: Boolean(workingModeSettings.discovery),
+			exchangeMode: 'node',
+			exchangeHost: connectionsSettings.exchange?.host || '',
+			exchangePort: Number(connectionsSettings.exchange?.port) > 0 ? Number(connectionsSettings.exchange.port) : 7070,
+			exchangeTls: Boolean(connectionsSettings.exchange?.tls),
+			exchangeToken: String(connectionsSettings.exchange?.token || ''),
+			exchangeDiscovery: Boolean(connectionsSettings.exchange?.discovery),
 			stun: {
-				host: String(workingModeSettings.stun?.host || ''),
-				port: Number(workingModeSettings.stun?.port) > 0 ? Number(workingModeSettings.stun.port) : 3478,
-				tls: Boolean(workingModeSettings.stun?.tls),
-				username: String(workingModeSettings.stun?.username || ''),
-				password: String(workingModeSettings.stun?.password || ''),
+				host: String(connectionsSettings.stun?.host || ''),
+				port: Number(connectionsSettings.stun?.port) > 0 ? Number(connectionsSettings.stun.port) : 3478,
+				tls: Boolean(connectionsSettings.stun?.tls),
+				username: String(connectionsSettings.stun?.username || ''),
+				password: String(connectionsSettings.stun?.password || ''),
 			},
 			turn: {
-				host: String(workingModeSettings.turn?.host || ''),
-				port: Number(workingModeSettings.turn?.port) > 0 ? Number(workingModeSettings.turn.port) : 3478,
-				tls: Boolean(workingModeSettings.turn?.tls),
-				username: String(workingModeSettings.turn?.username || ''),
-				password: String(workingModeSettings.turn?.password || ''),
+				host: String(connectionsSettings.turn?.host || ''),
+				port: Number(connectionsSettings.turn?.port) > 0 ? Number(connectionsSettings.turn.port) : 3478,
+				tls: Boolean(connectionsSettings.turn?.tls),
+				username: String(connectionsSettings.turn?.username || ''),
+				password: String(connectionsSettings.turn?.password || ''),
 			},
 		};
 		return {
 			defaultProgramPath: parsed.defaultProgramPath || '',
-			httpServerPort: Number(parsed.httpServerPort) || 7070,
+			httpServerPort: Number(parsed.httpServerPort) || 9063,
 			...normalizedWorkingMode,
 		};
 	} catch (error) {
 		return {
 			defaultProgramPath: '',
-			httpServerPort: 7070,
-			exchangeMode: DEFAULT_WORKING_MODE_CONFIG.type,
-			exchangeHost: DEFAULT_WORKING_MODE_CONFIG.host,
-			exchangePort: DEFAULT_WORKING_MODE_CONFIG.port,
-			exchangeTls: DEFAULT_WORKING_MODE_CONFIG.tls,
-			exchangeToken: DEFAULT_WORKING_MODE_CONFIG.token,
-			exchangeDiscovery: Boolean(DEFAULT_WORKING_MODE_CONFIG.discovery),
+			httpServerPort: 9063,
+			exchangeMode: 'node',
+			exchangeHost: DEFAULT_CONNECTIONS_CONFIG.exchange.host,
+			exchangePort: DEFAULT_CONNECTIONS_CONFIG.exchange.port,
+			exchangeTls: DEFAULT_CONNECTIONS_CONFIG.exchange.tls,
+			exchangeToken: DEFAULT_CONNECTIONS_CONFIG.exchange.token,
+			exchangeDiscovery: Boolean(DEFAULT_CONNECTIONS_CONFIG.exchange.discovery),
 			stun: {
-				host: String(DEFAULT_WORKING_MODE_CONFIG.stun?.host || ''),
-				port: Number(DEFAULT_WORKING_MODE_CONFIG.stun?.port) > 0 ? Number(DEFAULT_WORKING_MODE_CONFIG.stun.port) : 3478,
-				tls: Boolean(DEFAULT_WORKING_MODE_CONFIG.stun?.tls),
-				username: String(DEFAULT_WORKING_MODE_CONFIG.stun?.username || ''),
-				password: String(DEFAULT_WORKING_MODE_CONFIG.stun?.password || ''),
+				host: String(DEFAULT_CONNECTIONS_CONFIG.stun?.host || ''),
+				port: Number(DEFAULT_CONNECTIONS_CONFIG.stun?.port) > 0 ? Number(DEFAULT_CONNECTIONS_CONFIG.stun.port) : 3478,
+				tls: Boolean(DEFAULT_CONNECTIONS_CONFIG.stun?.tls),
+				username: String(DEFAULT_CONNECTIONS_CONFIG.stun?.username || ''),
+				password: String(DEFAULT_CONNECTIONS_CONFIG.stun?.password || ''),
 			},
 			turn: {
-				host: String(DEFAULT_WORKING_MODE_CONFIG.turn?.host || ''),
-				port: Number(DEFAULT_WORKING_MODE_CONFIG.turn?.port) > 0 ? Number(DEFAULT_WORKING_MODE_CONFIG.turn.port) : 3478,
-				tls: Boolean(DEFAULT_WORKING_MODE_CONFIG.turn?.tls),
-				username: String(DEFAULT_WORKING_MODE_CONFIG.turn?.username || ''),
-				password: String(DEFAULT_WORKING_MODE_CONFIG.turn?.password || ''),
+				host: String(DEFAULT_CONNECTIONS_CONFIG.turn?.host || ''),
+				port: Number(DEFAULT_CONNECTIONS_CONFIG.turn?.port) > 0 ? Number(DEFAULT_CONNECTIONS_CONFIG.turn.port) : 3478,
+				tls: Boolean(DEFAULT_CONNECTIONS_CONFIG.turn?.tls),
+				username: String(DEFAULT_CONNECTIONS_CONFIG.turn?.username || ''),
+				password: String(DEFAULT_CONNECTIONS_CONFIG.turn?.password || ''),
 			},
 		};
 	}
@@ -76,15 +76,28 @@ async function readUiSettings() {
 
 async function writeUiSettings(nextSettings) {
 	const current = await readUiSettings();
-	const workingModeUpdates = {};
-	for (const key of ['exchangeMode', 'exchangeHost', 'exchangePort', 'exchangeTls', 'exchangeToken', 'exchangeDiscovery', 'stun', 'turn']) {
-		if (Object.prototype.hasOwnProperty.call(nextSettings, key)) {
-			workingModeUpdates[key] = nextSettings[key];
-		}
-	}
+	const hasConnectionUpdates = [
+		'exchangeHost',
+		'exchangePort',
+		'exchangeTls',
+		'exchangeToken',
+		'exchangeDiscovery',
+		'stun',
+		'turn',
+	].some((key) => Object.prototype.hasOwnProperty.call(nextSettings, key));
 
-	if (Object.keys(workingModeUpdates).length > 0) {
-		await writeWorkingModeConfig(getWorkingModeSettingsPath(), workingModeUpdates);
+	if (hasConnectionUpdates) {
+		await writeConnectionsConfig(getConnectionsSettingsPath(), {
+			exchange: {
+				host: Object.prototype.hasOwnProperty.call(nextSettings, 'exchangeHost') ? nextSettings.exchangeHost : current.exchangeHost,
+				port: Object.prototype.hasOwnProperty.call(nextSettings, 'exchangePort') ? nextSettings.exchangePort : current.exchangePort,
+				tls: Object.prototype.hasOwnProperty.call(nextSettings, 'exchangeTls') ? nextSettings.exchangeTls : current.exchangeTls,
+				token: Object.prototype.hasOwnProperty.call(nextSettings, 'exchangeToken') ? nextSettings.exchangeToken : current.exchangeToken,
+				discovery: Object.prototype.hasOwnProperty.call(nextSettings, 'exchangeDiscovery') ? nextSettings.exchangeDiscovery : current.exchangeDiscovery,
+			},
+			stun: Object.prototype.hasOwnProperty.call(nextSettings, 'stun') ? nextSettings.stun : current.stun,
+			turn: Object.prototype.hasOwnProperty.call(nextSettings, 'turn') ? nextSettings.turn : current.turn,
+		});
 	}
 
 	const merged = {
@@ -93,7 +106,7 @@ async function writeUiSettings(nextSettings) {
 	};
 	const uiSettingsOnly = {
 		defaultProgramPath: merged.defaultProgramPath || '',
-		httpServerPort: Number(merged.httpServerPort) || 7070,
+		httpServerPort: Number(merged.httpServerPort) || 9063,
 	};
 	await fs.writeFile(getUiSettingsPath(), `${JSON.stringify(uiSettingsOnly, null, 2)}\n`, 'utf8');
 }

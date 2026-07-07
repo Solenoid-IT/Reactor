@@ -93,7 +93,7 @@ When `@{node}` is omitted, Reactor dispatches to the selected endpoint on the cu
 import { Node } from 'core';
 
 export async function run() {
-	const directResult = await Node.sendMessage('send_message@net:192.168.1.20:7070', {
+	const directResult = await Node.sendMessage('send_message@net:192.168.1.20:9063', {
 		type: 'status-update',
 		value: 42,
 		ts: Date.now(),
@@ -137,7 +137,7 @@ Sender filters use OR semantics. Example: `@on MESSAGE [R2,net:1.2.3.4:5678]` me
 ```ts
 // @enabled TRUE
 
-// @on MESSAGE [R2,net:192.168.1.10:7070,net:www.example.com]
+// @on MESSAGE [R2,net:192.168.1.10:9063,net:www.example.com]
 
 import { Event, MessageEvent, log } from 'core';
 
@@ -179,7 +179,7 @@ export async function run() {
 		Buffer.from('world'),
 	];
 
-	const streamResult = await Node.stream('send_message@net:192.168.1.20:7070', chunks, {
+	const streamResult = await Node.stream('send_message@net:192.168.1.20:9063', chunks, {
 		chunkSize: 64 * 1024,
 		contentType: 'application/octet-stream',
 		metadata: { fileName: 'demo.bin' },
@@ -236,7 +236,7 @@ export async function run() {
 ```ts
 // @enabled TRUE
 
-// @on STREAM [R2,net:192.168.1.10:7070]
+// @on STREAM [R2,net:192.168.1.10:9063]
 
 import { Event, StreamEvent, log } from 'core';
 
@@ -280,7 +280,7 @@ For low-RAM transfers, let runtime spool chunks to disk and finalize on `STREAME
 ```ts
 // @enabled TRUE
 
-// @on STREAMEND [R2,net:192.168.1.10:7070]
+// @on STREAMEND [R2,net:192.168.1.10:9063]
 
 import { Event, StreamEndEvent, log } from 'core';
 

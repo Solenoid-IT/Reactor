@@ -132,7 +132,7 @@ function setupIpcHandlers(runtime, options = {}) {
 			if (runtime.setExchangeConfig) {
 				await runtime
 					.setExchangeConfig(
-						settings.exchangeMode || 'node',
+						'node',
 						settings.exchangeHost || '',
 						Number(settings.exchangePort) || 7070,
 						Boolean(settings.exchangeTls),
@@ -163,10 +163,10 @@ function setupIpcHandlers(runtime, options = {}) {
 			if (runtime && runtime.setHttpServerPort && Number(settings.httpServerPort)) {
 				await runtime.setHttpServerPort(Number(settings.httpServerPort));
 			}
-			if (runtime && runtime.setExchangeConfig && settings.exchangeMode) {
+			if (runtime && runtime.setExchangeConfig) {
 				await runtime
 					.setExchangeConfig(
-						settings.exchangeMode,
+						'node',
 						settings.exchangeHost || '',
 						Number(settings.exchangePort) || 7070,
 						Boolean(settings.exchangeTls),
@@ -1051,7 +1051,7 @@ function setupIpcHandlers(runtime, options = {}) {
 			return { ok: false, error: 'runtime not ready' };
 		}
 
-		const safeMode = String(mode || 'node');
+		const safeMode = 'node';
 		const safeHost = String(host || '').trim();
 		const safePort = Number(port) > 0 ? Number(port) : 7070;
 		const safeTls = Boolean(tls);
@@ -1061,7 +1061,7 @@ function setupIpcHandlers(runtime, options = {}) {
 		const safeTurn = turn && typeof turn === 'object' ? turn : {};
 
 		try {
-			await writeUiSettings({ exchangeMode: safeMode, exchangeHost: safeHost, exchangePort: safePort, exchangeTls: safeTls, exchangeToken: safeToken, exchangeDiscovery: safeDiscovery, stun: safeStun, turn: safeTurn });
+			await writeUiSettings({ exchangeHost: safeHost, exchangePort: safePort, exchangeTls: safeTls, exchangeToken: safeToken, exchangeDiscovery: safeDiscovery, stun: safeStun, turn: safeTurn });
 			await runtime.setExchangeConfig(safeMode, safeHost, safePort, safeTls, safeToken, safeDiscovery, safeStun, safeTurn);
 			const connectionTest = runtime.testExchangeClientConnection
 				? await runtime.testExchangeClientConnection(5000)

@@ -125,7 +125,7 @@ function getDelayToNextMidnightBoundary(intervalMs, nowMs = Date.now()) {
 	return intervalMs - remainder;
 }
 
-function normalizeHostPort(value, defaultPort = 7070) {
+function normalizeHostPort(value, defaultPort = 9063) {
 	const raw = String(value || '').trim().toLowerCase();
 	if (!raw) {
 		return null;

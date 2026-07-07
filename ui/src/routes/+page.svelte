@@ -65,7 +65,7 @@
 	let endpointsPath = '';
 	let selectedIndex = -1;
 	let reactorName = '';
-	let httpPort = 7070;
+	let httpPort = 9063;
 	let exchangeMode = 'node';
 	let exchangeEnabled = false;
 	let exchangeHost = '';
@@ -553,7 +553,7 @@
 			return {
 				level: 'green',
 				label: 'EXCHANGE active',
-				title: `${exchangeStatus?.mode === 'exchange' ? 'EXCHANGE server active' : 'Connected to EXCHANGE'}${connectedSinceTitle}`,
+				title: `Connected to EXCHANGE${connectedSinceTitle}`,
 			};
 		}
 
@@ -673,7 +673,7 @@
 	function applyExchangeConfigResult(result) {
 		if (result?.ok && result?.config) {
 			const ec = result.config;
-			exchangeMode = ec.mode || 'node';
+			exchangeMode = 'node';
 			exchangeHost = ec.host || '';
 			exchangePort = Number(ec.port) || 7070;
 			exchangeTls = Boolean(ec.tls);
@@ -688,13 +688,13 @@
 			const nextConnectionStatus = ec.connection && typeof ec.connection === 'object'
 				? ec.connection
 				: {
-					state: ec.mode === 'node' && Boolean((ec.host || '').trim()) ? 'connecting' : (ec.active ? 'connected' : 'disconnected'),
+					state: Boolean((ec.host || '').trim()) ? 'connecting' : (ec.active ? 'connected' : 'disconnected'),
 					connected: Boolean(ec.active),
 					authenticated: Boolean(ec.active),
-					reason: ec.active ? '' : (ec.mode === 'node' && Boolean((ec.host || '').trim()) ? 'Connecting to Exchange' : 'Exchange connection unavailable'),
-					mode: ec.mode || 'node',
+					reason: ec.active ? '' : (Boolean((ec.host || '').trim()) ? 'Connecting to Exchange' : 'Exchange connection unavailable'),
+					mode: 'node',
 				};
-			scheduleExchangeStatusUpdate(nextConnectionStatus, ec.mode || 'node');
+			scheduleExchangeStatusUpdate(nextConnectionStatus, 'node');
 			return;
 		}
 
@@ -1370,7 +1370,7 @@
 
 			endpoints = Array.isArray(info?.endpoints) ? info.endpoints : [];
 			endpointsPath = info?.path || '';
-			httpPort = Number(serverConfig?.config?.port || settings?.httpServerPort || 7070);
+			httpPort = Number(serverConfig?.config?.port || settings?.httpServerPort || 9063);
 			reactorName = String(currentReactorName?.name || '');
 			applyPermissionsConfigResult(permissionsConfigResult);
 
@@ -1418,7 +1418,7 @@
 				selectedIndex = -1;
 			}
 
-			const canLoadLinkedNodes = (exchangeMode === 'exchange' && exchangeDiscovery) || (exchangeMode === 'node' && exchangeEnabled && exchangeActive);
+			const canLoadLinkedNodes = exchangeEnabled && exchangeActive;
 			if (canLoadLinkedNodes) {
 				await refreshExchangeLinkedNodes(true);
 			} else {
@@ -1475,9 +1475,7 @@
 	}
 
 	async function refreshExchangeLinkedNodes(silent = false) {
-		const isExchangeServerView = exchangeMode === 'exchange' && exchangeDiscovery;
-		const isNodeView = exchangeMode === 'node' && exchangeEnabled;
-		if (!isExchangeServerView && !isNodeView) {
+		if (!exchangeEnabled) {
 			exchangeLinkedNodes = [];
 			exchangeLinkedNodesTotal = 0;
 			return;
@@ -1800,7 +1798,7 @@
 		status = result?.ok ? `Server status opened: ${result.url}` : `Error: ${result?.error || 'unknown'}`;
 	}
 
-	async function saveExchangeConfigValue(mode, host, port, tls, token, enabled = true, discovery = false, stun = {}, turn = {}) {
+	async function saveExchangeConfigValue(host, port, tls, token, enabled = true, discovery = false, stun = {}, turn = {}) {
 		if (exchangeConfigSaving) {
 			return;
 		}
@@ -1829,10 +1827,10 @@
 		};
 		const safeEnabled = Boolean(enabled);
 		const safeDiscovery = Boolean(discovery);
-		const effectiveHost = mode === 'node' && !safeEnabled ? '' : host || '';
+		const effectiveHost = !safeEnabled ? '' : host || '';
 		const safeStun = sanitizeRelay(stun);
 		const safeTurn = sanitizeRelay(turn);
-		const result = await setExchangeConfig(mode, effectiveHost, numericPort, Boolean(tls), token || '', safeDiscovery, safeStun, safeTurn);
+		const result = await setExchangeConfig('node', effectiveHost, numericPort, Boolean(tls), token || '', safeDiscovery, safeStun, safeTurn);
 		if (!result?.ok) {
 			status = `Error: ${result?.error || 'unknown'}`;
 			await refreshAll();
@@ -1840,23 +1838,19 @@
 		}
 
 		const connectionTest = result?.connectionTest || null;
-		if (mode === 'node' && !safeEnabled) {
+		if (!safeEnabled) {
 			status = 'Exchange client disabled for node mode';
-		} else if (mode === 'node' && connectionTest) {
+		} else if (connectionTest) {
 			status = connectionTest.connected
 				? `Exchange config saved and connected (${Boolean(tls) ? 'WSS' : 'WS'})`
 				: formatExchangeConnectionFailure(connectionTest);
 		} else {
-			status = `Exchange config saved: mode=${mode}${Boolean(tls) ? ' (TLS)' : ''}`;
+			status = `Exchange config saved${Boolean(tls) ? ' (TLS)' : ''}`;
 		}
 
 		await refreshAll();
 
-		if (mode === 'node' && safeEnabled && connectionTest?.connected) {
-			await refreshExchangeLinkedNodes(true);
-		}
-
-		if (mode === 'exchange' && safeDiscovery) {
+		if (safeEnabled && connectionTest?.connected) {
 			await refreshExchangeLinkedNodes(true);
 		}
 		} finally {
@@ -2176,7 +2170,7 @@
 		});
 		const unsubscribeExchangeStatus = subscribeExchangeStatus((payload) => {
 			if (payload?.connection && typeof payload.connection === 'object') {
-				scheduleExchangeStatusUpdate(payload.connection, payload.connection.mode || exchangeMode || 'node');
+				scheduleExchangeStatusUpdate(payload.connection, 'node');
 			}
 		});
 
@@ -2303,7 +2297,6 @@
 			{messageQueueTtlDays}
 			{permissionsPlatform}
 			{permissionsEntries}
-			{exchangeMode}
 			{exchangeEnabled}
 			{exchangeHost}
 			{exchangePort}
@@ -2323,21 +2316,14 @@
 			discovery={exchangeDiscovery}
 			{exchangeActive}
 			{exchangeStatus}
-			{exchangeClients}
-			{p2pStatus}
-			linkedNodes={exchangeLinkedNodes}
-			linkedNodesTotal={exchangeLinkedNodesTotal}
-			linkedNodesLoading={exchangeLinkedNodesLoading}
 			onSaveReactorName={saveReactorNameValue}
 			onSaveHttpServerData={saveHttpPortValue}
 			onOpenServerStatus={openServerStatusPage}
 			onGenerateTlsCert={generateTlsCertHandler}
 			onDeleteTlsCert={deleteTlsCertHandler}
-			onGenerateExchangeToken={generateExchangeTokenHandler}
 			onSaveExchangeConfig={saveExchangeConfigValue}
 			onSaveStunConfig={saveStunConfigHandler}
 			onSaveTurnConfig={saveTurnConfigHandler}
-			onRefreshLinkedNodes={() => refreshExchangeLinkedNodes(false)}
 			onExportBackup={openExportOptionsModal}
 			onImportBackup={importBackupHandler}
 			onTogglePermission={togglePermissionHandler}
@@ -2346,7 +2332,6 @@
 			onSaveMessageQueueTtlDays={saveMessageQueueTtlDaysHandler}
 			onFlushMessageQueue={flushMessageQueueHandler}
 			onClearMessageQueue={clearMessageQueueHandler}
-			onCopyText={(text) => copyTextToClipboard(text)}
 		/>
 	</Modal>
 
