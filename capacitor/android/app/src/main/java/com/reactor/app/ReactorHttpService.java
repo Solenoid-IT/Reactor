@@ -3716,23 +3716,27 @@ public class ReactorHttpService extends Service {
         }
 
         if ("chunk".equals(phase)) {
-            try {
-                String encoding = String.valueOf(streamPayload.optString("encoding", "base64")).trim().toLowerCase(Locale.ROOT);
-                byte[] bytes;
-                if ("base64".equals(encoding)) {
-                    bytes = Base64.decode(String.valueOf(streamPayload.optString("data", "")), Base64.DEFAULT);
-                } else {
-                    bytes = String.valueOf(streamPayload.optString("data", "")).getBytes(StandardCharsets.UTF_8);
-                }
+            String encoding = String.valueOf(streamPayload.optString("encoding", "base64")).trim().toLowerCase(Locale.ROOT);
+            if (!"binary-direct".equals(encoding)) {
+                // JSON-encoded chunk path (base64 or utf-8 text)
+                try {
+                    byte[] bytes;
+                    if ("base64".equals(encoding)) {
+                        bytes = Base64.decode(String.valueOf(streamPayload.optString("data", "")), Base64.DEFAULT);
+                    } else {
+                        bytes = String.valueOf(streamPayload.optString("data", "")).getBytes(StandardCharsets.UTF_8);
+                    }
 
-                if (bytes != null && bytes.length > 0 && state.output != null) {
-                    state.output.write(bytes);
-                    state.totalBytes += bytes.length;
+                    if (bytes != null && bytes.length > 0 && state.output != null) {
+                        state.output.write(bytes);
+                        state.totalBytes += bytes.length;
+                    }
+                    state.chunks += 1;
+                } catch (Exception ignored) {
+                    // Ignore malformed chunks.
                 }
-                state.chunks += 1;
-            } catch (Exception ignored) {
-                // Ignore malformed chunks.
             }
+            // For binary-direct: bytes and chunk counter already updated by writeBinaryChunkToIncomingStream.
             if (state.metadata != null) {
                 appendMetadataContext(context, "event.metadata", state.metadata);
             }
@@ -3769,6 +3773,30 @@ public class ReactorHttpService extends Service {
         }
 
         return context;
+    }
+
+    /**
+     * Writes raw binary bytes directly to an active incoming stream state, bypassing any
+     * base64 encoding path. Called by the WebSocket binary-frame handler so that binary
+     * chunks are never converted to base64 strings during reception.
+     */
+    private void writeBinaryChunkToIncomingStream(String senderKey, String streamId, int index, byte[] rawBytes) {
+        String key = buildIncomingStreamKey(
+                String.valueOf(senderKey == null ? "" : senderKey).trim().toLowerCase(Locale.ROOT),
+                String.valueOf(streamId == null ? "" : streamId).trim());
+        IncomingStreamState state = incomingStreams.get(key);
+        if (state == null) {
+            return;
+        }
+        try {
+            if (rawBytes != null && rawBytes.length > 0 && state.output != null) {
+                state.output.write(rawBytes);
+                state.totalBytes += rawBytes.length;
+            }
+            state.chunks += 1;
+        } catch (Exception ignored) {
+            // Best-effort write; stream will fail validation if bytes are missing.
+        }
     }
 
     private boolean getP2PRoutingEligibility() {
@@ -7788,18 +7816,24 @@ public class ReactorHttpService extends Service {
                 }
 
                 try {
+                    String senderKey = String.valueOf(meta.from != null ? meta.from : "unknown").trim().toLowerCase(Locale.ROOT);
+                    // Write raw binary directly to the incoming stream state — no base64 roundtrip.
+                    writeBinaryChunkToIncomingStream(senderKey, meta.streamId, meta.index, bytes.toByteArray());
+
+                    // Dispatch the STREAM chunk event to user-defined endpoint listeners.
+                    // Mark encoding as 'binary-direct' so buildIncomingStreamEventContext skips
+                    // the byte-write path (bytes already written above).
                     JSONObject streamPayload = new JSONObject();
                     streamPayload.put("__reactorStream", true);
                     streamPayload.put("phase", "chunk");
                     streamPayload.put("streamId", meta.streamId);
                     streamPayload.put("index", meta.index);
                     streamPayload.put("size", bytes.size());
-                    streamPayload.put("encoding", "base64");
-                    streamPayload.put("data", bytes.base64());
+                    streamPayload.put("encoding", "binary-direct");
 
                     JSONObject envelope = new JSONObject();
                     envelope.put("type", "message");
-                    envelope.put("from", meta.from != null ? meta.from : "unknown");
+                    envelope.put("from", senderKey);
                     envelope.put("content", streamPayload.toString());
                     envelope.put("contentType", "application/json");
                     handleIncomingExchangePacket(envelope.toString());

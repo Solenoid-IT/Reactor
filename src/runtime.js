@@ -1518,6 +1518,7 @@ class ReactorRuntime {
 		this.streamEndListenerMap = new Map();
 		this.activeIncomingStreams = new Map();
 		this.pendingIncomingStreamEnds = new Map();
+		this.incomingStreamProcessingChains = new Map();
 		this.uiStatusSink = null;
 		this.reactorRootDir = options.reactorRootDir || path.dirname(this.endpointsDir);
 		this.streamStorageDir = path.join(this.reactorRootDir, 'temp_files', 'streams');
@@ -4138,7 +4139,32 @@ class ReactorRuntime {
 			return null;
 		}
 
+		// Incoming stream packets (start/chunk/end) can be dispatched as concurrent,
+		// non-awaited promises (for example by the exchange manager). Serialize the
+		// processing per stream key so state is created exactly once and chunk bytes
+		// are appended strictly in arrival order. Without this, racing chunks could
+		// double-create the temp state and append out of order, corrupting the
+		// archive (breaking endpoint transfers) and orphaning `.part` files.
 		const key = this.makeActiveStreamKey(senderMeta, streamId);
+		const previous = this.incomingStreamProcessingChains.get(key) || Promise.resolve();
+		const current = previous
+			.catch(() => {})
+			.then(() => this._processIncomingStreamPacketSerial(packet, senderMeta, key));
+
+		this.incomingStreamProcessingChains.set(key, current);
+		current
+			.catch(() => {})
+			.finally(() => {
+				if (this.incomingStreamProcessingChains.get(key) === current) {
+					this.incomingStreamProcessingChains.delete(key);
+				}
+			});
+
+		return current;
+	}
+
+	async _processIncomingStreamPacketSerial(packet, senderMeta = {}, key = null) {
+		const streamId = packet.getId();
 		const now = Date.now();
 		const finalizeIncomingState = async (state, endPayload = {}) => {
 			this.activeIncomingStreams.delete(key);
@@ -4161,6 +4187,11 @@ class ReactorRuntime {
 				await fs.unlink(state.partPath).catch(() => {});
 			});
 
+			const endPayloadMeta = endPayload?.metadata && typeof endPayload.metadata === 'object' ? endPayload.metadata : null;
+			const resolvedMetadata = endPayloadMeta
+				? { ...endPayloadMeta, ...(state.metadata || {}) }
+				: (state.metadata || {});
+
 			return {
 				streamId,
 				sender: state.sender,
@@ -4173,7 +4204,7 @@ class ReactorRuntime {
 				expectedChunks: hasExpectedChunks ? expectedChunks : null,
 				valid: isValid,
 				error: isValid ? '' : 'stream validation failed',
-				metadata: state.metadata,
+				metadata: resolvedMetadata,
 				contentType: state.contentType,
 				senderCandidates: state.senderCandidates,
 			};
@@ -5215,17 +5246,11 @@ class ReactorRuntime {
 			&& !this.hasConnectedP2PRoute(parsedTarget.nodeName),
 		);
 
-		if (needsExchangeAtStart && shouldEnqueueOnFail) {
+		if (needsExchangeAtStart) {
 			return this.streamToExchange(target, source, safeOptions);
 		}
 
 		let releaseQueuedStart = () => {};
-		if (needsExchangeAtStart) {
-			releaseQueuedStart = await this.acquireQueuedExchangeStreamStart(target, {
-				enqueueOnFail: shouldEnqueueOnFail,
-				noEnqueue: Boolean(safeOptions.noEnqueue),
-			});
-		}
 
 		try {
 			const streamDispatchOptions = {
@@ -7468,6 +7493,7 @@ class ReactorRuntime {
 		}
 		this.activeIncomingStreams.clear();
 		this.pendingIncomingStreamEnds.clear();
+		this.incomingStreamProcessingChains.clear();
 
 		if (this.reloadDebounceTimer) {
 			clearTimeout(this.reloadDebounceTimer);
