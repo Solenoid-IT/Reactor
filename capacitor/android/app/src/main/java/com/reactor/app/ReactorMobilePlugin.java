@@ -3528,7 +3528,7 @@ public class ReactorMobilePlugin extends Plugin {
         editor.putString(ReactorHttpService.PREF_EXCHANGE_PASSWORD, password != null ? password : "");
         editor.apply();
 
-        ReactorHttpService.resetAllP2PSessions();
+        ReactorHttpService.resetAllP2PSessions(true);
 
         try {
             writeWorkingModeConfig(mode, host, port, tls, token, user, password, discovery, stun, turn);
@@ -3600,7 +3600,8 @@ public class ReactorMobilePlugin extends Plugin {
             result.put("kind", kind);
             result.put("config", nextRelay);
             result.put("test", test);
-            ReactorHttpService.resetAllP2PSessions();
+            startHttpService(getConfiguredHttpPort());
+            ReactorHttpService.restartExchangeBlock("relay-config-" + kind);
             call.resolve(result);
         } catch (Exception error) {
             call.resolve(new JSObject().put("ok", false).put("error", error.getMessage() != null ? error.getMessage() : "unable to save relay config"));

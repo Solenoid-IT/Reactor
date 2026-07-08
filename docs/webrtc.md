@@ -48,6 +48,14 @@ sequenceDiagram
 	B-->>A: P2P responses
 ```
 
+## Offer Collision Handling
+
+Desktop and Android use the same deterministic polite/impolite split to avoid WebRTC glare when both peers try to start negotiation at the same time.
+
+* The peer whose local node name sorts before the remote node name is the normal initiator and acts as the impolite peer during an offer collision.
+* The other peer acts as the polite peer. If it receives a remote offer while its own local offer is pending, it abandons the local offer, recreates the peer connection as a responder, applies the remote offer, and sends an answer.
+* Duplicate or late offers/answers are still ignored after the valid negotiation path has already been applied.
+
 ## Desktop Implementation
 
 Desktop WebRTC lives in [src/p2pDataChannelManager.js](src/p2pDataChannelManager.js) and is orchestrated by [src/runtime.js](src/runtime.js).
@@ -131,6 +139,13 @@ This is implemented in:
 * [src/p2pDataChannelManager.js](src/p2pDataChannelManager.js)
 * [capacitor/android/app/src/main/java/com/reactor/app/AndroidP2PWebRtcManager.java](capacitor/android/app/src/main/java/com/reactor/app/AndroidP2PWebRtcManager.java)
 * [ui/src/routes/+page.svelte](ui/src/routes/+page.svelte)
+
+The same DataChannel control envelope is also used for P2P heartbeat traffic:
+
+* `heartbeat-ping`
+* `heartbeat-pong`
+
+Desktop and Android both send heartbeat pings over the open DataChannel. When a node stops receiving heartbeat traffic before the timeout, it closes the local P2P session and falls back to Exchange state instead of leaving a stale `connected-p2p` session visible.
 
 ## Current Status Model
 

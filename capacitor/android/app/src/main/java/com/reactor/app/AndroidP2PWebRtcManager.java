@@ -30,16 +30,21 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 public final class AndroidP2PWebRtcManager {
     private static final String TAG = "AndroidP2PWebRtc";
     private static final long DEFAULT_REMOTE_ENDPOINTS_TIMEOUT_MS = 12000L;
+    private static final long P2P_HEARTBEAT_INTERVAL_MS = 10000L;
+    private static final long P2P_HEARTBEAT_TIMEOUT_MS = 30000L;
 
     private static volatile AndroidP2PWebRtcManager instance;
 
     private final Context appContext;
     private final ExecutorService executor;
+    private final ScheduledExecutorService heartbeatExecutor;
     private final Map<String, SessionState> sessions;
     private final Map<String, PendingEndpointsRequest> pendingEndpointRequests;
     private volatile PeerConnectionFactory peerConnectionFactory;
@@ -49,6 +54,7 @@ public final class AndroidP2PWebRtcManager {
     private AndroidP2PWebRtcManager(Context context) {
         this.appContext = context.getApplicationContext();
         this.executor = Executors.newSingleThreadExecutor();
+        this.heartbeatExecutor = Executors.newSingleThreadScheduledExecutor();
         this.sessions = new ConcurrentHashMap<>();
         this.pendingEndpointRequests = new ConcurrentHashMap<>();
         this.initialized = false;
@@ -119,6 +125,35 @@ public final class AndroidP2PWebRtcManager {
                 closeSessionInternal(session, true);
             }
         });
+    }
+
+    public JSArray closeAllSessionsAndWait(long timeoutMs) {
+        JSArray closedSessions = new JSArray();
+        CountDownLatch latch = new CountDownLatch(1);
+        executor.execute(() -> {
+            try {
+                List<SessionState> toClose = new ArrayList<>(sessions.values());
+                sessions.clear();
+                for (SessionState session : toClose) {
+                    if (session != null) {
+                        closedSessions.put(new JSObject()
+                                .put("target", session.target)
+                                .put("sessionId", session.sessionId));
+                    }
+                    closeSessionInternal(session, true);
+                }
+            } finally {
+                latch.countDown();
+            }
+        });
+
+        try {
+            latch.await(Math.max(0L, timeoutMs), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+
+        return closedSessions;
     }
 
     public JSObject startSession(String target, boolean initiator, RelayConfig relayConfig) {
@@ -352,6 +387,7 @@ public final class AndroidP2PWebRtcManager {
         created.sessionId = UUID.randomUUID().toString().toLowerCase(Locale.ROOT);
         created.state = "signaling";
         created.dataChannelState = "closed";
+        created.lastHeartbeatAt = System.currentTimeMillis();
 
         created.peerConnection = peerConnectionFactory.createPeerConnection(rtcConfig, new PeerConnectionObserver(created));
         if (created.peerConnection == null) {
@@ -412,15 +448,11 @@ public final class AndroidP2PWebRtcManager {
             RelayConfig relayConfig = fromWorkingMode(ReactorHttpService.getWorkingModeConfigForP2P());
             SessionState session = sessions.get(safeTarget);
 
-            if ("offer".equals(safeSignalType) && shouldRecreateSessionForIncomingOffer(session)) {
+            if (("offer".equals(safeSignalType) || "candidate".equals(safeSignalType)) && (session == null || session.peerConnection == null)) {
                 if (session != null) {
                     closeSessionInternal(session, true);
                     sessions.remove(safeTarget);
                 }
-                session = ensureSession(safeTarget, false, relayConfig);
-            }
-
-            if (session == null && ("offer".equals(safeSignalType) || "candidate".equals(safeSignalType))) {
                 session = ensureSession(safeTarget, false, relayConfig);
             }
             if (session == null) {
@@ -433,6 +465,39 @@ public final class AndroidP2PWebRtcManager {
 
             try {
                 if ("offer".equals(safeSignalType)) {
+                    if (hasIncomingOfferCollision(session)) {
+                        if (!isPolitePeer(safeTarget)) {
+                            ReactorHttpService.logGlobalEvent(
+                                    "P2P_NEGOTIATION",
+                                    "ignored colliding offer for " + session.target + " as impolite peer"
+                            );
+                            return;
+                        }
+
+                        ReactorHttpService.logGlobalEvent(
+                                "P2P_NEGOTIATION",
+                                "accepting colliding offer for " + session.target + " as polite peer"
+                        );
+                        session.localOfferAborted = true;
+                        closeSessionInternal(session, true);
+                        sessions.remove(safeTarget);
+                        session = ensureSession(safeTarget, false, relayConfig);
+                        if (session == null) {
+                            return;
+                        }
+                        if (sessionId != null && !sessionId.trim().isEmpty()) {
+                            session.sessionId = sessionId.trim();
+                        }
+                    }
+
+                    if (!shouldApplyIncomingOffer(session)) {
+                        ReactorHttpService.logGlobalEvent(
+                                "P2P_NEGOTIATION",
+                                "ignored duplicate/late offer for " + session.target + " (signalingState not stable/have-remote-offer)"
+                        );
+                        return;
+                    }
+
                     applyRemoteSdpAndAnswer(session, payload);
                     return;
                 }
@@ -462,23 +527,42 @@ public final class AndroidP2PWebRtcManager {
         });
     }
 
-    private boolean shouldRecreateSessionForIncomingOffer(SessionState session) {
-        if (session == null) {
-            return true;
-        }
-        if (session.peerConnection == null) {
-            return true;
+    private boolean isPolitePeer(String target) {
+        String safeTarget = normalizeTarget(target);
+        if (safeTarget.isEmpty()) {
+            return false;
         }
 
-        if (session.initiator) {
-            return true;
+        String localName = String.valueOf(ReactorHttpService.getCurrentReactorNameForP2P()).trim().toLowerCase(Locale.ROOT);
+        return !localName.isEmpty() && !localName.equals(safeTarget) && localName.compareTo(safeTarget) > 0;
+    }
+
+    private boolean hasIncomingOfferCollision(SessionState session) {
+        if (session == null || session.peerConnection == null || session.answerSent) {
+            return false;
         }
 
         try {
-            PeerConnection.SignalingState signalingState = session.peerConnection.signalingState();
-            return signalingState != PeerConnection.SignalingState.STABLE;
+            return session.makingOffer
+                    || session.peerConnection.signalingState() == PeerConnection.SignalingState.HAVE_LOCAL_OFFER;
         } catch (Exception ignored) {
-            return true;
+            return session.makingOffer;
+        }
+    }
+
+    private boolean shouldApplyIncomingOffer(SessionState session) {
+        if (session == null || session.peerConnection == null) {
+            return false;
+        }
+        if (session.answerSent) {
+            return false;
+        }
+        try {
+            PeerConnection.SignalingState signalingState = session.peerConnection.signalingState();
+            return signalingState == PeerConnection.SignalingState.STABLE
+                    || signalingState == PeerConnection.SignalingState.HAVE_REMOTE_OFFER;
+        } catch (Exception ignored) {
+            return false;
         }
     }
 
@@ -502,11 +586,18 @@ public final class AndroidP2PWebRtcManager {
         constraints.mandatory.add(new MediaConstraints.KeyValuePair("OfferToReceiveAudio", "false"));
         constraints.mandatory.add(new MediaConstraints.KeyValuePair("OfferToReceiveVideo", "false"));
 
+        session.makingOffer = true;
         session.peerConnection.createOffer(new SimpleSdpObserver(
                 sdp -> {
-                ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "offer created for " + session.target);
-                        CountDownLatch localDescriptionLatch = new CountDownLatch(1);
-                        session.peerConnection.setLocalDescription(new SdpObserver() {
+                    if (session.localOfferAborted || sessions.get(session.target) != session) {
+                        session.makingOffer = false;
+                        ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "offer abandoned for " + session.target + " after polite collision");
+                        return;
+                    }
+
+                    ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "offer created for " + session.target);
+                    CountDownLatch localDescriptionLatch = new CountDownLatch(1);
+                    session.peerConnection.setLocalDescription(new SdpObserver() {
                         @Override
                         public void onCreateSuccess(SessionDescription sessionDescription) {
                             // no-op
@@ -527,18 +618,28 @@ public final class AndroidP2PWebRtcManager {
                             localDescriptionLatch.countDown();
                         }
                     }, sdp);
-                        try {
+
+                    try {
                         localDescriptionLatch.await(3L, TimeUnit.SECONDS);
-                        } catch (InterruptedException interruptedException) {
-                            Thread.currentThread().interrupt();
-                        }
+                    } catch (InterruptedException interruptedException) {
+                        Thread.currentThread().interrupt();
+                    }
+
+                    if (session.localOfferAborted || sessions.get(session.target) != session) {
+                        session.makingOffer = false;
+                        ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "offer send skipped for " + session.target + " after polite collision");
+                        return;
+                    }
+
                     JSObject payload = new JSObject();
                     payload.put("type", sdp.type.canonicalForm());
                     payload.put("sdp", sdp.description);
                     payload.put("sdpBase64", Base64.encodeToString(String.valueOf(sdp.description == null ? "" : sdp.description).getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP));
                     ReactorHttpService.sendP2PSignal(session.target, "offer", payload, session.sessionId);
+                    session.makingOffer = false;
                 },
                 error -> {
+                    session.makingOffer = false;
                     ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "offer failed for " + session.target + ": " + error);
                     ReactorHttpService.sendP2PSignal(session.target, "failed", new JSObject().put("reason", "offer failed: " + error), session.sessionId);
                 }
@@ -589,6 +690,7 @@ public final class AndroidP2PWebRtcManager {
                     answerPayload.put("sdp", sdp.description);
                     answerPayload.put("sdpBase64", Base64.encodeToString(String.valueOf(sdp.description == null ? "" : sdp.description).getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP));
                     ReactorHttpService.sendP2PSignal(session.target, "answer", answerPayload, session.sessionId);
+                    session.answerSent = true;
                     refreshConnectedStateIfAlreadyOpen(session);
                 },
                 error -> {
@@ -1020,10 +1122,13 @@ public final class AndroidP2PWebRtcManager {
                 ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "datachannel state=" + session.dataChannelState + " target=" + session.target);
                 if (state == DataChannel.State.OPEN) {
                     session.state = "connected-p2p";
+                    session.lastHeartbeatAt = System.currentTimeMillis();
+                    startHeartbeat(session);
                     ReactorHttpService.sendP2PSignal(session.target, "connected", null, session.sessionId);
                 } else if (state == DataChannel.State.CONNECTING) {
                     session.state = "connecting";
                 } else if (state == DataChannel.State.CLOSED || state == DataChannel.State.CLOSING) {
+                    stopHeartbeat(session);
                     session.state = "fallback-exchange";
                 }
             }
@@ -1116,7 +1221,19 @@ public final class AndroidP2PWebRtcManager {
 
         String action = String.valueOf(payload.optString("action", "")).trim().toLowerCase(Locale.ROOT);
         String requestId = String.valueOf(payload.optString("requestId", "")).trim();
-        if (action.isEmpty() || requestId.isEmpty()) {
+        if (action.isEmpty()) {
+            return;
+        }
+
+        if ("heartbeat-ping".equals(action) || "heartbeat-pong".equals(action)) {
+            session.lastHeartbeatAt = System.currentTimeMillis();
+            if ("heartbeat-ping".equals(action)) {
+                sendHeartbeat(session, "heartbeat-pong");
+            }
+            return;
+        }
+
+        if (requestId.isEmpty()) {
             return;
         }
 
@@ -1165,10 +1282,65 @@ public final class AndroidP2PWebRtcManager {
         }
     }
 
+    private void startHeartbeat(SessionState session) {
+        if (session == null) {
+            return;
+        }
+
+        stopHeartbeat(session);
+        session.heartbeatFuture = heartbeatExecutor.scheduleAtFixedRate(() -> {
+            if (session.dataChannel == null || session.dataChannel.state() != DataChannel.State.OPEN) {
+                stopHeartbeat(session);
+                return;
+            }
+
+            long lastHeartbeatAt = session.lastHeartbeatAt;
+            if (lastHeartbeatAt > 0L && System.currentTimeMillis() - lastHeartbeatAt > P2P_HEARTBEAT_TIMEOUT_MS) {
+                ReactorHttpService.logGlobalEvent("P2P_NEGOTIATION", "datachannel heartbeat timeout target=" + session.target);
+                sessions.remove(session.target, session);
+                closeSessionInternal(session, true);
+                ReactorHttpService.sendP2PSignal(session.target, "failed", new JSObject().put("reason", "p2p datachannel heartbeat timeout"), session.sessionId);
+                return;
+            }
+
+            sendHeartbeat(session, "heartbeat-ping");
+        }, P2P_HEARTBEAT_INTERVAL_MS, P2P_HEARTBEAT_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private void stopHeartbeat(SessionState session) {
+        if (session == null || session.heartbeatFuture == null) {
+            return;
+        }
+
+        session.heartbeatFuture.cancel(false);
+        session.heartbeatFuture = null;
+    }
+
+    private boolean sendHeartbeat(SessionState session, String action) {
+        if (session == null || session.dataChannel == null || session.dataChannel.state() != DataChannel.State.OPEN) {
+            return false;
+        }
+
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("__reactorP2PControl", true);
+            payload.put("action", action);
+            payload.put("sessionId", session.sessionId);
+            payload.put("timestamp", Instant.now().toString());
+            JSONObject envelope = buildControlEnvelope(payload);
+            byte[] encoded = envelope.toString().getBytes(StandardCharsets.UTF_8);
+            return session.dataChannel.send(new DataChannel.Buffer(ByteBuffer.wrap(encoded), false));
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     private void closeSessionInternal(SessionState session, boolean closePeer) {
         if (session == null) {
             return;
         }
+
+        stopHeartbeat(session);
 
         if (session.dataChannel != null) {
             try {
@@ -1227,7 +1399,12 @@ public final class AndroidP2PWebRtcManager {
         String dataChannelState;
         boolean initiator;
         boolean offerStarted;
+        boolean answerSent;
+        boolean makingOffer;
+        boolean localOfferAborted;
         boolean remoteDescriptionSet;
+        volatile long lastHeartbeatAt;
+        volatile ScheduledFuture<?> heartbeatFuture;
         PeerConnection peerConnection;
         DataChannel dataChannel;
         List<IceCandidate> queuedCandidates = new ArrayList<>();

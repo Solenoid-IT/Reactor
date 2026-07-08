@@ -431,6 +431,16 @@ public class ReactorHttpService extends Service {
         current.reconnectExchangeClientInternal(reason);
     }
 
+    public static void restartExchangeBlock(String reason) {
+        resetAllP2PSessions();
+        ReactorHttpService current = instance;
+        if (current == null) {
+            return;
+        }
+
+        current.restartExchangeBlockInternal(reason);
+    }
+
     public interface P2PSignalListener {
         void onSignal(String from, String sessionId, String signalType, JSONObject payload);
     }
@@ -814,9 +824,33 @@ public class ReactorHttpService extends Service {
     }
 
     public static void resetAllP2PSessions() {
+        resetAllP2PSessions(false);
+    }
+
+    public static void resetAllP2PSessions(boolean notifyRemote) {
         AndroidP2PWebRtcManager p2pManager = AndroidP2PWebRtcManager.getInstance(null);
+        JSArray closedSessions = new JSArray();
         if (p2pManager != null) {
-            p2pManager.closeAllSessions();
+            if (notifyRemote) {
+                closedSessions = p2pManager.closeAllSessionsAndWait(1500L);
+            } else {
+                p2pManager.closeAllSessions();
+            }
+        }
+        if (notifyRemote && "node".equals(currentExchangeMode)) {
+            for (int i = 0; i < closedSessions.length(); i += 1) {
+                JSONObject session = closedSessions.optJSONObject(i);
+                if (session == null) {
+                    continue;
+                }
+
+                String target = String.valueOf(session.optString("target", "")).trim().toLowerCase(Locale.ROOT);
+                if (target.isEmpty()) {
+                    continue;
+                }
+
+                sendP2PSignal(target, "close", null, session.optString("sessionId", ""));
+            }
         }
         p2pSessions.clear();
         emitP2PStatusUpdate();
@@ -8035,6 +8069,18 @@ public class ReactorHttpService extends Service {
             } catch (Exception error) {
                 appendGlobalLog(buildExchangeLog("CLIENT_FAILURE", "reconnect error: " + error.getMessage()));
             }
+        }
+    }
+
+    private void restartExchangeBlockInternal(String reason) {
+        synchronized (exchangeLifecycleLock) {
+            appendGlobalLog(buildExchangeLog(
+                    "EXCHANGE_RESTART",
+                    "reason=" + String.valueOf(reason == null ? "runtime-update" : reason)
+            ));
+
+            stopExchange();
+            startExchange();
         }
     }
 

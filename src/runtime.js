@@ -2252,7 +2252,7 @@ class ReactorRuntime {
 		const config = this.exchangeManager.getConfig();
 		const statusDebounceMs = parseNonNegativeIntegerOption(
 			process.env.REACTOR_EXCHANGE_STATUS_DEBOUNCE_MS,
-			550,
+			250,
 		);
 		return {
 			...config,
@@ -2383,13 +2383,29 @@ class ReactorRuntime {
 	}
 
 	async handleDiscoveredRemotePeers(peers = []) {
-		if (!Array.isArray(peers) || peers.length === 0) {
-			return;
-		}
-
-		const normalizedPeers = peers
+		const normalizedPeers = (Array.isArray(peers) ? peers : [])
 			.map((peer) => String(peer || '').trim().toLowerCase())
 			.filter(Boolean);
+		const knownPeerSet = new Set(normalizedPeers);
+		let removedSessionCount = 0;
+
+		for (const target of Array.from(this.p2pSessions.keys())) {
+			if (knownPeerSet.has(target)) {
+				continue;
+			}
+
+			if (this.p2pTransportManager && this.p2pTransportManager.closeSession) {
+				this.p2pTransportManager.closeSession(target, false);
+			}
+			this.p2pSessions.delete(target);
+			this.p2pAutodialAttempts.delete(target);
+			removedSessionCount += 1;
+			this.logGlobalEvent('EXCHANGE/P2P_PEER_REMOVED', `peer no longer on exchange: ${target}`).catch(() => {});
+		}
+
+		if (removedSessionCount > 0) {
+			this.publishUiStatusSnapshot('p2p-peer-list-pruned');
+		}
 
 		if (normalizedPeers.length === 0) {
 			return;
@@ -2407,7 +2423,10 @@ class ReactorRuntime {
 		}
 
 		const now = Date.now();
-		const staleConnectingSessionMs = 4000;
+		const transportConnectTimeoutMs = Number(this.p2pTransportManager?.connectTimeoutMs || 0) > 0
+			? Number(this.p2pTransportManager.connectTimeoutMs)
+			: 25000;
+		const staleConnectingSessionMs = transportConnectTimeoutMs + 5000;
 		for (const rawPeer of normalizedPeers) {
 			const target = String(rawPeer || '').trim().toLowerCase();
 			if (!target) {
@@ -2487,7 +2506,12 @@ class ReactorRuntime {
 			if (this.p2pTransportManager && this.p2pTransportManager.ensureConnected) {
 				this.p2pTransportManager.ensureConnected(target).catch((error) => {
 					this.logGlobalEvent('EXCHANGE/P2P_AUTODIAL', `failed toward ${target}: ${String(error?.message || 'p2p auto-connect failed')}`).catch(() => {});
-					this.p2pAutodialAttempts.delete(target);
+					if (this.p2pTransportManager && this.p2pTransportManager.closeSession) {
+						this.p2pTransportManager.closeSession(target, false);
+					}
+					this.sendP2PSignal(target, 'failed', {
+						reason: String(error?.message || 'p2p auto-connect failed'),
+					}, { sessionId: this.p2pSessions.get(target)?.sessionId }).catch(() => {});
 					this.upsertP2PSession(target, {
 						state: 'fallback-exchange',
 						lastSignalType: 'failed',
@@ -2547,7 +2571,7 @@ class ReactorRuntime {
 
 		const tracked = this.p2pSessions.get(safeTarget);
 		if (!tracked) {
-			return true;
+			return false;
 		}
 
 		const state = String(tracked.state || '').trim().toLowerCase();
@@ -2732,10 +2756,20 @@ class ReactorRuntime {
 			sessionId: session.sessionId,
 		});
 
+		const nextState = safeSignalType === 'close'
+			? 'idle'
+			: safeSignalType === 'failed'
+			? 'fallback-exchange'
+			: safeSignalType === 'relay'
+			? 'connected-turn'
+			: 'signaling';
+
 		this.upsertP2PSession(safeTarget, {
 			sessionId: session.sessionId,
-			state: safeSignalType === 'close' ? 'idle' : 'signaling',
+			state: nextState,
 			lastSignalType: safeSignalType,
+			usingRelay: safeSignalType === 'relay' || safeSignalType === 'failed',
+			reason: safeSignalType === 'failed' ? String(payload?.reason || 'p2p failed') : '',
 		});
 
 		return {
@@ -3293,13 +3327,27 @@ class ReactorRuntime {
 		}
 	}
 
-	resetAllP2PSessions() {
+	async resetAllP2PSessions(options = {}) {
+		const notifyRemote = Boolean(options.notifyRemote);
+		const hadTrackedP2PSessions = this.p2pSessions.size > 0;
+		const hadKnownRemotePeers = Boolean(
+			this.exchangeManager
+			&& this.exchangeManager._knownRemotePeers
+			&& this.exchangeManager._knownRemotePeers.size > 0,
+		);
 		if (this.p2pTransportManager && typeof this.p2pTransportManager.closeAllSessions === 'function') {
-			this.p2pTransportManager.closeAllSessions();
+			if (typeof this.p2pTransportManager.closeAllSessionsAndWait === 'function') {
+				await this.p2pTransportManager.closeAllSessionsAndWait(1500, notifyRemote);
+			} else {
+				this.p2pTransportManager.closeAllSessions();
+			}
 		}
 		this.p2pSessions.clear();
 		if (this.exchangeManager && this.exchangeManager._knownRemotePeers) {
 			this.exchangeManager._knownRemotePeers.clear();
+		}
+		if (hadTrackedP2PSessions || hadKnownRemotePeers) {
+			this.publishUiStatusSnapshot('p2p-sessions-reset');
 		}
 	}
 
@@ -3385,17 +3433,6 @@ class ReactorRuntime {
 	}
 
 	async setExchangeConfig(mode, host, port, tls = false, token = '', user = '', password = '', discovery = this.exchangeDiscoveryEndpointEnabled, stun = this.stun, turn = this.turn) {
-		// Saving the exchange form must fully tear down every existing connection
-		// (exchange WS client + all P2P/DataChannel sessions) before re-initializing
-		// with the new exchange + STUN + TURN parameters. Stopping the exchange manager
-		// first guarantees the old WS client and known-peer state are cleared so no
-		// stale session lingers with the previous relay configuration.
-		this.resetAllP2PSessions();
-		try {
-			await this.exchangeManager.stop();
-		} catch (error) {
-			this.log(`[EXCHANGE] stop before reconfigure failed: ${String(error?.message || error)}`);
-		}
 		const requestedMode = String(mode || 'node').trim().toLowerCase();
 		const safeHost = String(host || '').trim();
 		const safePort = Number(port) > 0 ? Number(port) : 7070;
@@ -3411,6 +3448,29 @@ class ReactorRuntime {
 			throw new Error('modalità exchange non valida: usa node o exchange');
 		}
 
+		const safeStun = normalizeRelayEndpointConfig(stun, this.stun);
+		const safeTurn = normalizeRelayEndpointConfig(turn, this.turn);
+		await writeConnectionsConfig(this.connectionsConfigPath, {
+			exchange: {
+				host: safeHost,
+				port: safePort,
+				tls: safeTls,
+				token: safeToken,
+				user: safeUser,
+				password: safePassword,
+				discovery: safeDiscovery,
+			},
+			stun: safeStun,
+			turn: safeTurn,
+		});
+
+		await this.resetAllP2PSessions({ notifyRemote: true });
+		try {
+			await this.exchangeManager.stop();
+		} catch (error) {
+			this.log(`[EXCHANGE] stop after reconfigure save failed: ${String(error?.message || error)}`);
+		}
+
 		this.exchangeMode = safeMode;
 		this.exchangeHost = safeHost;
 		this.exchangePort = safePort;
@@ -3419,23 +3479,10 @@ class ReactorRuntime {
 		this.exchangeAuthUser = safeUser;
 		this.exchangeAuthPassword = safePassword;
 		this.exchangeDiscoveryEndpointEnabled = safeDiscovery;
-		this.stun = normalizeRelayEndpointConfig(stun, this.stun);
-		this.turn = normalizeRelayEndpointConfig(turn, this.turn);
+		this.stun = safeStun;
+		this.turn = safeTurn;
 		this.exchangeManager.configure(internalMode, safeHost, safePort, safeTls);
 		await this.exchangeManager.start(this.httpServer);
-		await writeConnectionsConfig(this.connectionsConfigPath, {
-			exchange: {
-				host: this.exchangeHost,
-				port: this.exchangePort,
-				tls: this.exchangeTls,
-				token: this.exchangeAuthToken,
-				user: this.exchangeAuthUser,
-				password: this.exchangeAuthPassword,
-				discovery: this.exchangeDiscoveryEndpointEnabled,
-			},
-			stun: this.stun,
-			turn: this.turn,
-		});
 		return this.getExchangeConfig();
 	}
 
@@ -3477,7 +3524,6 @@ class ReactorRuntime {
 	}
 
 	async setRelayConfig(kind, relayConfig = {}, runTest = true) {
-		this.resetAllP2PSessions();
 		const safeKind = String(kind || '').trim().toLowerCase();
 		if (!['stun', 'turn'].includes(safeKind)) {
 			throw new Error('relay type non valido: usa stun o turn');
@@ -3495,11 +3541,22 @@ class ReactorRuntime {
 				port: this.exchangePort,
 				tls: this.exchangeTls,
 				token: this.exchangeAuthToken,
+				user: this.exchangeAuthUser,
+				password: this.exchangeAuthPassword,
 				discovery: this.exchangeDiscoveryEndpointEnabled,
 			},
 			stun: this.stun,
 			turn: this.turn,
 		});
+		await this.resetAllP2PSessions();
+		try {
+			await this.exchangeManager.stop();
+		} catch (error) {
+			this.log(`[EXCHANGE] stop after relay save failed: ${String(error?.message || error)}`);
+		}
+		const internalMode = this.exchangeMode === 'exchange' ? 'exchange' : 'client';
+		this.exchangeManager.configure(internalMode, this.exchangeHost, this.exchangePort, this.exchangeTls);
+		await this.exchangeManager.start(this.httpServer);
 
 		const relay = safeKind === 'stun' ? this.stun : this.turn;
 		const test = runTest ? await this.testRelayEndpoint(safeKind, relay) : { ok: true, skipped: true };

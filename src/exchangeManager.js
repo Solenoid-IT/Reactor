@@ -12,6 +12,51 @@ const DEFAULT_UNDELIVERED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_UNDELIVERED_RETRY_MS = 30 * 1000;
 const DEFAULT_PENDING_SIGNAL_TTL_MS = 15000;
 
+function closeWebSocketAndWait(ws, timeoutMs = 1500) {
+	if (!ws || ws.readyState === WebSocket.CLOSED) {
+		return Promise.resolve();
+	}
+
+	return new Promise((resolve) => {
+		let settled = false;
+		let timer = null;
+
+		const finish = () => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			if (timer) {
+				clearTimeout(timer);
+			}
+			ws.off('close', finish);
+			resolve();
+		};
+
+		ws.once('close', finish);
+		timer = setTimeout(() => {
+			try {
+				if (ws.readyState !== WebSocket.CLOSED) {
+					ws.terminate();
+				}
+			} catch {
+				// ignore forced close failures
+			}
+			finish();
+		}, Math.max(0, Number(timeoutMs) || 0));
+
+		try {
+			if (ws.readyState === WebSocket.OPEN) {
+				ws.close(1000, 'reactor reconfigure');
+			} else if (ws.readyState !== WebSocket.CLOSING) {
+				ws.terminate();
+			}
+		} catch {
+			finish();
+		}
+	});
+}
+
 function formatTlsCertificateError(rawError, fallback = 'TLS certificate validation failed') {
 	const message = String(rawError || '').trim();
 	const lowered = message.toLowerCase();
@@ -785,6 +830,17 @@ class ExchangeManager {
 			this._upgradeHandler = null;
 		}
 
+		const serverClientSockets = new Set();
+		if (this.wss && this.wss.clients) {
+			for (const client of this.wss.clients) {
+				serverClientSockets.add(client);
+			}
+		}
+		for (const client of this.connectedClients.values()) {
+			serverClientSockets.add(client);
+		}
+		await Promise.all(Array.from(serverClientSockets, (client) => closeWebSocketAndWait(client)));
+
 		if (this.wss) {
 			const wss = this.wss;
 			this.wss = null;
@@ -792,8 +848,9 @@ class ExchangeManager {
 		}
 
 		if (this.wsClient) {
-			try { this.wsClient.terminate(); } catch { /* ignore */ }
+			const wsClient = this.wsClient;
 			this.wsClient = null;
+			await closeWebSocketAndWait(wsClient);
 		}
 
 		this.connectedClients.clear();
