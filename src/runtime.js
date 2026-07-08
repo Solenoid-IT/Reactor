@@ -2289,7 +2289,8 @@ class ReactorRuntime {
 			);
 
 			if (transportOpen) {
-				this.upsertP2PSession(key, {
+				this.p2pSessions.set(key, {
+					...session,
 					sessionId: String(transportSession.sessionId || session?.sessionId || '').trim() || undefined,
 					state: 'connected-p2p',
 					lastSignalType: 'connected',
@@ -2430,6 +2431,11 @@ class ReactorRuntime {
 		for (const rawPeer of normalizedPeers) {
 			const target = String(rawPeer || '').trim().toLowerCase();
 			if (!target) {
+				continue;
+			}
+
+			if (this.isP2PDataChannelOpenForTarget(target)) {
+				this.logGlobalEvent('EXCHANGE/P2P_AUTODIAL_SKIPPED', `reason=datachannel-open target=${target}`).catch(() => {});
 				continue;
 			}
 

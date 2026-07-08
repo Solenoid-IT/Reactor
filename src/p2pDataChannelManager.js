@@ -152,6 +152,31 @@ class P2PDataChannelManager {
 		return this.sessions.get(String(target || '').trim().toLowerCase()) || null;
 	}
 
+	isSessionActive(target) {
+		const session = typeof target === 'string' ? this.getSession(target) : target;
+		if (!session || session.closed) {
+			return false;
+		}
+
+		const dataChannelState = String(session.dataChannel?.readyState || '').toLowerCase();
+		if (session.isOpen && dataChannelState === 'open') {
+			return true;
+		}
+		if (session.dataChannel) {
+			return dataChannelState === 'connecting' || dataChannelState === 'open';
+		}
+
+		const connectionState = String(session.connection?.connectionState || '').toLowerCase();
+		const iceConnectionState = String(session.connection?.iceConnectionState || '').toLowerCase();
+		return (
+			connectionState === 'new'
+			|| connectionState === 'connecting'
+			|| iceConnectionState === 'new'
+			|| iceConnectionState === 'checking'
+			|| Boolean(session.remoteDescriptionPending)
+		);
+	}
+
 	createSession(target, initiator = false) {
 		if (!this.supported) {
 			throw new Error('WebRTC DataChannel support unavailable: install @roamhq/wrtc (or wrtc)');
@@ -467,6 +492,23 @@ class P2PDataChannelManager {
 		const existing = this.sessions.get(safeTarget);
 		if (existing && existing.isOpen && existing.dataChannel && existing.dataChannel.readyState === 'open') {
 			return existing;
+		}
+		if (existing) {
+			if (this.isSessionActive(existing)) {
+				this.runtime.logGlobalEvent('P2P_NEGOTIATION', `offer skipped for ${safeTarget}; session already active`).catch(() => {});
+				const started = Date.now();
+				while (Date.now() - started < this.connectTimeoutMs) {
+					if (existing.isOpen && existing.dataChannel && existing.dataChannel.readyState === 'open') {
+						return existing;
+					}
+
+					await waitFor(100);
+				}
+
+				throw new Error('p2p datachannel connection timeout');
+			}
+
+			this.closeSession(safeTarget, false);
 		}
 
 		if (this.connecting.has(safeTarget)) {
