@@ -437,6 +437,13 @@ public final class AndroidP2PWebRtcManager {
                     return;
                 }
                 if ("answer".equals(safeSignalType)) {
+                    if (!shouldApplyIncomingAnswer(session)) {
+                        ReactorHttpService.logGlobalEvent(
+                                "P2P_NEGOTIATION",
+                                "ignored duplicate/late answer for " + session.target + " (signalingState not have-local-offer)"
+                        );
+                        return;
+                    }
                     applyRemoteSdp(session, payload, SessionDescription.Type.ANSWER);
                     return;
                 }
@@ -472,6 +479,21 @@ public final class AndroidP2PWebRtcManager {
             return signalingState != PeerConnection.SignalingState.STABLE;
         } catch (Exception ignored) {
             return true;
+        }
+    }
+
+    private boolean shouldApplyIncomingAnswer(SessionState session) {
+        if (session == null || session.peerConnection == null) {
+            return false;
+        }
+
+        try {
+            // An answer must only be applied while a local offer is pending. Applying a
+            // duplicate/late answer once the connection is already STABLE sets the DTLS
+            // role a second time and fails with "Failed to set SSL role for the transport".
+            return session.peerConnection.signalingState() == PeerConnection.SignalingState.HAVE_LOCAL_OFFER;
+        } catch (Exception ignored) {
+            return false;
         }
     }
 

@@ -355,6 +355,26 @@ class P2PDataChannelManager {
 
 		if (signalType === 'offer') {
 			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `remote offer received from ${from}`).catch(() => {});
+			const signalingState = String(session.connection.signalingState || '').toLowerCase();
+
+			// A remote offer can only be applied when the connection is idle ('stable')
+			// or is still awaiting the same offer ('have-remote-offer'). Applying an
+			// offer while a local offer is pending (glare) or after the DTLS role has
+			// been negotiated triggers 'Failed to set SSL role for the transport'.
+			if (signalingState !== 'stable' && signalingState !== 'have-remote-offer') {
+				this.runtime.logGlobalEvent('P2P_NEGOTIATION', `ignored duplicate/late offer from ${from} (signalingState=${signalingState})`).catch(() => {});
+				// Re-send the existing answer so the initiator can recover if it was lost.
+				const localDescription = session.connection.localDescription;
+				if (localDescription && String(localDescription.type || '').toLowerCase() === 'answer' && localDescription.sdp) {
+					await this.runtime.sendP2PSignal(from, 'answer', {
+						type: String(localDescription.type || 'answer'),
+						sdp: String(localDescription.sdp || ''),
+						sdpBase64: Buffer.from(String(localDescription.sdp || ''), 'utf8').toString('base64'),
+					}, { sessionId: session.sessionId }).catch(() => {});
+				}
+				return;
+			}
+
 			const remoteSdp = decodeSdpFromPayload(signal?.payload || {});
 			const remoteDesc = new webrtc.RTCSessionDescription({
 				type: 'offer',
@@ -387,6 +407,19 @@ class P2PDataChannelManager {
 
 		if (signalType === 'answer') {
 			this.runtime.logGlobalEvent('P2P_NEGOTIATION', `remote answer received from ${from}`).catch(() => {});
+			const signalingState = String(session.connection.signalingState || '').toLowerCase();
+
+			// An answer is only valid while a local offer is pending. Applying a
+			// duplicate/late answer after the connection is already 'stable' sets the
+			// DTLS role a second time and fails with 'Failed to set SSL role for the transport'.
+			if (signalingState !== 'have-local-offer') {
+				this.runtime.logGlobalEvent('P2P_NEGOTIATION', `ignored duplicate/late answer from ${from} (signalingState=${signalingState})`).catch(() => {});
+				session.remoteDescriptionSet = true;
+				await this.flushQueuedCandidates(session);
+				this.refreshConnectedStateIfAlreadyOpen(session);
+				return;
+			}
+
 			const remoteSdp = decodeSdpFromPayload(signal?.payload || {});
 			const remoteDesc = new webrtc.RTCSessionDescription({
 				type: 'answer',

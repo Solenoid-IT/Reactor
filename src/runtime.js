@@ -3385,7 +3385,17 @@ class ReactorRuntime {
 	}
 
 	async setExchangeConfig(mode, host, port, tls = false, token = '', user = '', password = '', discovery = this.exchangeDiscoveryEndpointEnabled, stun = this.stun, turn = this.turn) {
+		// Saving the exchange form must fully tear down every existing connection
+		// (exchange WS client + all P2P/DataChannel sessions) before re-initializing
+		// with the new exchange + STUN + TURN parameters. Stopping the exchange manager
+		// first guarantees the old WS client and known-peer state are cleared so no
+		// stale session lingers with the previous relay configuration.
 		this.resetAllP2PSessions();
+		try {
+			await this.exchangeManager.stop();
+		} catch (error) {
+			this.log(`[EXCHANGE] stop before reconfigure failed: ${String(error?.message || error)}`);
+		}
 		const requestedMode = String(mode || 'node').trim().toLowerCase();
 		const safeHost = String(host || '').trim();
 		const safePort = Number(port) > 0 ? Number(port) : 7070;
