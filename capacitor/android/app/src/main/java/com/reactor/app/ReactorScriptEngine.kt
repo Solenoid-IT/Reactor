@@ -77,6 +77,41 @@ function Event(type, data, ts) {
     this.type = String(type || 'UNKNOWN');
     this.data = data || {};
     this.timestamp = ts || new Date().toISOString();
+    __brandReactorEvent(this, this.type);
+}
+
+function __brandReactorEvent(event, type) {
+    if (!event || typeof event !== 'object') return event;
+    var normalizedType = String(type || event.type || 'UNKNOWN').toUpperCase();
+    try {
+        Object.defineProperty(event, '__reactorEventType', {
+            value: normalizedType,
+            enumerable: false,
+            configurable: true
+        });
+    } catch (e) {
+        event.__reactorEventType = normalizedType;
+    }
+    return event;
+}
+
+function __installEventInstanceCheck(ctor, type) {
+    if (typeof Symbol === 'undefined' || !Symbol.hasInstance) return;
+    Object.defineProperty(ctor, Symbol.hasInstance, {
+        value: function (value) {
+            if (!value || typeof value !== 'object') return false;
+            var prototype = ctor && ctor.prototype;
+            var current = value;
+            while (prototype && current) {
+                current = Object.getPrototypeOf(current);
+                if (current === prototype) return true;
+            }
+            var actualType = String(value.__reactorEventType || value.type || '').toUpperCase();
+            if (!type) return !!actualType;
+            return actualType === String(type).toUpperCase();
+        },
+        configurable: true
+    });
 }
 
 function __normalizeEventPath(rawPath) {
@@ -113,6 +148,7 @@ function WatchEvent(data, ts) {
     this.watchType = d.watchType || null;
 }
 WatchEvent.prototype = Object.create(Event.prototype);
+WatchEvent.prototype.constructor = WatchEvent;
 
 function MessageEvent(data, ts) {
     Event.call(this, 'MESSAGE', data, ts);
@@ -130,6 +166,7 @@ function MessageEvent(data, ts) {
     this.headers = d.headers || {};
 }
 MessageEvent.prototype = Object.create(Event.prototype);
+MessageEvent.prototype.constructor = MessageEvent;
 
 function StreamEvent(data, ts) {
     MessageEvent.call(this, data, ts);
@@ -137,6 +174,7 @@ function StreamEvent(data, ts) {
     this.stream = data && data.stream ? data.stream : null;
 }
 StreamEvent.prototype = Object.create(MessageEvent.prototype);
+StreamEvent.prototype.constructor = StreamEvent;
 
 function StreamEndEvent(data, ts) {
     Event.call(this, 'STREAMEND', data, ts);
@@ -150,12 +188,14 @@ function StreamEndEvent(data, ts) {
     this.tmpPath = d.tmpPath != null ? String(d.tmpPath) : '';
 }
 StreamEndEvent.prototype = Object.create(Event.prototype);
+StreamEndEvent.prototype.constructor = StreamEndEvent;
 
 function ScheduleEvent(data, ts) {
     Event.call(this, 'SCHEDULE', data, ts);
     this.expression = data && data.expression != null ? data.expression : null;
 }
 ScheduleEvent.prototype = Object.create(Event.prototype);
+ScheduleEvent.prototype.constructor = ScheduleEvent;
 
 function RuntimeEvent(data, ts) {
     Event.call(this, 'EVENT', data, ts);
@@ -163,12 +203,23 @@ function RuntimeEvent(data, ts) {
     this.networkChange = data && data.networkChange != null ? data.networkChange : null;
 }
 RuntimeEvent.prototype = Object.create(Event.prototype);
+RuntimeEvent.prototype.constructor = RuntimeEvent;
 
 function ManualEvent(data, ts) {
     Event.call(this, 'MANUAL_TEST', data, ts);
     this.reason = data && data.reason != null ? String(data.reason) : null;
 }
 ManualEvent.prototype = Object.create(Event.prototype);
+ManualEvent.prototype.constructor = ManualEvent;
+
+__installEventInstanceCheck(Event, null);
+__installEventInstanceCheck(WatchEvent, 'WATCH');
+__installEventInstanceCheck(MessageEvent, 'MESSAGE');
+__installEventInstanceCheck(StreamEvent, 'STREAM');
+__installEventInstanceCheck(StreamEndEvent, 'STREAMEND');
+__installEventInstanceCheck(ScheduleEvent, 'SCHEDULE');
+__installEventInstanceCheck(RuntimeEvent, 'EVENT');
+__installEventInstanceCheck(ManualEvent, 'MANUAL_TEST');
 
 function __parseUnitExpression(input, unitTable) {
     var raw = String(input == null ? '' : input).trim();
