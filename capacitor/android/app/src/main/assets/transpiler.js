@@ -23,7 +23,23 @@ function transpile(code) {
 function transposeLine(line) {
     let originalLine = line;
     
-    // Remove import statements completely
+    // Bind core imports to the runtime core object.
+    const coreImport = line.match(/^\s*import\s+\{([^}]+)\}\s+from\s+['"]core['"]\s*;?\s*$/);
+    if (coreImport) {
+        const bindings = coreImport[1]
+            .split(',')
+            .map((part) => part.trim())
+            .filter(Boolean)
+            .map((part) => {
+                const aliasMatch = part.match(/^(\w+)\s+as\s+(\w+)$/);
+                const exportedName = aliasMatch ? aliasMatch[1] : part;
+                const localName = aliasMatch ? aliasMatch[2] : part;
+                return localName + ' = __reactorCore.' + exportedName;
+            });
+        return bindings.length > 0 ? 'var ' + bindings.join(', ') + ';' : '';
+    }
+
+    // Remove other import statements completely
     if (/^\s*import\s+/.test(line)) {
         return '';
     }
@@ -50,6 +66,8 @@ function transposeLine(line) {
     
     // Remove await keyword
     line = line.replace(/\bawait\s+/g, '');
+
+    line = rewriteReactorInstanceof(line);
     
     // Only return non-empty lines or lines that are just whitespace after removal
     if (line.trim() === '') {
@@ -57,6 +75,12 @@ function transposeLine(line) {
     }
     
     return line;
+}
+
+function rewriteReactorInstanceof(line) {
+    const reactorEventTypes = 'Event|WatchEvent|MessageEvent|StreamEvent|StreamEndEvent|ScheduleEvent|RuntimeEvent|ManualEvent';
+    const pattern = new RegExp('([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)?)\\s+instanceof\\s+(' + reactorEventTypes + ')\\b', 'g');
+    return line.replace(pattern, '__reactorInstanceOf($1, $2)');
 }
 
 function removeTypeAnnotations(line) {

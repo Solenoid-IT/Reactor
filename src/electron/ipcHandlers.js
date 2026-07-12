@@ -675,7 +675,7 @@ function setupIpcHandlers(runtime, options = {}) {
 			return { ok: false, error: error.message || 'endpoint template file not found' };
 		}
 		const contextContent = [
-			"export type { Event, ReactorEvent, WatchEvent, MessageEvent, StreamEvent, StreamEndEvent, ScheduleEvent, RuntimeEvent, ManualEvent } from 'core';",
+			"export type { Sender, Event, ReactorEvent, WatchEvent, MessageEvent, StreamEvent, StreamEndEvent, ScheduleEvent, RuntimeEvent, ManualEvent } from 'core';",
 			'',
 		].join('\n');
 		const packageJson = {

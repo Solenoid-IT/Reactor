@@ -1,4 +1,5 @@
 export type {
+	Sender,
 	Event,
 	ReactorEvent,
 	WatchEvent,

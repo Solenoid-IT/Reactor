@@ -73,10 +73,46 @@ var console = {
     warn: function () { __native.log('[W] ' + _formatArgs.apply(null, arguments)); }
 };
 
+function Sender(endpoint, node) {
+    this.endpoint = String(endpoint || '').trim();
+    this.node = String(node || '').trim();
+    try { Object.freeze(this); } catch (e) { }
+}
+Sender.prototype.toString = function () {
+    return this.endpoint && this.node ? (this.endpoint + '@' + this.node) : '';
+};
+
+function __createSender(data) {
+    data = data && typeof data === 'object' ? data : {};
+    if (data.sender instanceof Sender) return data.sender;
+    var rawSender = data.sender && typeof data.sender === 'object' ? data.sender : null;
+    var endpoint = rawSender ? rawSender.endpoint : data.senderEndpoint;
+    var node = rawSender ? rawSender.node : data.senderNode;
+    if ((!endpoint || !node) && typeof data.sender === 'string') {
+        var senderText = String(data.sender || '').trim();
+        var atIndex = senderText.lastIndexOf('@');
+        if (atIndex > 0 && atIndex < senderText.length - 1) {
+            endpoint = endpoint || senderText.slice(0, atIndex);
+            node = node || senderText.slice(atIndex + 1);
+        }
+    }
+    return new Sender(endpoint || '', node || '');
+}
+
 function Event(type, data, ts) {
     this.type = String(type || 'UNKNOWN');
-    this.data = data || {};
+    var safeData = {};
+    if (data && typeof data === 'object') {
+        for (var key in data) {
+            if (Object.prototype.hasOwnProperty.call(data, key)) safeData[key] = data[key];
+        }
+    }
+    this.sender = __createSender(safeData);
+    var originalEvent = safeData.originalEvent && typeof safeData.originalEvent === 'object' ? safeData.originalEvent : null;
+    delete safeData.originalEvent;
+    this.data = safeData;
     this.timestamp = ts || new Date().toISOString();
+    this.originalEvent = originalEvent;
     __brandReactorEvent(this, this.type);
 }
 
@@ -95,23 +131,117 @@ function __brandReactorEvent(event, type) {
     return event;
 }
 
+function __setReactorEventPrototype(event, ctor) {
+    if (!event || typeof event !== 'object' || !ctor || !ctor.prototype) return event;
+    try {
+        if (Object.getPrototypeOf(event) !== ctor.prototype && typeof Object.setPrototypeOf === 'function') {
+            Object.setPrototypeOf(event, ctor.prototype);
+        }
+    } catch (e) { }
+    return event;
+}
+
+function __isReactorEventInstance(event, ctor, type) {
+    if (!event || typeof event !== 'object') return false;
+    try {
+        var prototype = ctor && ctor.prototype;
+        var current = event;
+        while (prototype && current) {
+            current = Object.getPrototypeOf(current);
+            if (current === prototype) return true;
+        }
+    } catch (e) { }
+    var actualType = String(event.__reactorEventType || event.type || '').toUpperCase();
+    if (!type) return !!actualType;
+    return actualType === String(type).toUpperCase();
+}
+
+function __reactorInstanceOf(value, ctor) {
+    if (ctor === __reactorCore.Event) return __isReactorEventInstance(value, ctor, null);
+    if (ctor === __reactorCore.WatchEvent) return __isReactorEventInstance(value, ctor, 'WATCH');
+    if (ctor === __reactorCore.MessageEvent) return __isReactorEventInstance(value, ctor, 'MESSAGE');
+    if (ctor === __reactorCore.StreamEvent) return __isReactorEventInstance(value, ctor, 'STREAM');
+    if (ctor === __reactorCore.StreamEndEvent) return __isReactorEventInstance(value, ctor, 'STREAMEND');
+    if (ctor === __reactorCore.ScheduleEvent) return __isReactorEventInstance(value, ctor, 'SCHEDULE');
+    if (ctor === __reactorCore.RuntimeEvent) return __isReactorEventInstance(value, ctor, 'EVENT');
+    if (ctor === __reactorCore.ManualEvent) return __isReactorEventInstance(value, ctor, 'MANUAL_TEST');
+    try {
+        return value instanceof ctor;
+    } catch (e) {
+        return false;
+    }
+}
+
+function __eventDataFrom(value) {
+    function own(source, key) {
+        return source && Object.prototype.hasOwnProperty.call(source, key) ? source[key] : undefined;
+    }
+
+    var data = value && value.data && typeof value.data === 'object' ? value.data : value || {};
+    return {
+        sender: own(data, 'sender') !== undefined ? data.sender : own(value, 'sender'),
+        senderEndpoint: own(data, 'senderEndpoint') !== undefined ? data.senderEndpoint : own(value, 'senderEndpoint'),
+        senderNode: own(data, 'senderNode') !== undefined ? data.senderNode : own(value, 'senderNode'),
+        senderName: own(data, 'senderName') !== undefined ? data.senderName : own(value, 'senderName'),
+        target: own(data, 'target') !== undefined ? data.target : own(value, 'target'),
+        targetNode: own(data, 'targetNode') !== undefined ? data.targetNode : own(value, 'targetNode'),
+        targetEndpoint: own(data, 'targetEndpoint') !== undefined ? data.targetEndpoint : own(value, 'targetEndpoint'),
+        targetEndpointId: own(data, 'targetEndpointId') !== undefined ? data.targetEndpointId : own(value, 'targetEndpointId'),
+        content: own(data, 'content') !== undefined ? data.content : own(value, 'content'),
+        contentType: own(data, 'contentType') !== undefined ? data.contentType : own(value, 'contentType'),
+        bodyBase64: own(data, 'bodyBase64') !== undefined ? data.bodyBase64 : own(value, 'bodyBase64'),
+        json: own(data, 'json') !== undefined ? data.json : own(value, 'json'),
+        headers: own(data, 'headers') !== undefined ? data.headers : own(value, 'headers'),
+        stream: own(data, 'stream') !== undefined ? data.stream : own(value, 'stream'),
+        metadata: own(data, 'metadata') !== undefined ? data.metadata : own(value, 'metadata'),
+        tmpFilePath: own(data, 'tmpFilePath') !== undefined ? data.tmpFilePath : own(value, 'tmpFilePath'),
+        originalEvent: own(data, 'originalEvent') !== undefined ? data.originalEvent : own(value, 'originalEvent')
+    };
+}
+
+function __serializeReactorEvent(event) {
+    if (!event || typeof event !== 'object') return null;
+    var serialized = {
+        type: String(event.__reactorEventType || event.type || ''),
+        timestamp: String(event.timestamp || ''),
+        data: event.data && typeof event.data === 'object' ? event.data : {}
+    };
+    if (event.originalEvent && typeof event.originalEvent === 'object') {
+        serialized.originalEvent = __serializeReactorEvent(event.originalEvent);
+    }
+    return serialized;
+}
+
+function __coerceReactorEventForRun(event, trigger) {
+    var type = String((event && (event.__reactorEventType || event.type)) || trigger || '').toUpperCase();
+    var ctor = null;
+    if (type === 'MESSAGE') ctor = __reactorCore.MessageEvent;
+    else if (type === 'STREAM') ctor = __reactorCore.StreamEvent;
+    else if (type === 'STREAMEND') ctor = __reactorCore.StreamEndEvent;
+    else if (type === 'WATCH') ctor = __reactorCore.WatchEvent;
+    else if (type === 'SCHEDULE') ctor = __reactorCore.ScheduleEvent;
+    else if (type === 'EVENT') ctor = __reactorCore.RuntimeEvent;
+    else ctor = __reactorCore.ManualEvent;
+
+    if (!__isReactorEventInstance(event, ctor, type)) {
+        event = new ctor(__eventDataFrom(event));
+    }
+
+    __brandReactorEvent(event, type);
+    __setReactorEventPrototype(event, ctor);
+    return event;
+}
+
 function __installEventInstanceCheck(ctor, type) {
     if (typeof Symbol === 'undefined' || !Symbol.hasInstance) return;
-    Object.defineProperty(ctor, Symbol.hasInstance, {
-        value: function (value) {
-            if (!value || typeof value !== 'object') return false;
-            var prototype = ctor && ctor.prototype;
-            var current = value;
-            while (prototype && current) {
-                current = Object.getPrototypeOf(current);
-                if (current === prototype) return true;
-            }
-            var actualType = String(value.__reactorEventType || value.type || '').toUpperCase();
-            if (!type) return !!actualType;
-            return actualType === String(type).toUpperCase();
-        },
-        configurable: true
-    });
+    try {
+        Object.defineProperty(ctor, Symbol.hasInstance, {
+            value: function (value) {
+                return __isReactorEventInstance(value, ctor, type);
+            },
+            configurable: true
+        });
+    } catch (e) { }
 }
 
 function __normalizeEventPath(rawPath) {
@@ -153,7 +283,6 @@ WatchEvent.prototype.constructor = WatchEvent;
 function MessageEvent(data, ts) {
     Event.call(this, 'MESSAGE', data, ts);
     var d = data || {};
-    this.sender = d.sender != null ? String(d.sender) : null;
     this.senderName = d.senderName != null ? String(d.senderName) : null;
     this.target = d.target || null;
     this.targetNode = d.targetNode || null;
@@ -164,6 +293,7 @@ function MessageEvent(data, ts) {
     this.bodyBase64 = d.bodyBase64 || '';
     this.json = d.json !== undefined ? d.json : null;
     this.headers = d.headers || {};
+    __setReactorEventPrototype(this, MessageEvent);
 }
 MessageEvent.prototype = Object.create(Event.prototype);
 MessageEvent.prototype.constructor = MessageEvent;
@@ -179,13 +309,11 @@ StreamEvent.prototype.constructor = StreamEvent;
 function StreamEndEvent(data, ts) {
     Event.call(this, 'STREAMEND', data, ts);
     var d = data || {};
-    this.sender = d.sender || null;
     this.content = d.content != null ? String(d.content) : '';
     this.contentType = d.contentType || '';
     this.json = d.json !== undefined ? d.json : null;
     this.headers = d.headers || {};
     this.metadata = d.metadata || {};
-    this.tmpPath = d.tmpPath != null ? String(d.tmpPath) : '';
 }
 StreamEndEvent.prototype = Object.create(Event.prototype);
 StreamEndEvent.prototype.constructor = StreamEndEvent;
@@ -385,6 +513,7 @@ function __decodeBase64(input) {
 }
 
 var __reactorCore = {
+    Sender: Sender,
     Event: Event,
     WatchEvent: WatchEvent,
     MessageEvent: MessageEvent,
@@ -528,6 +657,11 @@ var __reactorCore = {
 
             if (opts.headers && typeof opts.headers === 'object') {
                 nativePayload.headers = opts.headers;
+            }
+            var originalEvent = __serializeReactorEvent(typeof __event !== 'undefined' ? __event : null);
+            if (originalEvent) {
+                if (!nativePayload.headers || typeof nativePayload.headers !== 'object') nativePayload.headers = {};
+                nativePayload.headers['X-Reactor-Original-Event'] = JSON.stringify(originalEvent);
             }
             if (Object.prototype.hasOwnProperty.call(opts, 'enqueueOnFail')) {
                 nativePayload.enqueueOnFail = !!opts.enqueueOnFail;
@@ -757,7 +891,8 @@ FileSystem.Directory.prototype.list = function (recursive) {
         ops: ReactorScriptOps
     ): Result {
         return try {
-            Log.d("SCRIPT_ENGINE", "BEFORE_EXECUTE_BLOCKING trigger=$trigger source.length=${source.length}")
+            val normalizedTrigger = normalizeEndpointTrigger(trigger)
+            Log.d("SCRIPT_ENGINE", "BEFORE_EXECUTE_BLOCKING trigger=$normalizedTrigger source.length=${source.length}")
 
             // Transpile TypeScript using QuickJS transpiler function
             Log.d("SCRIPT_ENGINE", "STEP_1_CREATE_ENGINE")
@@ -810,32 +945,68 @@ FileSystem.Directory.prototype.list = function (recursive) {
 
             // Build event object
             val escapedEventContextJson = JSONObject.quote(eventContextJson)
+            val escapedTrigger = JSONObject.quote(normalizedTrigger)
             val buildEventCode = """
 var __eventData = {};
 try { __eventData = JSON.parse($escapedEventContextJson); } catch (e) { }
 try {
+    function __assignEventDataPath(path, value) {
+        var parts = String(path || '').split('.');
+        var current = __eventData;
+        for (var i = 0; i < parts.length; i += 1) {
+            var part = parts[i];
+            if (!part) continue;
+            if (i === parts.length - 1) {
+                if (current[part] === undefined || current[part] === null || current[part] === '') {
+                    current[part] = value;
+                }
+            } else {
+                if (!current[part] || typeof current[part] !== 'object') {
+                    current[part] = {};
+                }
+                current = current[part];
+            }
+        }
+    }
     Object.keys(__eventData).forEach(function (k) {
         if (k.indexOf('event.') === 0) {
             var plainKey = k.substring(6);
+            if (plainKey.indexOf('data.') === 0) {
+                var dataKey = plainKey.substring(5);
+                var dataValue = __eventData[dataKey];
+                if (dataValue === undefined || dataValue === null || dataValue === '') {
+                    __eventData[dataKey] = __eventData[k];
+                }
+                return;
+            }
             var plainValue = __eventData[plainKey];
             if (plainValue === undefined || plainValue === null || plainValue === '') {
                 __eventData[plainKey] = __eventData[k];
             }
+            if (plainKey.indexOf('.') >= 0) {
+                __assignEventDataPath(plainKey, __eventData[k]);
+            }
         }
     });
+    if (__eventData.originalEvent && typeof __eventData.originalEvent === 'object') {
+        __eventData.originalEvent = __coerceReactorEventForRun(
+            __eventData.originalEvent,
+            __eventData.originalEvent.type || __eventData.originalEvent.__reactorEventType || ''
+        );
+    }
 } catch (e) { }
 var __event = null;
-if ('$trigger' === 'WATCH') {
+if ($escapedTrigger === 'WATCH') {
   __event = new WatchEvent(__eventData);
-} else if ('$trigger' === 'MESSAGE') {
+} else if ($escapedTrigger === 'MESSAGE') {
   __event = new MessageEvent(__eventData);
-} else if ('$trigger' === 'STREAM') {
+} else if ($escapedTrigger === 'STREAM') {
   __event = new StreamEvent(__eventData);
-} else if ('$trigger' === 'STREAMEND') {
+} else if ($escapedTrigger === 'STREAMEND') {
   __event = new StreamEndEvent(__eventData);
-} else if ('$trigger' === 'SCHEDULE') {
+} else if ($escapedTrigger === 'SCHEDULE') {
   __event = new ScheduleEvent(__eventData);
-} else if ('$trigger' === 'EVENT') {
+} else if ($escapedTrigger === 'EVENT') {
   __event = new RuntimeEvent(__eventData);
 } else {
   __event = new ManualEvent(__eventData);
@@ -901,7 +1072,69 @@ if ('$trigger' === 'WATCH') {
                 return Result(null, "run() resolve failed: $ensureRunnerResult")
             }
 
-            val callResult = executeWithTrace(engine, "RUN_CALL", "__runner(__event);")
+            val ensureEventInstanceResult = executeWithTrace(engine, "ENSURE_EVENT_INSTANCE", """
+(function () {
+    function own(value, key) {
+        return value && Object.prototype.hasOwnProperty.call(value, key) ? value[key] : undefined;
+    }
+    function eventDataFrom(value) {
+        var data = value && value.data && typeof value.data === 'object' ? value.data : value || {};
+        return {
+            sender: own(data, 'sender') !== undefined ? data.sender : own(value, 'sender'),
+            senderEndpoint: own(data, 'senderEndpoint') !== undefined ? data.senderEndpoint : own(value, 'senderEndpoint'),
+            senderNode: own(data, 'senderNode') !== undefined ? data.senderNode : own(value, 'senderNode'),
+            senderName: own(data, 'senderName') !== undefined ? data.senderName : own(value, 'senderName'),
+            target: own(data, 'target') !== undefined ? data.target : own(value, 'target'),
+            targetNode: own(data, 'targetNode') !== undefined ? data.targetNode : own(value, 'targetNode'),
+            targetEndpoint: own(data, 'targetEndpoint') !== undefined ? data.targetEndpoint : own(value, 'targetEndpoint'),
+            targetEndpointId: own(data, 'targetEndpointId') !== undefined ? data.targetEndpointId : own(value, 'targetEndpointId'),
+            content: own(data, 'content') !== undefined ? data.content : own(value, 'content'),
+            contentType: own(data, 'contentType') !== undefined ? data.contentType : own(value, 'contentType'),
+            bodyBase64: own(data, 'bodyBase64') !== undefined ? data.bodyBase64 : own(value, 'bodyBase64'),
+            json: own(data, 'json') !== undefined ? data.json : own(value, 'json'),
+            headers: own(data, 'headers') !== undefined ? data.headers : own(value, 'headers'),
+            stream: own(data, 'stream') !== undefined ? data.stream : own(value, 'stream'),
+            metadata: own(data, 'metadata') !== undefined ? data.metadata : own(value, 'metadata'),
+            tmpFilePath: own(data, 'tmpFilePath') !== undefined ? data.tmpFilePath : own(value, 'tmpFilePath')
+        };
+    }
+
+    var before = false;
+    try { before = __event instanceof MessageEvent; } catch (e) { before = false; }
+    if (!before) {
+        var type = String((__event && (__event.__reactorEventType || __event.type)) || $escapedTrigger || '').toUpperCase();
+        var data = eventDataFrom(__event);
+        if (type === 'MESSAGE') __event = new MessageEvent(data);
+        else if (type === 'STREAM') __event = new StreamEvent(data);
+        else if (type === 'STREAMEND') __event = new StreamEndEvent(data);
+        else if (type === 'WATCH') __event = new WatchEvent(data);
+        else if (type === 'SCHEDULE') __event = new ScheduleEvent(data);
+        else if (type === 'EVENT') __event = new RuntimeEvent(data);
+        else __event = new ManualEvent(data);
+    }
+
+    var after = false;
+    var protoOk = false;
+    var coreCtorOk = false;
+    var ctorName = '';
+    try { after = __event instanceof MessageEvent; } catch (e) { after = false; }
+    try { protoOk = Object.getPrototypeOf(__event) === MessageEvent.prototype; } catch (e) { protoOk = false; }
+    try { coreCtorOk = MessageEvent === __reactorCore.MessageEvent; } catch (e) { coreCtorOk = false; }
+    try { ctorName = __event && __event.constructor && __event.constructor.name ? String(__event.constructor.name) : ''; } catch (e) { ctorName = ''; }
+    if (!after) {
+        __native.log('EVENT_INSTANCE_CHECK failed before=' + before + ' after=' + after + ' type=' + (__event && __event.type) + ' brand=' + (__event && __event.__reactorEventType) + ' protoOk=' + protoOk + ' coreCtorOk=' + coreCtorOk + ' ctor=' + ctorName);
+    }
+    return JSON.stringify({ before: before, after: after, type: __event && __event.type, protoOk: protoOk, coreCtorOk: coreCtorOk, ctor: ctorName });
+})()
+""".trimIndent())
+            Log.d("SCRIPT_ENGINE", "EVENT_INSTANCE_CHECK: $ensureEventInstanceResult")
+            if (isQuickJsError(ensureEventInstanceResult)) {
+                Log.e("SCRIPT_ENGINE", "EVENT_INSTANCE_CHECK_ERROR: $ensureEventInstanceResult")
+                engine.cleanup()
+                return Result(null, "Event instance check failed: $ensureEventInstanceResult")
+            }
+
+            val callResult = executeWithTrace(engine, "RUN_CALL", "__runner(__coerceReactorEventForRun(__event, $escapedTrigger));")
             if (isQuickJsError(callResult)) {
                 Log.e("SCRIPT_ENGINE", "RUN_CALL_ERROR: $callResult")
                 engine.cleanup()
@@ -932,6 +1165,23 @@ if ('$trigger' === 'WATCH') {
             result.contains("not a function") ||
             result.contains("expecting") ||
             result.contains("SyntaxError")
+    }
+
+    private fun normalizeEndpointTrigger(value: String?): String {
+        val normalized = value.orEmpty().trim()
+        if (normalized.isEmpty()) {
+            return ""
+        }
+
+        val openParen = normalized.indexOf('(')
+        val openBracket = normalized.indexOf('[')
+        var cut = openParen
+        if (cut < 0 || (openBracket >= 0 && openBracket < cut)) {
+            cut = openBracket
+        }
+
+        val base = if (cut >= 0) normalized.substring(0, cut) else normalized
+        return base.trim().uppercase()
     }
 
     private fun logLongScript(tag: String, label: String, script: String, chunkSize: Int = 3000) {

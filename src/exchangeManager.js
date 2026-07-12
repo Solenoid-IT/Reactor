@@ -480,7 +480,7 @@ class ExchangeManager {
 		await fs.writeFile(this._undeliveredQueuePath, `${JSON.stringify(queue, null, 2)}\n`, 'utf8');
 	}
 
-	async _enqueueUndeliveredMessage(to, from, content, contentType, targetEndpoint = null, targetEndpointId = null) {
+	async _enqueueUndeliveredMessage(to, from, content, contentType, targetEndpoint = null, targetEndpointId = null, messageHeaders = {}) {
 		const now = Date.now();
 		const queue = await this._readUndeliveredQueue();
 		queue.push({
@@ -491,6 +491,7 @@ class ExchangeManager {
 			from,
 			content,
 			contentType,
+			messageHeaders: messageHeaders && typeof messageHeaders === 'object' ? messageHeaders : {},
 			createdAt: now,
 			expiresAt: now + this._undeliveredQueueTtlMs,
 			nextAttemptAt: now + this._undeliveredQueueRetryMs,
@@ -570,6 +571,7 @@ class ExchangeManager {
 						targetEndpointId: item.targetEndpointId || null,
 						content: item.content !== undefined ? item.content : '',
 						contentType: String(item.contentType || 'text/plain'),
+						messageHeaders: item.messageHeaders && typeof item.messageHeaders === 'object' ? item.messageHeaders : {},
 					}));
 					delivered += 1;
 				} catch {
@@ -1148,6 +1150,7 @@ class ExchangeManager {
 				String(packet.contentType || 'text/plain'),
 				packet.targetEndpoint || null,
 				packet.targetEndpointId || null,
+				packet.messageHeaders && typeof packet.messageHeaders === 'object' ? packet.messageHeaders : {},
 			).catch(() => {});
 			return;
 		}
@@ -1160,6 +1163,7 @@ class ExchangeManager {
 				targetEndpointId: packet.targetEndpointId || null,
 				content: packet.content !== undefined ? packet.content : '',
 				contentType: String(packet.contentType || 'text/plain'),
+				messageHeaders: packet.messageHeaders && typeof packet.messageHeaders === 'object' ? packet.messageHeaders : {},
 			}));
 			this.runtime.log(`[Exchange] Routed: ${fromName || 'unknown'} -> ${to}`);
 		} catch (err) {
@@ -1171,6 +1175,7 @@ class ExchangeManager {
 				String(packet.contentType || 'text/plain'),
 				packet.targetEndpoint || null,
 				packet.targetEndpointId || null,
+				packet.messageHeaders && typeof packet.messageHeaders === 'object' ? packet.messageHeaders : {},
 			).catch(() => {});
 		}
 	}
@@ -1674,6 +1679,10 @@ class ExchangeManager {
 		this.runtime.log(`[Exchange] Message from: ${from}`);
 		const targetEndpointSelector = String(packet.targetEndpoint || '').trim().toLowerCase() || null;
 		const targetEndpointId = String(packet.targetEndpointId || '').trim().toLowerCase() || null;
+		const messageHeaders = {
+			...((packet.messageHeaders && typeof packet.messageHeaders === 'object') ? packet.messageHeaders : {}),
+			'x-exchange-from': from,
+		};
 		const listeners = this.runtime.filterMessageListenersByTarget(
 			this.runtime.findMessageListeners([from.toLowerCase()]),
 			targetEndpointSelector
@@ -1704,7 +1713,7 @@ class ExchangeManager {
 					messageJson,
 					stream: null,
 					streamEnd: null,
-					messageHeaders: { 'x-exchange-from': from },
+					messageHeaders,
 				}),
 			),
 		).catch(() => {});
@@ -1828,6 +1837,9 @@ class ExchangeManager {
 		}
 
 		const shouldEnqueueOnFail = Boolean(options && options.enqueueOnFail);
+		const messageHeaders = options && options.messageHeaders && typeof options.messageHeaders === 'object'
+			? options.messageHeaders
+			: {};
 
 		let serializedContent, contentType;
 		if (Buffer.isBuffer(content) || content instanceof Uint8Array) {
@@ -1854,6 +1866,7 @@ class ExchangeManager {
 			targetEndpointId: parsedTarget.endpointId || null,
 			content: serializedContent,
 			contentType,
+			messageHeaders,
 			enqueueOnFail: shouldEnqueueOnFail,
 		}));
 		return {

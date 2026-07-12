@@ -1620,7 +1620,7 @@ public class ReactorHttpService extends Service {
 
         String requestId = String.valueOf(streamEventContext.getOrDefault("event.metadata.requestId", "")).trim();
         String endpointName = String.valueOf(streamEventContext.getOrDefault("event.metadata.endpointName", "")).trim();
-        String tmpPath = String.valueOf(streamEventContext.getOrDefault("event.tmpPath", "")).trim();
+        String tmpPath = String.valueOf(streamEventContext.getOrDefault("event.data.tmpFilePath", "")).trim();
         if (!requestId.isEmpty() && pendingOutgoingTransfers.containsKey(requestId)) {
             logTransfer("stream ignored local-echo requestId=" + requestId + " endpoint=" + (endpointName.isEmpty() ? "-" : endpointName) + " tmpPath=" + tmpPath);
             File tmpEchoFile = tmpPath.isEmpty() ? null : new File(tmpPath);
@@ -2924,7 +2924,7 @@ public class ReactorHttpService extends Service {
                         : new HashMap<>(headers);
                 Map<String, String> streamEventContext = streamEnvelope
                     ? buildIncomingStreamEventContext(streamSenderKey, streamPayload)
-                    : new HashMap<>();
+                    : buildIncomingMessageEventContext(senderId, senderName, bodyText, headers);
                 boolean handledSystemTransfer = streamEnvelope && handleIncomingEndpointTransferStream(streamPhase, streamEventContext);
                 if (handledSystemTransfer) {
                     JSONObject payload = new JSONObject();
@@ -3490,6 +3490,7 @@ public class ReactorHttpService extends Service {
         ParsedIncomingEnvelope parsedEnvelope = parseIncomingP2PEnvelope(rawPayload);
         Map<String, String> headers = new HashMap<>();
         headers.putAll(parsedEnvelope.messageHeaders);
+        headers.put("content-type", parsedEnvelope.contentType);
         headers.put("x-p2p-from", safeFromNode);
         headers.put("reactor-name", safeFromNode);
         headers.put("reactor-sender", safeFromNode);
@@ -3509,16 +3510,16 @@ public class ReactorHttpService extends Service {
                 ? streamPayload.optString("phase", "").trim().toLowerCase(Locale.ROOT)
                 : "";
         String primaryEvent = streamEnvelope ? "STREAM" : "MESSAGE";
+        Map<String, String> effectiveHeaders = streamEnvelope
+                ? withStreamHeaders(headers, streamPayload, primaryEvent)
+                : new HashMap<>(headers);
         Map<String, String> streamEventContext = streamEnvelope
             ? buildIncomingStreamEventContext(safeFromNode, streamPayload)
-            : new HashMap<>();
+            : buildIncomingMessageEventContext(safeFromNode, safeFromNode, parsedEnvelope.bodyText, effectiveHeaders);
         boolean handledSystemTransfer = streamEnvelope && handleIncomingEndpointTransferStream(streamPhase, streamEventContext);
         if (handledSystemTransfer) {
             return;
         }
-        Map<String, String> effectiveHeaders = streamEnvelope
-                ? withStreamHeaders(headers, streamPayload, primaryEvent)
-                : new HashMap<>(headers);
         String targetEndpointSelector = effectiveHeaders.getOrDefault("reactor-target-endpoint", "").trim().toLowerCase(Locale.ROOT);
         String targetEndpointId = effectiveHeaders.getOrDefault("reactor-target-endpoint-id", "").trim().toLowerCase(Locale.ROOT);
         if (targetEndpointSelector.isEmpty() && !targetEndpointId.isEmpty()) {
@@ -3683,6 +3684,71 @@ public class ReactorHttpService extends Service {
         }
     }
 
+    private Map<String, String> buildIncomingMessageEventContext(
+            String senderId,
+            String senderName,
+            String content,
+            Map<String, String> headers
+    ) {
+        Map<String, String> context = new HashMap<>();
+        Map<String, String> safeHeaders = headers != null ? headers : new HashMap<>();
+        String safeContent = String.valueOf(content == null ? "" : content);
+        String contentType = safeHeaders.getOrDefault("content-type", "text/plain; charset=utf-8");
+
+        context.put("event.type", "MESSAGE");
+        context.put("event.sender", String.valueOf(senderId == null ? "" : senderId));
+        context.put("event.senderName", String.valueOf(senderName == null ? "" : senderName));
+        context.put("event.target", safeHeaders.getOrDefault("reactor-target", ""));
+        context.put("event.targetNode", safeHeaders.getOrDefault("reactor-target-node", ""));
+        context.put("event.targetEndpoint", safeHeaders.getOrDefault("reactor-target-endpoint", ""));
+        context.put("event.targetEndpointId", safeHeaders.getOrDefault("reactor-target-endpoint-id", ""));
+        context.put("event.content", safeContent);
+        context.put("event.contentType", contentType);
+        context.put("event.headers.content-type", contentType);
+
+        String originalTrigger = normalizeEndpointTrigger(safeHeaders.getOrDefault("x-reactor-trigger", ""));
+        if (!originalTrigger.isEmpty() && !"MESSAGE".equals(originalTrigger)) {
+            context.put("event.originalEvent.type", originalTrigger);
+        }
+
+        JSONObject originalEvent = tryParseJsonObject(safeHeaders.getOrDefault("x-reactor-original-event", ""));
+        if (originalEvent != null) {
+            appendOriginalEventContext(context, "event.originalEvent", originalEvent);
+        }
+
+        JSONObject parsedJson = tryParseJsonObject(safeContent);
+        if (parsedJson != null) {
+            context.put("event.json", parsedJson.toString());
+        }
+
+        return context;
+    }
+
+    private void appendOriginalEventContext(Map<String, String> context, String prefix, JSONObject originalEvent) {
+        if (context == null || originalEvent == null) {
+            return;
+        }
+
+        String type = String.valueOf(originalEvent.optString("type", "")).trim();
+        if (!type.isEmpty()) {
+            context.put(prefix + ".type", normalizeEndpointTrigger(type));
+        }
+        String timestamp = String.valueOf(originalEvent.optString("timestamp", "")).trim();
+        if (!timestamp.isEmpty()) {
+            context.put(prefix + ".timestamp", timestamp);
+        }
+
+        JSONObject data = originalEvent.optJSONObject("data");
+        if (data != null) {
+            appendMetadataContext(context, prefix, data);
+        }
+
+        JSONObject nestedOriginal = originalEvent.optJSONObject("originalEvent");
+        if (nestedOriginal != null) {
+            appendOriginalEventContext(context, prefix + ".originalEvent", nestedOriginal);
+        }
+    }
+
     private Map<String, String> buildIncomingStreamEventContext(String senderKey, JSONObject streamPayload) {
         Map<String, String> context = new HashMap<>();
         if (streamPayload == null || !streamPayload.optBoolean("__reactorStream", false)) {
@@ -3799,7 +3865,7 @@ public class ReactorHttpService extends Service {
         }
 
         String tmpPath = finalFile != null ? finalFile.getAbsolutePath() : "";
-        context.put("event.tmpPath", tmpPath);
+        context.put("event.data.tmpFilePath", tmpPath);
 
         JSONObject metadata = state.metadata != null ? state.metadata : streamPayload.optJSONObject("metadata");
         if (metadata != null) {
@@ -4684,6 +4750,24 @@ public class ReactorHttpService extends Service {
         return null;
     }
 
+    private String normalizeEndpointTrigger(String value) {
+        String normalized = String.valueOf(value == null ? "" : value).trim();
+        if (normalized.isEmpty()) {
+            return "";
+        }
+
+        int openParen = normalized.indexOf('(');
+        int openBracket = normalized.indexOf('[');
+        int cut = openParen;
+        if (cut < 0 || (openBracket >= 0 && openBracket < cut)) {
+            cut = openBracket;
+        }
+
+        return (cut >= 0 ? normalized.substring(0, cut) : normalized)
+                .trim()
+                .toUpperCase(Locale.ROOT);
+    }
+
     private boolean matchesSingleOnType(String value, String type) {
         return Pattern.compile("^" + Pattern.quote(type) + "(?:\\s+\\[.*\\]|\\(.*\\))?$", Pattern.CASE_INSENSITIVE)
                 .matcher(String.valueOf(value).trim())
@@ -5073,10 +5157,14 @@ public class ReactorHttpService extends Service {
         } catch (Exception ignored) {
             // Best-effort diagnostic logging.
         }
-        String trigger = incomingHeaders != null ? incomingHeaders.getOrDefault("x-reactor-trigger", "") : "";
-        if (trigger.isEmpty() && eventContext != null) {
+        String trigger = "";
+        if (eventContext != null) {
             trigger = eventContext.getOrDefault("event.type", "");
         }
+        if (trigger.isEmpty() && incomingHeaders != null) {
+            trigger = incomingHeaders.getOrDefault("x-reactor-trigger", "");
+        }
+        trigger = normalizeEndpointTrigger(trigger);
         if (trigger.isEmpty()) trigger = "MANUAL_TEST";
 
         String eventContextJson = "{}";
@@ -6196,8 +6284,8 @@ public class ReactorHttpService extends Service {
         if ("event.watchType".equals(normalizedToken)) {
             return String.valueOf(eventContext != null ? eventContext.getOrDefault("event.watchType", "") : "");
         }
-        if ("event.tmpPath".equals(normalizedToken)) {
-            return String.valueOf(eventContext != null ? eventContext.getOrDefault("event.tmpPath", "") : "");
+        if ("event.data.tmpFilePath".equals(normalizedToken)) {
+            return String.valueOf(eventContext != null ? eventContext.getOrDefault("event.data.tmpFilePath", "") : "");
         }
         if (normalizedToken.startsWith("event.metadata.")) {
             return String.valueOf(eventContext != null ? eventContext.getOrDefault(normalizedToken, "") : "");
@@ -6647,14 +6735,15 @@ public class ReactorHttpService extends Service {
                         parsedTarget.originalTarget,
                         String.valueOf(content),
                         String.valueOf(contentType),
-                        shouldEnqueueOnFail
+                        shouldEnqueueOnFail,
+                        effectiveHeaders
                 );
                 return SendDeliveryResult.success(parsedTarget.originalTarget, "EXCHANGE");
             } catch (Exception exchangeError) {
                 if (!shouldEnqueueOnFail) {
                     throw new RuntimeException(exchangeError.getMessage() != null ? exchangeError.getMessage() : "exchange send failed");
                 }
-                enqueueOutgoingMessage("exchange", String.valueOf(parsedTarget.originalTarget).trim().toLowerCase(Locale.ROOT), String.valueOf(content), String.valueOf(contentType), new HashMap<>());
+                enqueueOutgoingMessage("exchange", String.valueOf(parsedTarget.originalTarget).trim().toLowerCase(Locale.ROOT), String.valueOf(content), String.valueOf(contentType), effectiveHeaders);
                 return SendDeliveryResult.queued(parsedTarget.originalTarget, "EXCHANGE", exchangeError.getMessage());
             }
         }
@@ -7055,7 +7144,7 @@ public class ReactorHttpService extends Service {
 
             try {
                 if ("exchange".equals(channel)) {
-                    sendExchangeMessageNow(target, content, contentType, false);
+                    sendExchangeMessageNow(target, content, contentType, false, jsonToHeaders(headersJson));
                 } else {
                     String reactorName = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                             .getString(PREF_REACTOR_NAME, "mobile-reactor");
@@ -7220,6 +7309,10 @@ public class ReactorHttpService extends Service {
     }
 
     private void sendExchangeMessageNow(String target, String content, String contentType, boolean enqueueOnFail) {
+        sendExchangeMessageNow(target, content, contentType, enqueueOnFail, new HashMap<>());
+    }
+
+    private void sendExchangeMessageNow(String target, String content, String contentType, boolean enqueueOnFail, Map<String, String> extraHeaders) {
         if (!"node".equals(currentExchangeMode) || wsExchangeClientSocket == null) {
             throw new RuntimeException("exchange client not connected");
         }
@@ -7242,6 +7335,9 @@ public class ReactorHttpService extends Service {
             packet.put("content", String.valueOf(content));
             packet.put("contentType", String.valueOf(contentType));
             packet.put("enqueueOnFail", enqueueOnFail);
+            if (extraHeaders != null && !extraHeaders.isEmpty()) {
+                packet.put("messageHeaders", new JSONObject(extraHeaders));
+            }
         } catch (JSONException exception) {
             throw new RuntimeException(exception.getMessage() != null ? exception.getMessage() : "exchange packet serialization failed");
         }
@@ -7482,7 +7578,8 @@ public class ReactorHttpService extends Service {
                                 packet.optString("content", ""),
                                 packet.optString("contentType", "text/plain"),
                                 packet.optString("targetEndpoint", ""),
-                                packet.optString("targetEndpointId", ""));
+                                packet.optString("targetEndpointId", ""),
+                                packet.optJSONObject("messageHeaders"));
                     } else if ("signal".equals(type)) {
                         routeExchangeSignal(packet, clientName != null ? clientName : "unknown");
                     } else if ("stream-chunk-bin".equals(type)) {
@@ -7545,7 +7642,7 @@ public class ReactorHttpService extends Service {
         return thread;
     }
 
-    private void routeExchangeMessage(String to, String from, String content, String contentType, String targetEndpoint, String targetEndpointId) {
+    private void routeExchangeMessage(String to, String from, String content, String contentType, String targetEndpoint, String targetEndpointId, JSONObject messageHeaders) {
         WsConnection target = wsExchangeClients.get(to);
         if (target == null) {
             appendGlobalLog(buildExchangeLog("ROUTE_MISS", "target not connected: " + to));
@@ -7559,6 +7656,9 @@ public class ReactorHttpService extends Service {
             packet.put("targetEndpointId", String.valueOf(targetEndpointId == null ? "" : targetEndpointId).trim().toLowerCase(Locale.ROOT));
             packet.put("content", content);
             packet.put("contentType", contentType);
+            if (messageHeaders != null) {
+                packet.put("messageHeaders", messageHeaders);
+            }
             target.send(packet.toString());
             appendGlobalLog(buildExchangeLog("ROUTED", from + " → " + to));
         } catch (Exception e) {
@@ -8441,21 +8541,21 @@ public class ReactorHttpService extends Service {
                     ? streamPayload.optString("phase", "").trim().toLowerCase(Locale.ROOT)
                     : "";
             String primaryEvent = streamEnvelope ? "STREAM" : "MESSAGE";
-                Map<String, String> streamEventContext = streamEnvelope
-                    ? buildIncomingStreamEventContext(String.valueOf(from).trim().toLowerCase(Locale.ROOT), streamPayload)
-                    : new HashMap<>();
-
-            // Handle system endpoint-transfer streams regardless of endpoint listeners.
-            boolean handledSystemTransfer = streamEnvelope && handleIncomingEndpointTransferStream(streamPhase, streamEventContext);
-            if (handledSystemTransfer) {
-                return;
-            }
-
-                int deliveredCount = 0;
 
             Map<String, String> headers = new HashMap<>();
             headers.put("content-type", contentType);
             headers.put("x-exchange-from", from);
+            JSONObject messageHeaders = packet.optJSONObject("messageHeaders");
+            if (messageHeaders != null) {
+                Iterator<String> keys = messageHeaders.keys();
+                while (keys.hasNext()) {
+                    String key = keys.next();
+                    String safeKey = String.valueOf(key == null ? "" : key).trim().toLowerCase(Locale.ROOT);
+                    if (!safeKey.isEmpty()) {
+                        headers.put(safeKey, String.valueOf(messageHeaders.opt(key)));
+                    }
+                }
+            }
             if (!targetEndpointSelector.isEmpty()) {
                 headers.put("reactor-target-endpoint", targetEndpointSelector);
             }
@@ -8465,6 +8565,17 @@ public class ReactorHttpService extends Service {
             Map<String, String> effectiveHeaders = streamEnvelope
                     ? withStreamHeaders(headers, streamPayload, primaryEvent)
                     : headers;
+            Map<String, String> streamEventContext = streamEnvelope
+                    ? buildIncomingStreamEventContext(String.valueOf(from).trim().toLowerCase(Locale.ROOT), streamPayload)
+                    : buildIncomingMessageEventContext(from, from, content, effectiveHeaders);
+
+            // Handle system endpoint-transfer streams regardless of endpoint listeners.
+            boolean handledSystemTransfer = streamEnvelope && handleIncomingEndpointTransferStream(streamPhase, streamEventContext);
+            if (handledSystemTransfer) {
+                return;
+            }
+
+            int deliveredCount = 0;
 
             for (MessageEndpoint endpoint : listeners) {
                 if (!matchesEventSender(endpoint, senderCandidates, primaryEvent)) continue;

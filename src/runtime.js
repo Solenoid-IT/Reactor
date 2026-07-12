@@ -1519,6 +1519,7 @@ class ReactorRuntime {
 		this.activeIncomingStreams = new Map();
 		this.pendingIncomingStreamEnds = new Map();
 		this.incomingStreamProcessingChains = new Map();
+		this.currentEndpointEvent = null;
 		this.uiStatusSink = null;
 		this.reactorRootDir = options.reactorRootDir || path.dirname(this.endpointsDir);
 		this.streamStorageDir = path.join(this.reactorRootDir, 'temp_files', 'streams');
@@ -1866,7 +1867,7 @@ class ReactorRuntime {
 				const payload = this.deserializeQueuedContent(item.payloadType, item.payload);
 				try {
 					if (item.channel === 'exchange') {
-						await this.sendExchangeMessage(item.target, payload, { noEnqueue: true });
+						await this.sendExchangeMessage(item.target, payload, { noEnqueue: true, messageHeaders: item.headers || {} });
 					} else {
 						await this.sendNodeMessage(item.target, payload, item.headers || {}, { noEnqueue: true });
 					}
@@ -2992,7 +2993,7 @@ class ReactorRuntime {
 		const tempProjectRoot = path.join(this.reactorRootDir, 'temp_files', 'endpoint-transfers', `source-${safeStem}-${crypto.randomUUID()}`);
 		const npmSafeName = safeStem.toLowerCase().replace(/[^a-z0-9._-]/g, '-').replace(/^[._-]+/, '') || 'reactor-endpoint';
 		const packageJson = { name: npmSafeName, version: '1.0.0', private: true, type: 'commonjs', main: 'boot.ts' };
-		const contextContent = "export type { Event, ReactorEvent, WatchEvent, MessageEvent, StreamEvent, StreamEndEvent, ScheduleEvent, RuntimeEvent, ManualEvent } from 'core';\n";
+		const contextContent = "export type { Sender, Event, ReactorEvent, WatchEvent, MessageEvent, StreamEvent, StreamEndEvent, ScheduleEvent, RuntimeEvent, ManualEvent } from 'core';\n";
 		await fs.mkdir(tempProjectRoot, { recursive: true });
 		await fs.writeFile(path.join(tempProjectRoot, 'boot.ts'), await fs.readFile(endpointPath, 'utf8'), 'utf8');
 		await fs.writeFile(path.join(tempProjectRoot, 'package.json'), `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8');
@@ -3221,7 +3222,7 @@ class ReactorRuntime {
 		}
 		const npmSafeName = safeStem.toLowerCase().replace(/[^a-z0-9._-]/g, '-').replace(/^[._-]+/, '') || 'reactor-endpoint';
 		const packageJson = { name: npmSafeName, version: '1.0.0', private: true, type: 'commonjs', main: 'boot.ts' };
-		const contextContent = "export type { Event, ReactorEvent, WatchEvent, MessageEvent, StreamEvent, StreamEndEvent, ScheduleEvent, RuntimeEvent, ManualEvent } from 'core';\n";
+		const contextContent = "export type { Sender, Event, ReactorEvent, WatchEvent, MessageEvent, StreamEvent, StreamEndEvent, ScheduleEvent, RuntimeEvent, ManualEvent } from 'core';\n";
 		const tempProjectRoot = path.join(this.endpointsDir, `.transfer-${safeStem}-${crypto.randomUUID()}`);
 		await fs.mkdir(tempProjectRoot, { recursive: true });
 
@@ -4923,6 +4924,38 @@ class ReactorRuntime {
 		};
 	}
 
+	createOriginalEventHeader(event = null) {
+		const serialize = (event) => {
+			if (!event || typeof event !== 'object') {
+				return null;
+			}
+
+			const type = String(event.type || '').trim().toUpperCase();
+			if (!type) {
+				return null;
+			}
+
+			const serialized = {
+				type,
+				timestamp: String(event.timestamp || new Date().toISOString()),
+				data: event.data && typeof event.data === 'object' ? { ...event.data } : {},
+			};
+
+			if (event.originalEvent && typeof event.originalEvent === 'object') {
+				serialized.originalEvent = serialize(event.originalEvent);
+			}
+
+			return serialized;
+		};
+
+		const serialized = serialize(event);
+		if (!serialized) {
+			return '';
+		}
+
+		return JSON.stringify(serialized);
+	}
+
 	async sendNodeMessage(target, content, extraHeaders = {}, dispatchOptions = {}) {
 		const targetId = String(target || '').trim();
 		if (!targetId) {
@@ -4953,6 +4986,7 @@ class ReactorRuntime {
 				...endpointHeaders,
 				'Reactor-Name': reactorName,
 				'Reactor-Sender': senderId,
+				'Reactor-Sender-Node': reactorName,
 				'Reactor-Target-Node': reactorName,
 			};
 
@@ -5065,6 +5099,7 @@ class ReactorRuntime {
 					'content-type': contentType,
 					'Reactor-Name': reactorName || '',
 					'Reactor-Sender': senderId,
+					'Reactor-Sender-Node': reactorName || '',
 					...effectiveHeaders,
 				},
 				body: payload,
@@ -5135,10 +5170,14 @@ class ReactorRuntime {
 		const shouldEnqueueOnFail = options && options.noEnqueue
 			? false
 			: Boolean(options && options.enqueueOnFail);
+		const messageHeaders = {
+			...((options && options.messageHeaders && typeof options.messageHeaders === 'object') ? options.messageHeaders : {}),
+		};
 
 		try {
 			const result = await this.exchangeManager.sendViaExchange(target, content, {
 				enqueueOnFail: shouldEnqueueOnFail,
+				messageHeaders,
 			});
 			return {
 				...result,
@@ -5153,7 +5192,7 @@ class ReactorRuntime {
 			const queueResult = await this.enqueueMessageForRetry({
 				channel: 'exchange',
 				target: String(target || '').trim().toLowerCase(),
-				headers: {},
+				headers: messageHeaders,
 				payloadType: serialized.payloadType,
 				payload: serialized.payload,
 			});
@@ -5449,6 +5488,7 @@ class ReactorRuntime {
 		const exchangeDispatchOptions = {
 			enqueueOnFail: shouldEnqueueOnFail,
 			noEnqueue: true,
+			messageHeaders: safeOptions.headers && typeof safeOptions.headers === 'object' ? safeOptions.headers : {},
 		};
 		const safeChunkSize = Math.max(1024, Math.min(1024 * 1024, Number(safeOptions.chunkSize) || 64 * 1024));
 		const streamId = String(safeOptions.streamId || crypto.randomUUID());
@@ -5539,6 +5579,7 @@ class ReactorRuntime {
 					'content-length': String(body.length),
 					'Reactor-Name': reactorName || '',
 					'Reactor-Sender': senderId || '',
+					'Reactor-Sender-Node': reactorName || '',
 					...extraHeaders,
 				},
 			};
@@ -5563,6 +5604,7 @@ class ReactorRuntime {
 	}
 
 	createEndpointCoreApi(endpointName, envConfig = {}) {
+		let currentEndpointEvent = null;
 		const requestCtor = this.runtimeApi.HttpClient && this.runtimeApi.HttpClient.Request;
 		const sendRequest = this.runtimeApi.HttpClient && this.runtimeApi.HttpClient.sendRequest;
 		const envEntries = envConfig && typeof envConfig === 'object' && !Array.isArray(envConfig) ? envConfig : {};
@@ -6250,15 +6292,88 @@ class ReactorRuntime {
 
 		const normalizeEventPath = (rawPath) => normalizeWatchEventPath(rawPath);
 
+		class Sender {
+			constructor(endpoint = '', node = '') {
+				this.endpoint = String(endpoint || '').trim();
+				this.node = String(node || '').trim();
+				Object.freeze(this);
+			}
+
+			toString() {
+				return this.endpoint && this.node ? `${this.endpoint}@${this.node}` : '';
+			}
+		}
+
+		const readEventHeader = (headers = {}, name = '') => {
+			if (!headers || typeof headers !== 'object') {
+				return '';
+			}
+
+			const lowerName = String(name || '').trim().toLowerCase();
+			for (const [key, value] of Object.entries(headers)) {
+				if (String(key || '').trim().toLowerCase() === lowerName) {
+					return String(value || '').trim();
+				}
+			}
+
+			return '';
+		};
+
+		const createSender = (data = {}) => {
+			if (data.sender instanceof Sender) {
+				return data.sender;
+			}
+
+			const rawSender = data.sender && typeof data.sender === 'object' ? data.sender : null;
+			let endpoint = rawSender ? rawSender.endpoint : data.senderEndpoint;
+			let node = rawSender ? rawSender.node : data.senderNode;
+
+			if ((!endpoint || !node) && typeof data.sender === 'string') {
+				const senderText = String(data.sender || '').trim();
+				const atIndex = senderText.lastIndexOf('@');
+				if (atIndex > 0 && atIndex < senderText.length - 1) {
+					endpoint = endpoint || senderText.slice(0, atIndex);
+					node = node || senderText.slice(atIndex + 1);
+				}
+			}
+
+			return new Sender(endpoint || '', node || '');
+		};
+
 		class Event {
 			constructor(type, data = {}, timestamp = new Date().toISOString()) {
 				this.type = String(type || '').trim().toUpperCase();
-				this.data = data && typeof data === 'object' ? data : {};
+				const safeData = data && typeof data === 'object' ? { ...data } : {};
+				this.sender = createSender(safeData);
+				const originalEvent = safeData.originalEvent && typeof safeData.originalEvent === 'object'
+					? safeData.originalEvent
+					: null;
+				delete safeData.originalEvent;
+				this.data = safeData;
 				this.timestamp = String(timestamp || new Date().toISOString());
+				this.originalEvent = originalEvent;
 				Object.freeze(this.data);
 				Object.freeze(this);
 			}
 		}
+
+		const serializeReactorEvent = (event) => {
+			if (!event || typeof event !== 'object') {
+				return null;
+			}
+
+			const serialized = {
+				type: String(event.type || '').trim().toUpperCase(),
+				timestamp: String(event.timestamp || new Date().toISOString()),
+				data: event.data && typeof event.data === 'object' ? { ...event.data } : {},
+			};
+
+			if (event.originalEvent && typeof event.originalEvent === 'object') {
+				serialized.originalEvent = serializeReactorEvent(event.originalEvent);
+			}
+
+			return serialized.type ? serialized : null;
+		};
 
 		class WatchEvent extends Event {
 			constructor(data = {}, timestamp) {
@@ -6273,6 +6388,7 @@ class ReactorRuntime {
 					entryPath: normalizedEntryPath,
 					relativePath: resolvedRelativePath,
 					watchType: data.watchType || null,
+					originalEvent: data.originalEvent || null,
 				}, timestamp);
 			}
 
@@ -6303,6 +6419,7 @@ class ReactorRuntime {
 					bodyBase64: data.bodyBase64 || '',
 					json: data.json === undefined ? null : data.json,
 					headers: data.headers && typeof data.headers === 'object' ? data.headers : {},
+					originalEvent: data.originalEvent || null,
 				}, timestamp);
 			}
 		}
@@ -6322,14 +6439,15 @@ class ReactorRuntime {
 					json: data.json === undefined ? null : data.json,
 					headers: data.headers && typeof data.headers === 'object' ? data.headers : {},
 					stream: data.stream || null,
+					originalEvent: data.originalEvent || null,
 				}, timestamp);
 			}
 		}
 
 		class StreamEndEvent extends Event {
 			constructor(data = {}, timestamp) {
-				const resolvedTmpPath = String(
-					data.tmpPath
+				const resolvedTmpFilePath = String(
+					data.tmpFilePath
 					|| (
 						data.streamEnd && typeof data.streamEnd.getPath === 'function'
 							? data.streamEnd.getPath()
@@ -6357,17 +6475,14 @@ class ReactorRuntime {
 					json: data.json === undefined ? null : data.json,
 					headers: data.headers && typeof data.headers === 'object' ? data.headers : {},
 					metadata: resolvedMetadata,
-					tmpPath: resolvedTmpPath,
+					tmpFilePath: resolvedTmpFilePath,
 					streamEnd: data.streamEnd || null,
+					originalEvent: data.originalEvent || null,
 				}, timestamp);
 			}
 
 			get metadata() {
 				return this.data.metadata;
-			}
-
-			get tmpPath() {
-				return this.data.tmpPath;
 			}
 		}
 
@@ -6375,6 +6490,7 @@ class ReactorRuntime {
 			constructor(data = {}, timestamp) {
 				super('SCHEDULE', {
 					expression: data.expression || null,
+					originalEvent: data.originalEvent || null,
 				}, timestamp);
 			}
 		}
@@ -6384,6 +6500,7 @@ class ReactorRuntime {
 				super('EVENT', {
 					name: data.name || null,
 					networkChange: data.networkChange || null,
+					originalEvent: data.originalEvent || null,
 				}, timestamp);
 			}
 
@@ -6396,23 +6513,80 @@ class ReactorRuntime {
 			constructor(data = {}, timestamp) {
 				super('MANUAL_TEST', {
 					reason: data.reason || 'ON_DEMAND',
+					originalEvent: data.originalEvent || null,
 				}, timestamp);
 			}
 		}
+
+		const coerceEventInstance = (event) => {
+			if (!event || typeof event !== 'object') {
+				return null;
+			}
+
+			const data = event.data && typeof event.data === 'object' ? { ...event.data } : {};
+			if (event.originalEvent && typeof event.originalEvent === 'object') {
+				data.originalEvent = coerceEventInstance(event.originalEvent);
+			}
+
+			const timestamp = event.timestamp || undefined;
+			switch (String(event.type || '').trim().toUpperCase()) {
+				case 'WATCH':
+					return new WatchEvent(data, timestamp);
+				case 'MESSAGE':
+					return new MessageEvent(data, timestamp);
+				case 'STREAM':
+					return new StreamEvent(data, timestamp);
+				case 'STREAMEND':
+					return new StreamEndEvent(data, timestamp);
+				case 'SCHEDULE':
+					return new ScheduleEvent(data, timestamp);
+				case 'EVENT':
+					return new RuntimeEvent(data, timestamp);
+				case 'MANUAL_TEST':
+					return new ManualEvent(data, timestamp);
+				default:
+					return new Event(event.type || 'UNKNOWN', data, timestamp);
+			}
+		};
+
+		const originalEventFromHeaders = (headers = {}) => {
+			const rawOriginalEvent = headers && typeof headers === 'object'
+				? (headers['x-reactor-original-event'] || headers['X-Reactor-Original-Event'])
+				: '';
+			if (!rawOriginalEvent) {
+				return null;
+			}
+
+			try {
+				const parsed = typeof rawOriginalEvent === 'string'
+					? JSON.parse(rawOriginalEvent)
+					: rawOriginalEvent;
+				return coerceEventInstance(parsed);
+			} catch {
+				return null;
+			}
+		};
+
+		const withOriginalEvent = (data, context = {}) => {
+			const originalEvent = context.originalEvent || originalEventFromHeaders(context.messageHeaders || {});
+			return originalEvent ? { ...data, originalEvent } : data;
+		};
 
 		const createEventFromContext = (context = {}) => {
 			const trigger = String(context.trigger || '').trim().toUpperCase();
 			switch (trigger) {
 				case 'WATCH':
-					return new WatchEvent({
+					return new WatchEvent(withOriginalEvent({
 						watchPath: context.watchPath || '',
 						entryPath: context.watchEntryPath || '',
 						relativePath: context.watchRelativePath || '',
 						watchType: context.watchType || null,
-					});
+					}, context));
 				case 'MESSAGE':
-					return new MessageEvent({
+					return new MessageEvent(withOriginalEvent({
 						sender: context.messageSender || null,
+						senderEndpoint: readEventHeader(context.messageHeaders, 'reactor-sender-endpoint') || null,
+						senderNode: readEventHeader(context.messageHeaders, 'reactor-sender-node') || context.messageSenderName || null,
 						senderName: context.messageSenderName || null,
 						target: context.messageTarget || null,
 						targetNode: context.messageTargetNode || null,
@@ -6423,10 +6597,12 @@ class ReactorRuntime {
 						bodyBase64: context.messageBodyBase64 || '',
 						json: context.messageJson === undefined ? null : context.messageJson,
 						headers: context.messageHeaders || {},
-					});
+					}, context));
 				case 'STREAM':
-					return new StreamEvent({
+					return new StreamEvent(withOriginalEvent({
 						sender: context.messageSender || null,
+						senderEndpoint: readEventHeader(context.messageHeaders, 'reactor-sender-endpoint') || null,
+						senderNode: readEventHeader(context.messageHeaders, 'reactor-sender-node') || context.messageSenderName || null,
 						senderName: context.messageSenderName || null,
 						target: context.messageTarget || null,
 						targetNode: context.messageTargetNode || null,
@@ -6438,10 +6614,12 @@ class ReactorRuntime {
 						json: context.messageJson === undefined ? null : context.messageJson,
 						headers: context.messageHeaders || {},
 						stream: context.stream || null,
-					});
+					}, context));
 				case 'STREAMEND':
-					return new StreamEndEvent({
+					return new StreamEndEvent(withOriginalEvent({
 						sender: context.messageSender || null,
+						senderEndpoint: readEventHeader(context.messageHeaders, 'reactor-sender-endpoint') || null,
+						senderNode: readEventHeader(context.messageHeaders, 'reactor-sender-node') || context.messageSenderName || null,
 						senderName: context.messageSenderName || null,
 						target: context.messageTarget || null,
 						targetNode: context.messageTargetNode || null,
@@ -6455,24 +6633,24 @@ class ReactorRuntime {
 						metadata: context.streamEnd && typeof context.streamEnd.getMetadata === 'function'
 							? context.streamEnd.getMetadata()
 							: (context.streamEndMetadata || {}),
-						tmpPath: context.streamEnd && typeof context.streamEnd.getPath === 'function'
+						tmpFilePath: context.streamEnd && typeof context.streamEnd.getPath === 'function'
 							? context.streamEnd.getPath()
 							: (context.streamEndPath || null),
 						streamEnd: context.streamEnd || null,
-					});
+					}, context));
 				case 'SCHEDULE':
-					return new ScheduleEvent({
+					return new ScheduleEvent(withOriginalEvent({
 						expression: context.expression || null,
-					});
+					}, context));
 				case 'EVENT':
-					return new RuntimeEvent({
+					return new RuntimeEvent(withOriginalEvent({
 						name: context.event || null,
 						networkChange: context.networkChange || null,
-					});
+					}, context));
 				case 'MANUAL_TEST':
-					return new ManualEvent({
+					return new ManualEvent(withOriginalEvent({
 						reason: context.event || 'ON_DEMAND',
-					});
+					}, context));
 				default:
 					return new Event(trigger || 'UNKNOWN', {
 						...context,
@@ -6481,6 +6659,7 @@ class ReactorRuntime {
 		};
 
 		return {
+			Sender,
 			Event,
 			WatchEvent,
 			MessageEvent,
@@ -6490,6 +6669,9 @@ class ReactorRuntime {
 			RuntimeEvent,
 			ManualEvent,
 			__createEventFromContext: createEventFromContext,
+			__setCurrentEndpointEvent: (event) => {
+				currentEndpointEvent = event || null;
+			},
 			Node: {
 				getHomeDirectory: async () => {
 					if (!this.runtimeApi.System || typeof this.runtimeApi.System.getHomeDirectory !== 'function') {
@@ -6519,23 +6701,50 @@ class ReactorRuntime {
 						enqueueOnFail = Boolean(optionsOrEnqueueOnFail.enqueueOnFail);
 					}
 
-					return this.sendNodeMessage(target, content, headers, { enqueueOnFail });
+					const originalEventHeader = this.createOriginalEventHeader(currentEndpointEvent);
+					const effectiveHeaders = {
+						...headers,
+						'Reactor-Sender-Endpoint': endpointName,
+						...(originalEventHeader ? { 'X-Reactor-Original-Event': originalEventHeader } : {}),
+					};
+
+					return this.sendNodeMessage(target, content, effectiveHeaders, { enqueueOnFail });
 				},
 				stream: async (target, source, options = {}) => {
-					return this.streamToNode(target, source, options);
+					const safeOptions = options && typeof options === 'object' ? options : {};
+					return this.streamToNode(target, source, {
+						...safeOptions,
+						headers: {
+							...(safeOptions.headers || {}),
+							'Reactor-Sender-Endpoint': endpointName,
+						},
+					});
 				},
 				exchange: () => ({
 					sendMessage: async (target, content) => {
 						if (this.exchangeMode !== 'node') {
 							throw new Error('exchange routing is available only when REACTOR_WORKING_MODE=node');
 						}
-						return this.sendExchangeMessage(target, content);
+						const originalEventHeader = this.createOriginalEventHeader(currentEndpointEvent);
+						return this.sendExchangeMessage(target, content, {
+							messageHeaders: {
+								'Reactor-Sender-Endpoint': endpointName,
+								...(originalEventHeader ? { 'X-Reactor-Original-Event': originalEventHeader } : {}),
+							},
+						});
 					},
 					stream: async (target, source, options = {}) => {
 						if (this.exchangeMode !== 'node') {
 							throw new Error('exchange routing is available only when REACTOR_WORKING_MODE=node');
 						}
-						return this.streamToExchange(target, source, options);
+						const safeOptions = options && typeof options === 'object' ? options : {};
+						return this.streamToExchange(target, source, {
+							...safeOptions,
+							headers: {
+								...(safeOptions.headers || {}),
+								'Reactor-Sender-Endpoint': endpointName,
+							},
+						});
 					},
 				}),
 			},
@@ -7147,6 +7356,9 @@ class ReactorRuntime {
 					createEvent: typeof coreApi.__createEventFromContext === 'function'
 						? coreApi.__createEventFromContext
 						: null,
+					setCurrentEndpointEvent: typeof coreApi.__setCurrentEndpointEvent === 'function'
+						? coreApi.__setCurrentEndpointEvent
+						: null,
 					eventLogPath: path.join(path.dirname(normalizedEndpointPath), 'activity.log'),
 					run: runner,
 					schedule: metadata.schedule,
@@ -7406,6 +7618,9 @@ class ReactorRuntime {
 			const eventObject = endpoint && typeof endpoint.createEvent === 'function'
 				? endpoint.createEvent(context || {})
 				: { ...context };
+			if (endpoint && typeof endpoint.setCurrentEndpointEvent === 'function') {
+				endpoint.setCurrentEndpointEvent(eventObject);
+			}
 			await Promise.resolve(endpoint.run(eventObject));
 			this.log(`Completed ${endpoint.name}`);
 		} catch (error) {
@@ -7419,6 +7634,9 @@ class ReactorRuntime {
 				}
 			}
 		} finally {
+			if (endpoint && typeof endpoint.setCurrentEndpointEvent === 'function') {
+				endpoint.setCurrentEndpointEvent(null);
+			}
 			if (endpoint.mutex) {
 				endpoint.isRunning = false;
 			}

@@ -17,7 +17,7 @@ export async function run(event: Event) {
 	}
 
 	if (event instanceof StreamEndEvent) {
-		await log(`stream file=${event.tmpPath}`);
+		await log(`stream file=${event.data.tmpFilePath}`);
 		return;
 	}
 }
@@ -93,8 +93,10 @@ import { Event } from 'core';
 | Field | Type | Description |
 | --- | --- | --- |
 | `event.type` | `string` | Event discriminator. |
+| `event.sender` | `Sender` | Sender endpoint/node identity. `event.sender.endpoint` and `event.sender.node` are readonly strings; `event.sender.toString()` renders `endpoint@node` when both parts are available. |
 | `event.data` | `object` | Trigger-specific payload. |
 | `event.timestamp` | `string` | ISO timestamp. |
+| `event.originalEvent` | `Event \| null` | Event instance that caused this event to cross an endpoint boundary, when available. |
 
 ### `ScheduleEvent`
 
@@ -181,7 +183,7 @@ Created by `@on STREAMEND` after the runtime has assembled a streamed payload on
 | Field | Type | Description |
 | --- | --- | --- |
 | `event.metadata` | `Record<string, unknown>` | Sender-provided metadata. |
-| `event.tmpPath` | `string` | Temporary path of the assembled payload. |
+| `event.data.tmpFilePath` | `string` | Temporary path of the assembled payload. |
 | `event.data.streamEnd` | `StreamEndApi \| null` | Finalization helper object. |
 
 Typical stream finalization pattern:
@@ -193,7 +195,7 @@ export async function run(event: Event) {
 	if (!(event instanceof StreamEndEvent)) return;
 
 	const output = await FileSystem.File.open('/tmp/output.bin', { mode: 'write' });
-	const input = await FileSystem.File.open(event.tmpPath);
+	const input = await FileSystem.File.open(event.data.tmpFilePath);
 	await FileSystem.File.copyStream(input, output);
 }
 ```

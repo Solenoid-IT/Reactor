@@ -663,14 +663,30 @@ declare module 'core' {
 		[key: string]: unknown;
 	}
 
+	/** Sender identity for endpoint events. */
+	export class Sender {
+		/** Sender endpoint name. */
+		readonly endpoint: string;
+		/** Sender node name/id. */
+		readonly node: string;
+		/** Build a sender identity. */
+		constructor(endpoint?: string, node?: string);
+		/** Render as endpoint@node when both parts are available. */
+		toString(): string;
+	}
+
 	/** Base event class for all endpoint triggers. */
 	export class Event<TType extends string = string, TData extends EventData = EventData> {
 		/** Trigger type for this event. */
 		readonly type: TType;
+		/** Sender endpoint/node identity. */
+		readonly sender: Sender;
 		/** Event payload data. */
 		readonly data: TData;
 		/** Event timestamp in ISO format. */
 		readonly timestamp: string;
+		/** Event that caused this event to be emitted, when it crossed endpoint boundaries. */
+		readonly originalEvent: Event | null;
 		/** Build a generic event instance. */
 		constructor(type: TType, data?: TData, timestamp?: string);
 	}
@@ -703,6 +719,10 @@ declare module 'core' {
 	export interface MessageEventData extends EventData {
 		/** Sender routing identity when available. */
 		sender: string | null;
+		/** Sender endpoint name when available. */
+		senderEndpoint: string | null;
+		/** Sender node name/id when available. */
+		senderNode: string | null;
 		/** Sender display name when available. */
 		senderName: string | null;
 		/** Raw target expression. */
@@ -748,7 +768,7 @@ declare module 'core' {
 		/** Sender-provided metadata snapshot. */
 		metadata: Record<string, unknown>;
 		/** Temporary path of assembled stream payload. */
-		tmpPath: string;
+		tmpFilePath: string;
 		/** Finalization helper object. */
 		streamEnd: StreamEndApi | null;
 	}
@@ -759,8 +779,6 @@ declare module 'core' {
 		constructor(data?: Partial<StreamEndEventData>, timestamp?: string);
 		/** Sender-provided metadata snapshot. */
 		readonly metadata: Record<string, unknown>;
-		/** Temporary path of assembled stream payload. */
-		readonly tmpPath: string;
 	}
 
 	/** Payload of a SCHEDULE event. */
