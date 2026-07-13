@@ -122,6 +122,17 @@ if (response.statusCode >= 400)
 }
 ```
 
+## Sekrypt: compute tenant hash
+
+```ts
+import { FileSystem, Sekrypt } from 'core';
+
+const tenantUuid = '8f2fe11b-01cf-4f6f-9662-2dd95f6fc2c7';
+const stream = await FileSystem.File.open('/tmp/inbox/report.bin');
+
+const hash = await Sekrypt.tenantHash(tenantUuid, stream);
+```
+
 ## System: portable base path
 
 ```ts

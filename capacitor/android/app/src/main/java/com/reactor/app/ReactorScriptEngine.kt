@@ -15,6 +15,7 @@ interface ReactorScriptOps {
     fun fsDelete(path: String): Boolean
     fun fsList(path: String, recursive: Boolean): String
     fun fsCalcSize(path: String): Long
+    fun tenantHash(filePath: String, tenantUuid: String): String
     fun encryptFile(filePath: String, publicKey: String): String
     fun decryptFile(filePath: String, crypto: String, privateKey: String): String
     fun nodeStream(target: String, filePath: String, meta: String): String
@@ -548,6 +549,27 @@ var __reactorCore = {
         }
     },
     Sekrypt: {
+        tenantHash: function (tenantUuid, file) {
+            var safeTenantUuid = String(tenantUuid == null ? '' : tenantUuid).trim();
+            if (!safeTenantUuid) {
+                throw new Error('Tenant UUID is required to compute tenant hash');
+            }
+
+            var filePath = (file && file.__path) ? String(file.__path) : String(file == null ? '' : file);
+            var result = __native.tenantHash(filePath, safeTenantUuid);
+            var payload = {};
+            try {
+                payload = JSON.parse(result || '{}');
+            } catch (e) {
+                throw new Error('Sekrypt.tenantHash failed: invalid native response');
+            }
+
+            if (!payload.ok) {
+                throw new Error(payload.error || 'Sekrypt.tenantHash failed');
+            }
+
+            return String(payload.hash || '');
+        },
         encodeCrypto: function (crypto) {
             var json = JSON.stringify(crypto);
             var bytes = __encodeUtf8(json);

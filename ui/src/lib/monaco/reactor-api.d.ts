@@ -291,6 +291,18 @@ declare module 'core' {
 
 	/** Sekrypt helpers exposed to endpoint scripts. */
 	export interface SekryptApi {
+		/** Build deterministic tenant-aware SHA-256 hash from tenant UUID and file content. */
+		tenantHash(
+			tenantUuid: string,
+			file:
+				| { arrayBuffer(): Promise<ArrayBuffer> }
+				| Uint8Array
+				| ArrayBuffer
+				| ArrayBufferView
+				| AsyncIterable<Uint8Array | Buffer | string>
+				| ReadableStream<Uint8Array>
+				| NodeJS.ReadableStream,
+		): Promise<string>;
 		/** Encrypt a readable stream using a public RSA key. */
 		encryptFile(
 			content: AsyncIterable<Uint8Array | Buffer | string> | ReadableStream<Uint8Array> | NodeJS.ReadableStream,

@@ -6353,6 +6353,42 @@ public class ReactorHttpService extends Service {
         }
     }
 
+            @Override public String tenantHash(String filePath, String tenantUuid) {
+                try {
+                    String safePath = String.valueOf(filePath == null ? "" : filePath).trim();
+                    String safeTenantUuid = String.valueOf(tenantUuid == null ? "" : tenantUuid).trim();
+
+                    if (safePath.isEmpty()) {
+                        throw new IllegalArgumentException("file path is required");
+                    }
+                    if (safeTenantUuid.isEmpty()) {
+                        throw new IllegalArgumentException("tenant UUID is required");
+                    }
+
+                    File sourceFile = new File(safePath);
+                    if (!sourceFile.exists() || !sourceFile.isFile()) {
+                        throw new IllegalArgumentException("source file not found");
+                    }
+
+                    byte[] plainBytes = Files.readAllBytes(sourceFile.toPath());
+
+                    MessageDigest fileDigest = MessageDigest.getInstance("SHA-256");
+                    byte[] fileDigestBytes = fileDigest.digest(plainBytes);
+
+                    String source = safeTenantUuid + bytesToHex(fileDigestBytes);
+                    MessageDigest tenantDigest = MessageDigest.getInstance("SHA-256");
+                    byte[] tenantDigestBytes = tenantDigest.digest(source.getBytes(StandardCharsets.UTF_8));
+
+                    JSONObject response = new JSONObject();
+                    response.put("ok", true);
+                    response.put("hash", bytesToHex(tenantDigestBytes));
+                    return response.toString();
+                } catch (Exception error) {
+                    String message = error.getMessage() != null ? error.getMessage() : "tenant hash failed";
+                    return "{\"ok\":false,\"error\":" + JSONObject.quote(message) + "}";
+                }
+            }
+
     private String resolveMobileHomePath() {
         try {
             String external = Environment.getExternalStorageDirectory().getAbsolutePath();

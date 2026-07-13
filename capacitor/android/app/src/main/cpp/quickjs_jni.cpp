@@ -28,6 +28,7 @@ static jmethodID fsStatMethod = nullptr;
 static jmethodID fsDeleteMethod = nullptr;
 static jmethodID fsListMethod = nullptr;
 static jmethodID fsCalcSizeMethod = nullptr;
+static jmethodID tenantHashMethod = nullptr;
 static jmethodID encryptFileMethod = nullptr;
 static jmethodID decryptFileMethod = nullptr;
 static pthread_mutex_t opsLock = PTHREAD_MUTEX_INITIALIZER;
@@ -561,6 +562,44 @@ static JSValue nativeEncryptFile(JSContext *ctx, JSValueConst this_val, int argc
     return ret;
 }
 
+static JSValue nativeTenantHash(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_NewString(ctx, "{\"ok\":false,\"error\":\"invalid args\"}");
+
+    JNIEnv *env = getJniEnv();
+    if (!env || !opsObject || !tenantHashMethod) {
+        LOGE("nativeTenantHash: Missing JNI context");
+        return JS_NewString(ctx, "{\"ok\":false,\"error\":\"native unavailable\"}");
+    }
+
+    pthread_mutex_lock(&opsLock);
+
+    const char *filePath = JS_ToCString(ctx, argv[0]);
+    const char *tenantUuid = JS_ToCString(ctx, argv[1]);
+    jstring result = NULL;
+
+    if (filePath && tenantUuid) {
+        jstring jfilePath = env->NewStringUTF(filePath);
+        jstring jtenantUuid = env->NewStringUTF(tenantUuid);
+        result = (jstring)env->CallObjectMethod(opsObject, tenantHashMethod, jfilePath, jtenantUuid);
+        env->DeleteLocalRef(jfilePath);
+        env->DeleteLocalRef(jtenantUuid);
+    }
+
+    const char *result_str = result ? env->GetStringUTFChars(result, NULL) : "{\"ok\":false,\"error\":\"tenant hash failed\"}";
+    JSValue ret = JS_NewString(ctx, result_str ? result_str : "{\"ok\":false,\"error\":\"tenant hash failed\"}");
+
+    if (result && result_str) {
+        env->ReleaseStringUTFChars(result, result_str);
+        env->DeleteLocalRef(result);
+    }
+
+    if (filePath) JS_FreeCString(ctx, filePath);
+    if (tenantUuid) JS_FreeCString(ctx, tenantUuid);
+
+    pthread_mutex_unlock(&opsLock);
+    return ret;
+}
+
 static JSValue nativeDecryptFile(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     if (argc < 3) return JS_NewString(ctx, "{\"ok\":false,\"error\":\"invalid args\"}");
 
@@ -778,6 +817,9 @@ Java_com_reactor_app_QuickJsWrapper_registerNativeOps(JNIEnv *env, jobject thiz,
     fsCalcSizeMethod = env->GetMethodID(opsClass, "fsCalcSize", "(Ljava/lang/String;)J");
     if (!fsCalcSizeMethod) LOGE("Missing method: fsCalcSize");
 
+    tenantHashMethod = env->GetMethodID(opsClass, "tenantHash", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+    if (!tenantHashMethod) LOGE("Missing method: tenantHash");
+
     encryptFileMethod = env->GetMethodID(opsClass, "encryptFile", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
     if (!encryptFileMethod) LOGE("Missing method: encryptFile");
 
@@ -805,6 +847,7 @@ Java_com_reactor_app_QuickJsWrapper_registerNativeOps(JNIEnv *env, jobject thiz,
     JS_SetPropertyStr(ctx, nativeObj, "fsDelete", JS_NewCFunction(ctx, nativeFsDelete, "fsDelete", 1));
     JS_SetPropertyStr(ctx, nativeObj, "fsList", JS_NewCFunction(ctx, nativeFsList, "fsList", 2));
     JS_SetPropertyStr(ctx, nativeObj, "fsCalcSize", JS_NewCFunction(ctx, nativeFsCalcSize, "fsCalcSize", 1));
+    JS_SetPropertyStr(ctx, nativeObj, "tenantHash", JS_NewCFunction(ctx, nativeTenantHash, "tenantHash", 2));
     JS_SetPropertyStr(ctx, nativeObj, "encryptFile", JS_NewCFunction(ctx, nativeEncryptFile, "encryptFile", 2));
     JS_SetPropertyStr(ctx, nativeObj, "decryptFile", JS_NewCFunction(ctx, nativeDecryptFile, "decryptFile", 3));
     

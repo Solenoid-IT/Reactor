@@ -6034,6 +6034,10 @@ class ReactorRuntime {
 			return out;
 		};
 
+		const bytesToHex = (bytes) => Array.from(bytes)
+			.map((byte) => byte.toString(16).padStart(2, '0'))
+			.join('');
+
 		const decodePemContent = (pem, kind = 'key') => {
 			const stripped = String(pem || '')
 				.replace(/-----BEGIN [^-]+-----/g, '')
@@ -6109,6 +6113,49 @@ class ReactorRuntime {
 			}
 
 			return merged;
+		};
+
+		const readAllBytesFromFileLike = async (fileLike) => {
+			if (fileLike == null) {
+				throw new Error('Sekrypt.tenantHash requires a file');
+			}
+
+			if (
+				fileLike
+				&& typeof fileLike === 'object'
+				&& typeof fileLike.arrayBuffer === 'function'
+			) {
+				const buffer = await fileLike.arrayBuffer();
+				return new Uint8Array(buffer);
+			}
+
+			if (fileLike instanceof Uint8Array) {
+				return fileLike;
+			}
+
+			if (fileLike instanceof ArrayBuffer) {
+				return new Uint8Array(fileLike);
+			}
+
+			if (ArrayBuffer.isView(fileLike)) {
+				return new Uint8Array(fileLike.buffer, fileLike.byteOffset, fileLike.byteLength);
+			}
+
+			if (
+				typeof fileLike === 'object'
+				&& (
+					typeof fileLike.getReader === 'function'
+					|| typeof fileLike[Symbol.asyncIterator] === 'function'
+				)
+			) {
+				return readAllBytesFromStream(fileLike);
+			}
+
+			if (typeof fileLike === 'string') {
+				return new TextEncoder().encode(fileLike);
+			}
+
+			throw new Error('Sekrypt.tenantHash requires a File, stream or byte-like input');
 		};
 
 		const buildSingleChunkStream = (bytes) => ({
@@ -6227,6 +6274,25 @@ class ReactorRuntime {
 		const encryptionFacade = {
 			encodeCrypto: (cryptoValue) => encodeCryptoPayload(cryptoValue),
 			decodeCrypto: (cryptoValue) => decodeCryptoPayload(cryptoValue),
+			tenantHash: async (tenantUuid, file) => {
+				const safeTenantUuid = String(tenantUuid || '').trim();
+				if (!safeTenantUuid) {
+					throw new Error('Tenant UUID is required to compute tenant hash');
+				}
+
+				const cryptoApi = resolveWebCrypto();
+				const subtle = cryptoApi.subtle;
+
+				const fileBytes = await readAllBytesFromFileLike(file);
+				const fileDigest = await subtle.digest('SHA-256', fileBytes);
+
+				const source = new TextEncoder().encode(
+					`${safeTenantUuid}${bytesToHex(new Uint8Array(fileDigest))}`,
+				);
+				const digest = await subtle.digest('SHA-256', source);
+
+				return bytesToHex(new Uint8Array(digest));
+			},
 			encryptFile: async (stream, publicKey) => {
 				const cryptoApi = resolveWebCrypto();
 				const subtle = cryptoApi.subtle;
