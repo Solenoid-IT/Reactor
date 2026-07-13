@@ -15,6 +15,7 @@ const {
 	NotifyAdapter,
 	ProcessAdapter,
 } = require('./runtimeApiContracts');
+const { inferMimeTypeFromPath } = require('./mimeType');
 const { withDefaultUserAgent } = require('./httpUserAgent');
 
 function getChunkByteLength(chunk) {
@@ -149,6 +150,7 @@ class NodeFile extends FileAdapter {
 			return {
 				path: this.filePath,
 				size: stats.size,
+				mimeType: inferMimeTypeFromPath(this.filePath),
 				mTime: normalizeEpochSeconds(stats.mtimeMs),
 				cTime: normalizeEpochSeconds(stats.ctimeMs),
 				exists: true,

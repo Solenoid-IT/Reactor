@@ -134,6 +134,8 @@ declare module 'core' {
 		exists: boolean;
 		/** File size in bytes, when available. */
 		size?: number;
+		/** MIME type inferred by platform/runtime or file extension. */
+		mimeType?: string;
 		/** Last modification time in epoch seconds. */
 		mTime?: number;
 		/** Creation time in epoch seconds, when available. */

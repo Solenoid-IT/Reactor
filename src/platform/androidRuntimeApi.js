@@ -10,6 +10,7 @@ const {
 	NotifyAdapter,
 	ProcessAdapter,
 } = require('./runtimeApiContracts');
+const { inferMimeTypeFromPath } = require('./mimeType');
 const { withDefaultUserAgent } = require('./httpUserAgent');
 
 let androidAppInfoPromise = null;
@@ -334,10 +335,14 @@ class AndroidFile extends FileAdapter {
 		try {
 			const out = await plugins.Filesystem.stat({ path: this.filePath });
 			const size = Number(out && out.size);
+			const nativeMimeType = out && typeof out === 'object'
+				? String(out.mimeType || out.mime || out.contentType || '').trim()
+				: '';
 			return {
 				path: this.filePath,
 				exists: true,
 				size: Number.isFinite(size) && size >= 0 ? size : undefined,
+				mimeType: nativeMimeType || inferMimeTypeFromPath(this.filePath),
 				mTime: resolveMetaTimeSeconds(out, 'mTime'),
 				cTime: resolveMetaTimeSeconds(out, 'cTime'),
 			};
